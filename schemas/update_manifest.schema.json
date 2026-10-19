@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/update_manifest.schema.json",
+  "title": "업데이트 매니페스트 (latest.json)",
+  "description": "GitHub Release 자산 latest.json 의 형식. 분리 서명 latest.json.minisig(minisign, Ed25519)와 함께 올라가고, 앱은 서명이 맞는 이 파일의 값만 믿는다. 같은 manifest_version 안에서는 필드 추가만 하며 앱은 모르는 키를 무시한다. 검증 순서와 각 필드의 검사는 docs/design/04-update-and-release.md 5장, 구현은 app/updater.py parse_manifest·evaluate. 이 스키마는 문서용이며 앱은 jsonschema 를 쓰지 않는다(S-29).",
+  "type": "object",
+  "required": ["manifest_version", "app", "version", "published_at", "min_supported", "mandatory", "label_schema_version", "guide_versions", "notes_ko", "deps", "assets"],
+  "properties": {
+    "manifest_version": {"type": "integer", "const": 1, "description": "이 형식의 버전. 앱이 아는 값보다 크면 자동 업데이트 대신 '수동 업데이트 필요'."},
+    "app": {"const": "StreamLabeler", "description": "다르면 거부."},
+    "version": {"$ref": "#/$defs/semver", "description": "새 버전. 설치본보다 커야 한다. 같거나 작으면 '최신' 으로 무시(다운그레이드 방지)."},
+    "published_at": {"type": "string", "format": "date-time", "pattern": "Z$|[+-][0-9]{2}:[0-9]{2}$", "description": "매니페스트를 만든 시각(ISO 8601, 시간대 필수). 설치본 build_info.built_at 보다 이르면 거부."},
+    "min_supported": {"$ref": "#/$defs/semver", "description": "이보다 낮은 앱은 '업데이트 필요' 모드."},
+    "mandatory": {"type": "boolean", "description": "true 면 '이 버전 건너뛰기' 를 숨기고 시작할 때마다 알린다."},
+    "label_schema_version": {"type": "integer", "minimum": 1, "description": "이 버전이 쓰는 라벨 형식. 설치본과 다르면 대화상자에 경고."},
+    "guide_versions": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 32}, "description": "이 버전이 지원하는 기준서 버전 목록."},
+    "notes_ko": {"type": "string", "maxLength": 8192, "description": "한국어 릴리스 노트(일반 텍스트). 앱은 링크를 열지 않는다(S-18)."},
+    "deps": {
+      "type": "object",
+      "description": "번들 의존성의 상류 태그와 아카이브 sha256. 로컬 _internal/deps.txt 와 모두 같을 때만 경량 zip 을 받는다.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["tag", "sha256"],
+        "properties": {"tag": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}}
+      }
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "full 과 lite 가 정확히 하나씩.",
+      "items": {
+        "type": "object",
+        "required": ["kind", "name", "size", "sha256", "url", "unpacked_size", "file_count"],
+        "properties": {
+          "kind": {"enum": ["full", "lite"]},
+          "name": {"type": "string", "pattern": "^StreamLabeler-v[0-9]+\\.[0-9]+\\.[0-9]+-win64(-update)?\\.zip$", "description": "StreamLabeler-v{version}-win64.zip 또는 …-win64-update.zip 과 같아야 한다."},
+          "size": {"type": "integer", "minimum": 1, "maximum": 2147483647, "description": "바이트 수. 받은 크기와 정확히 같아야 한다."},
+          "sha256": {"$ref": "#/$defs/sha256"},
+          "url": {"type": "string", "pattern": "^https://github\\.com/vtubeadmirer/streamlabeler/releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/StreamLabeler-v[0-9]+\\.[0-9]+\\.[0-9]+-win64(-update)?\\.zip$", "description": "글자 그대로 규칙과 같아야 한다(호스트 화이트리스트)."},
+          "unpacked_size": {"type": "integer", "minimum": 1, "maximum": 2147483648, "description": "zip 항목 크기 합과 같아야 한다(zip 폭탄 방지)."},
+          "file_count": {"type": "integer", "minimum": 1, "maximum": 3000, "description": "zip 파일 항목 수와 같아야 한다."}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "semver": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -892,7 +892,7 @@ sequenceDiagram
 
 | 항목 | 목표 | 근거 | 측정 |
 |---|---|---|---|
-| 시작 → 창 표시 | SSD 2초, HDD 4초 이하 | WebEngine·yt-dlp import 가 없다. 확인 필요 | 로그의 '시작'·'창 표시' 시각 차 |
+| 시작 → 창 표시 | SSD 2초, HDD 4초 이하 | WebEngine·yt-dlp import 가 없다. 확인 필요 | 로그의 '시작'·'창 표시' 시각 차. **M0 첫 측정(2026-10-20, 빈 창 v0.0.1, test 빌드, SSD, 한글 임시 폴더)**: main.py 진입 → 창 표시 0.93초(로그), exe 실행 → 창 표시 로그까지 외부 측정은 아래 M0 측정 표 |
 | 프로젝트 열기 | 3초 이하 (색인 캐시가 있으면 1초) | JSON 줄 파싱 추정. 확인 필요 | 벤치 |
 | 채팅 메모리 | 20만 건 100MB 이하 | 병렬 배열. 확인 필요 | tracemalloc |
 | 재생 위치 → 채팅 하이라이트 | 평균 16ms, 최악 100ms 이하 | 정렬된 시각 배열 + bisect | 벤치 |
@@ -904,8 +904,20 @@ sequenceDiagram
 | 파형 (8시간) | 60초 이하, 백그라운드 | 실측 1시간 3.7초 | 로그 |
 | 무음 탐지 (8시간) | 60초 이하, 백그라운드 | 실측 1시간 3.8초 | 로그 |
 | 채팅 수집 (20만 건) | 5~7분 | 요청당 200건, 응답 70~210ms + 요청 간 지연 100~200ms. 확인 필요 | 로그 |
-| 설치 크기 | 약 420MB | ClipSlicer 실측(678MB)에서 WebEngine 225MB 등을 뺀 추정 | 첫 빌드 |
-| 전체 zip / 경량 zip | 165~185MB / 35~45MB | 압축률 0.42 가정 | 첫 빌드 |
+| 설치 크기 | 약 420MB | ClipSlicer 실측(678MB)에서 WebEngine 225MB 등을 뺀 추정 | **M0 첫 측정: 391MB, 파일 74개** (빈 창. libmpv 121MB + ffmpeg 약 100MB + Qt Core/Gui/Widgets) |
+| 전체 zip / 경량 zip | 165~185MB / 35~45MB | 압축률 0.42 가정 | **M0 첫 측정: 161.1MB / 34.7MB** (압축 해제 410MB / 87MB. 둘 다 추정 범위 안) |
+
+M0 첫 측정 표 (2026-10-20, 빈 창 v0.0.1 → v0.0.2, `-Channel test`, `tools/update_roundtrip.py`, SSD, `%TEMP%\테스트 문서\`):
+
+| 항목 | 값 | 비고 |
+|---|---|---|
+| 설치 폴더 | 391MB, 74개 파일 | PySide6-Essentials 중 Core·Gui·Widgets 만. QtSvg 는 import 하지 않아 번들되지 않음 |
+| 전체 zip / 경량 zip | 161.1MB / 34.7MB | zipfile DEFLATE 6 |
+| exe 실행 → 창 표시 | 0.78~1.03초 (디스크 캐시 있음) | 외부 타이머. 창이 뜬 뒤 로그 줄이 보일 때까지라 약간 과대. 목표(SSD 2초) 안 |
+| main.py 진입 → 창 표시 | 0.77~0.93초 | 로그 '창 표시: 시작 후 N ms'. PyInstaller 부트로더·Python 초기화는 빠진 값 |
+| `--selftest` 전체(창 없음) | 2.8초 | 10개 항목, ffmpeg·ffprobe 실행과 libmpv 로드 포함 |
+| 경량 업데이트: 확인 → 다운로드·해시·zip 검사·해제·자체 점검 → 교체 스크립트 시작 확인 → 앱 종료 | 약 4초 (전체 zip 161MB 는 약 6초) | 127.0.0.1 가짜 서버라 네트워크 시간은 빠짐 |
+| 앱 종료 → robocopy 백업·교체 → `--updated` 재실행 창 표시 | 약 7초 | `_backup` 복사 포함(경량은 ffmpeg·libmpv 제외해 87MB). 전체 왕복 경량 약 13초, 전체 약 16초 |
 
 구현 규칙 (어기면 목표를 못 맞춘다):
 
@@ -994,7 +1006,9 @@ sequenceDiagram
 
 이 점검은 두 곳에서 쓴다. ① release.yml 이 빌드 직후 한글 폴더에서(`tools/ci_selftest.py`). ② 업데이터가 교체 직전, 준비 폴더의 새 exe 로 `--expect-version` 과 `--data-dir _update\<id>\selftest-data` 를 붙여서(제한 90초). 통과해야만 교체 스크립트를 띄운다. 깨진 빌드가 폴더를 덮어쓰는 사고를 교체 전에 막는다. 실패한 준비 폴더는 원인 분석용으로 1개만 남긴다(크기 상한). 상세는 [04-update-and-release.md](04-update-and-release.md).
 
-`-Channel test` 빌드끼리 앱 안 업데이트를 시험할 때(04 12-5) 업데이터 관문의 `channel` 항목을 어떻게 다룰지는 확인 필요다. 04 는 관문에 `channel == "release"` 를 넣고, 같은 문서 12-5 는 시험 채널 빌드 A → B 업데이트를 시험한다.
+`-Channel test` 빌드끼리 앱 안 업데이트를 시험할 때(04 12-5)의 `channel` 항목은 M0 구현에서 이렇게 정했다: 점검에 `--expect-channel` 인자를 두고, 업데이터 관문은 **지금 실행 중인 설치본의 채널**을 넘긴다(test → test, release → release). CI 의 `tools/ci_selftest.py` 는 `--expect-channel release` 를 준다. 인자가 없으면 frozen 빌드는 `release` 여야 한다. 그래서 test 빌드가 release 사본을 덮는 일은 관문이 막고, test 끼리의 시험 업데이트는 통과한다.
+
+경량 zip 에는 ffmpeg·libmpv 가 없어 준비 폴더의 새 exe 로 점검하면 `ffmpeg`·`libmpv` 항목이 실패한다. 그래서 `stage` 가 설치본 `_internal\` 의 두 항목을 준비 폴더에 하드링크(같은 볼륨, 안 되면 복사)한 뒤 점검한다. 교체 스크립트는 어차피 이 두 경로를 `/XD`·`/XF` 로 뺀다 (M0 구현에서 발견해 추가).
 
 ### 11-4. 앱 밖 검증 도구
 

@@ -591,8 +591,9 @@ SmartScreen: 코드 서명이 없어 첫 실행 때 'Windows의 PC 보호' 가 �
 
 ### 9-1. 도구
 
-- minisign 형식 Ed25519 키쌍. 생성·서명은 `tools/sign_manifest.py`(py-minisign) 또는 공식 `minisign` CLI 로 한다. 두 도구의 형식이 호환된다고 보지만, py-minisign 의 암호 보호 키 생성 API 는 확인 필요다.
-- 앱의 검증은 py-minisign(순수 Python)으로 한다. 번들에 C 확장이 늘지 않는다.
+- minisign 형식 Ed25519 키쌍. 생성·서명은 `tools/sign_manifest.py`(PyNaCl = libsodium, 비밀키는 minisign 과 같은 scrypt 암호화 형식) 또는 공식 `minisign` CLI 로 한다. 공식 CLI 와 서로 만든 서명을 서로 검증하는 시험은 아직 하지 않았다(확인 필요).
+- 앱의 검증은 `app/minisign.py` — 표준 라이브러리만 쓰는 Ed25519(RFC 8032) 검증기다. 번들에 C 확장이 늘지 않는다.
+  - 2026-10-20 정정: 설계 때 '순수 Python' 으로 본 py-minisign 은 `cryptography`(C 확장)에 의존한다. 검증기는 신뢰의 뿌리라 200여 줄의 읽을 수 있는 코드로 직접 두고, RFC 8032 벡터와 libsodium 이 만든 서명으로 대조하는 테스트(`tests/test_minisign.py`)를 둔다. 검증 규칙은 libsodium 과 같다(S < L, 정규 인코딩, 작은 위수 거부, 여인자 없음).
 
 ### 9-2. 생성 — 첫 빌드 전에 한 번
 

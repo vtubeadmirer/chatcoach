@@ -1,6 +1,6 @@
 # StreamLabeler (가칭)
 
-상태: 설계 초안 (2026-10-19) · 아직 구현되지 않음 · 실행 파일 없음
+상태: M0 '빈 껍데기와 배포 경로' 구현 중 (2026-10-20) · 라벨링 기능 없음 · 공개 릴리스 없음
 
 사람이 치지직 VOD 영상과 채팅 로그를 보며 정답 라벨을 매기는 Windows 포터블 도구다. 이 정답으로 방송 분석 엔진(AI)이 얼마나 정확한지 잰다.
 
@@ -50,20 +50,33 @@
 - 설치 위치: OneDrive 밖 사용자 폴더(예: `%LOCALAPPDATA%\Programs\StreamLabeler`)를 권장한다. 이유는 [05](docs/design/05-security.md)에 있다.
 - 코드 서명이 없어 첫 실행 때 Windows SmartScreen 경고가 뜬다.
 
-## 개발 시작 (예정 — 아직 동작하지 않음)
+## 개발 시작
 
-의존성 파일 `requirements.in`(최상위 의존성만)·`requirements.lock`(전이 의존성까지 고정. M0 는 버전, M4 부터 해시 포함)과 `main.py` 는 아직 없다 ([02](docs/design/02-architecture.md) 4장, [04](docs/design/04-update-and-release.md) 4-4). 생기면 아래 순서로 실행한다. 잠금 파일에 해시가 들어간 뒤로는 pip 가 해시를 검사한다.
+의존성은 `requirements.in`(최상위만) → `requirements.lock`(전이 의존성까지 버전·해시 고정, `tools\lock_deps.ps1` 로 생성) 이다. 설치는 항상 잠금 파일로 하고 pip 가 해시를 검사한다 ([04](docs/design/04-update-and-release.md) 4-4).
 
 ```powershell
 py -3.12 -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -r requirements.lock
+python -m pip install pip==25.2
+pip install --require-hashes -r requirements.lock
+python tools\get_ffmpeg.py      # bin\ffmpeg\  (SHA-256 고정값과 비교)
+python tools\get_libmpv.py      # bin\libmpv-2.dll (7-Zip·Bandizip 또는 py7zr 로 해제)
+python tools\make_icon.py       # assets\icon.ico
 python main.py
 ```
 
+- 테스트: `python -m pytest -q -m "not local_only"` (CI 와 같음). 실제 robocopy·PowerShell 로 교체를 시험하는 `local_only` 묶음은 `tools\release.ps1` 이 릴리스 전에 돌린다.
+- 시험 빌드: `.\build.ps1 -DistPath dist_test -Channel test` (PyInstaller onedir, 약 365MB). 실제 배포 빌드는 CI 가 `-Channel release` 로 만든다.
+- 업데이트 왕복 시험(가짜 릴리스 서버): `tools\fake_release_server.py` 와 `tools\update_roundtrip.py` 의 머리 주석을 본다.
+- 주의: PySide6 메타 패키지와 PySide6-Essentials 를 같은 venv 에서 바꿔 끼우면 공용 파일(`PySide6\__init__.py`)이 지워진다. 그때는 `pip install --force-reinstall --no-deps --require-hashes -r requirements.lock`.
+
 라벨·채팅·영상은 개인정보가 들어 있어 저장소에 올리지 않는다. `.gitignore` 가 `data/` · `projects/` · `*.jsonl` 등을 이미 제외한다.
+
+## 릴리스와 서명
+
+버전은 저장소 루트 `VERSION` 한 파일이 정한다(`tools\sync_version.py` 가 `app\__init__.py` 와 매니페스트를 생성). 릴리스는 `tools\release.ps1` → GitHub Actions(빌드·초안 릴리스) → 개발 PC 에서 `tools\publish_release.py check` → `tools\sign_manifest.py sign`(오프라인 minisign 키, 암호 입력) → `upload-sig` → `publish` → `make-latest` 순서다 ([04](docs/design/04-update-and-release.md) 4장·13장). 앱은 내장 공개키 K1·K2 로 서명이 맞는 `latest.json` 만 믿고, 서명이 없거나 틀리면 거부한다. 공개키는 `app\appspec.py` 에 있다(첫 공개 릴리스 전에 키 ID 를 여기와 `docs/install.md` 에도 적는다).
 
 ## 이름과 라이선스
 
-- StreamLabeler 는 가칭이다. 저장소 이름(`vtubeadmirer/streamlabeler` 예정, 로컬 저장소에 원격이 아직 연결되지 않음)과 폴더 이름도 바뀔 수 있다.
-- 라이선스: 미정. 함께 묶을 예정인 ffmpeg·libmpv·Qt 의 라이선스 고지(GPL/LGPL)도 같이 정해야 한다 — 확인 필요.
+- 이름은 StreamLabeler, 저장소는 `vtubeadmirer/streamlabeler`(공개)로 정했다 (2026-10-20, [07](docs/design/07-roadmap.md) 질문 3·4). 로컬 저장소에 원격은 아직 연결되지 않았다.
+- 라이선스: 앱 코드는 [MIT](LICENSE). 함께 묶는 Qt(LGPL)·ffmpeg(GPL)·libmpv(GPL) 의 고지는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 에 있다. 첫 공개 릴리스 전에 배포자가 '확인 필요' 항목을 확인한다 (07 질문 31).
