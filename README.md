@@ -74,7 +74,12 @@ python main.py
 
 ## 릴리스와 서명
 
-버전은 저장소 루트 `VERSION` 한 파일이 정한다(`tools\sync_version.py` 가 `app\__init__.py` 와 매니페스트를 생성). 릴리스는 `tools\release.ps1` → GitHub Actions(빌드·초안 릴리스) → 개발 PC 에서 `tools\publish_release.py check` → `tools\sign_manifest.py sign`(오프라인 minisign 키, 암호 입력) → `upload-sig` → `publish` → `make-latest` 순서다 ([04](docs/design/04-update-and-release.md) 4장·13장). 앱은 내장 공개키 K1·K2 로 서명이 맞는 `latest.json` 만 믿고, 서명이 없거나 틀리면 거부한다. 공개키는 `app\appspec.py` 에 있다(첫 공개 릴리스 전에 키 ID 를 여기와 `docs/install.md` 에도 적는다).
+버전은 저장소 루트 `VERSION` 한 파일이 정한다(`tools\sync_version.py` 가 `app\__init__.py` 와 매니페스트를 생성). 릴리스는 `tools\release.ps1` → GitHub Actions(빌드·초안 릴리스) → 개발 PC 에서 `tools\publish_release.py check` → `tools\sign_manifest.py sign`(오프라인 minisign 키, 암호 입력) → `upload-sig` → `publish` → `make-latest` 순서다 ([04](docs/design/04-update-and-release.md) 4장·13장). 앱은 내장 공개키 K1·K2 로 서명이 맞는 `latest.json` 만 믿고, 서명이 없거나 틀리면 거부한다. 공개키는 `app\appspec.py` 에 있고, 손으로 확인할 때는 `minisign -Vm latest.json -P <공개키>` 또는 `python tools\sign_manifest.py verify latest.json` 을 쓴다 (04 8장).
+
+| 키 | 키 ID | 공개키 (minisign) |
+|---|---|---|
+| K1 (운용) | `F0DA83E17841C95C` | `RWRcyUF44YPa8Bfo4jqfCXr/dSMQlH853FAHFR5U58miyChvUp/iC0gp` |
+| K2 (예비) | `7297CBEEF96A118F` | `RWSPEWr57suXcry8hkMgzUrqbh2tgeod3EiIJ/YGKa1NbwwrG0QA5B5u` |
 
 ## 이름과 라이선스
 

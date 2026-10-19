@@ -44,8 +44,12 @@ class PublicKey:
 # 비어 있으면: 업데이트 확인은 '공개키 없음' 으로 실패하고, release 채널 자체 점검(pubkeys)이 실패한다.
 # 그래서 공개키 없는 빌드는 CI 를 통과하지 못한다 (fail-closed).
 #
-# 아직 비어 있다: 사용자가 `python tools\sign_manifest.py keygen` 으로 K1·K2 를 만든 뒤 .pub 파일의 둘째 줄을 여기에 붙인다.
-UPDATE_PUBKEYS: tuple[PublicKey, ...] = ()
+# 2026-10-20 생성 (tools/sign_manifest.py keygen). 키 ID: K1 F0DA83E17841C95C · K2 7297CBEEF96A118F.
+# 비밀키·암호는 저장소 밖에만 있다. 키를 바꾸는 절차는 04 9-4 (분실·유출 때만, 정기 교체 없음).
+UPDATE_PUBKEYS: tuple[PublicKey, ...] = (
+    PublicKey("K1", "RWRcyUF44YPa8Bfo4jqfCXr/dSMQlH853FAHFR5U58miyChvUp/iC0gp"),
+    PublicKey("K2", "RWSPEWr57suXcry8hkMgzUrqbh2tgeod3EiIJ/YGKa1NbwwrG0QA5B5u"),
+)
 
 
 @dataclass(frozen=True)

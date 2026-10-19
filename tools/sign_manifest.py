@@ -1,7 +1,7 @@
 """latest.json 의 minisign 서명 — 키 생성 · 서명 · 검증 (개발 PC 전용, docs/design/04-update-and-release.md 9장).
 
 사용:
-  python tools/sign_manifest.py keygen [--dir %LOCALAPPDATA%\\StreamLabeler-signing] [--label K1]
+  python tools/sign_manifest.py keygen [--dir %LOCALAPPDATA%\\StreamLabeler-signing] [--label K1] [--password-file <파일>]
   python tools/sign_manifest.py sign latest.json [--key <비밀키 파일>] [--out latest.json.minisig]
   python tools/sign_manifest.py verify latest.json [--sig latest.json.minisig] [--pubkey <파일 또는 base64 줄>]
   python tools/sign_manifest.py verify --url https://github.com/<repo>/releases/latest/download/latest.json
@@ -184,6 +184,18 @@ def _read_pubkeys(arg: str | None) -> list[tuple[str, str]]:
 
 
 # --------------------------------------------------------------------------- 명령
+def read_password_file(path: str) -> str:
+    """암호 파일(첫 줄, UTF-8, BOM·끝 공백 제거). 저장소·OneDrive 안이면 거부. 내용은 절대 출력하지 않는다."""
+    problem = key_path_problem(path)
+    if problem:
+        raise SystemExit(f"거부: 암호 파일 위치 — {problem}: {path}")
+    with open(path, encoding="utf-8-sig") as f:
+        pw = f.readline().rstrip("\r\n")
+    if not pw:
+        raise SystemExit(f"암호 파일이 비어 있습니다: {path}")
+    return pw
+
+
 def cmd_keygen(a) -> int:
     problem = key_path_problem(a.dir)
     if problem:
@@ -197,6 +209,8 @@ def cmd_keygen(a) -> int:
         return 2
     if a.no_password:
         pw = None
+    elif a.password_file:
+        pw = read_password_file(a.password_file)
     else:
         pw = getpass.getpass(f"{a.label} 비밀키 암호: ")
         if not pw:
@@ -257,7 +271,12 @@ def cmd_sign(a) -> int:
         return 2
     with open(key_path, encoding="utf-8") as f:
         text = f.read()
-    pw = None if "unencrypted" in text.splitlines()[0] else getpass.getpass("비밀키 암호: ")
+    if "unencrypted" in text.splitlines()[0]:
+        pw = None
+    elif a.password_file:
+        pw = read_password_file(a.password_file)
+    else:
+        pw = getpass.getpass("비밀키 암호: ")
     kp = load_secret_key(text, pw)
     comment = SPEC.trusted_comment(version)
     sig = sign_bytes(data, kp, comment)
@@ -307,12 +326,14 @@ def main(argv=None) -> int:
     k.add_argument("--dir", default=DEFAULT_DIR)
     k.add_argument("--label", default="K1")
     k.add_argument("--no-password", action="store_true", help="시험용. 실제 키에는 쓰지 않는다")
+    k.add_argument("--password-file", help="암호를 이 파일의 첫 줄에서 읽는다 (터미널 입력이 안 될 때. 저장소·OneDrive 밖이어야 함)")
     k.set_defaults(fn=cmd_keygen)
     s = sub.add_parser("sign", help="latest.json 서명")
     s.add_argument("manifest")
     s.add_argument("--key")
     s.add_argument("--out")
     s.add_argument("--pubkey", help="검증에 쓸 공개키 (기본: appspec 내장 키)")
+    s.add_argument("--password-file", help="암호를 이 파일의 첫 줄에서 읽는다")
     s.set_defaults(fn=cmd_sign)
     v = sub.add_parser("verify", help="서명 검증")
     v.add_argument("manifest", nargs="?")
