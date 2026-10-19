@@ -872,9 +872,11 @@ def stage_in_use(stage_dir: str) -> bool:
 
 def keep_one_failed_stage(root: str, keep: str) -> None:
     """자체 점검에 실패한 준비 폴더를 1개만 남긴다 (04 6-6). 사용 중인 다른 폴더는 건드리지 않는다."""
+    keep_key = os.path.normcase(os.path.abspath(keep))
     for name in os.listdir(root):
         p = os.path.join(root, name)
-        if p != keep and name.startswith(STAGE_PREFIX) and os.path.isdir(p) and not stage_in_use(p):
+        if os.path.normcase(os.path.abspath(p)) != keep_key and name.startswith(STAGE_PREFIX) and os.path.isdir(p) \
+                and not stage_in_use(p):
             shutil.rmtree(p, ignore_errors=True)
     try:
         with open(os.path.join(keep, FAILED_MARKER), "w", encoding="utf-8") as f:
@@ -978,11 +980,13 @@ foreach ($f in $required) {{
 }}
 # 제외 목록: 전체 경로. 이름만 주면 _internal 안의 같은 이름 폴더까지 빠진다
 $xd = @({", ".join('(Join-Path $App "' + k + '")' for k in keep)})
-$xf = @()
-if ($Lite) {{ $xd += @({", ".join('(Join-Path $App "' + d + '")' for d in heavy_dirs)}); $xf += {_ps_array(heavy_names)}; Log "경량 교체: ffmpeg\\, libmpv-2.dll 유지" }}
-function Mirror($src, $dst) {{
+# 경량 교체에서만, 교체 단계에서만 뺀다. 백업·복구는 이전 버전 전체 사본이어야 한다 (04 6-8 5단계)
+$liteXd = @({", ".join('(Join-Path $App "' + d + '")' for d in heavy_dirs)})
+$liteXf = {_ps_array(heavy_names)}
+if ($Lite) {{ Log "경량 교체: ffmpeg\\, libmpv-2.dll 유지" }}
+function Mirror($src, $dst, $useLite) {{
   $rcArgs = @($src, $dst, "/MIR", "/XD") + $xd
-  if ($xf.Count -gt 0) {{ $rcArgs += "/XF"; $rcArgs += $xf }}
+  if ($useLite) {{ $rcArgs += $liteXd; $rcArgs += "/XF"; $rcArgs += $liteXf }}
   $rcArgs += @("/NFL", "/NDL", "/NJH", "/NJS", "/R:2", "/W:1")
   & robocopy @rcArgs | Out-Null
   return $LASTEXITCODE
@@ -991,17 +995,17 @@ function Mirror($src, $dst) {{
 $backupRc = -1
 if (-not $NoBackup) {{
   Log "백업 -> $backup"
-  $backupRc = Mirror $App $backup
+  $backupRc = Mirror $App $backup $false
   if ($backupRc -ge 8) {{ Log "백업 실패 rc=$backupRc"; Finish "backup_failed" $backupRc -1 -1 "--update-failed"; exit 1 }}
   $at = Get-Date -Format "yyyy-MM-ddTHH:mm:ssK"
   Set-Content -LiteralPath (Join-Path $updDir "backup_ok.json") -Value ('{{"version":"' + $FromVer + '","at":"' + $at + '"}}') -Encoding Ascii
 }}
 # 7. 교체
 Log "교체 $New -> $App"
-$copyRc = Mirror $New $App
+$copyRc = Mirror $New $App $Lite
 if ($copyRc -ge 8) {{
   Log "교체 실패 rc=$copyRc -> 백업에서 복구"
-  $restoreRc = Mirror $backup $App
+  $restoreRc = Mirror $backup $App $false
   if ($restoreRc -ge 8) {{ Log "복구도 실패 rc=$restoreRc"; Finish "restore_failed" $backupRc $copyRc $restoreRc "--update-failed"; exit 1 }}
   Finish "copy_failed" $backupRc $copyRc $restoreRc "--update-failed"
   exit 1
@@ -1125,15 +1129,25 @@ class RobocopyApplier:
         app = self.installed.app_dir
         lock = write_updating_lock(self.data_root, os.getpid(), self.installed.version, staged.release.version)
         script = os.path.join(staged.stage_dir, "replace.ps1")
-        write_replacer(script, self.spec)
-        cmd = replacer_command(script, app, staged.new_dir, staged.stage_id, self.spec.exe_name, os.getpid(),
-                               self.installed.version, staged.release.version, staged.lite)
-        LOG.info("교체 스크립트 실행: %s", " ".join(cmd))
         out_path = os.path.join(staged.stage_dir, "replacer.out")
-        with open(out_path, "wb") as out:
-            # 숨긴 콘솔 + 새 프로세스 그룹: 앱이 종료돼도 살아남고 창은 안 뜬다 (DETACHED_PROCESS 는 powershell 이 못 뜸)
-            proc = subprocess.Popen(cmd, creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP, close_fds=False,
-                                    stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, cwd=app)
+        try:
+            write_replacer(script, self.spec)
+            cmd = replacer_command(script, app, staged.new_dir, staged.stage_id, self.spec.exe_name, os.getpid(),
+                                   self.installed.version, staged.release.version, staged.lite)
+            LOG.info("교체 스크립트 실행: %s", " ".join(cmd))
+            with open(out_path, "wb") as out:
+                # 숨긴 콘솔 + 새 프로세스 그룹: 앱이 종료돼도 살아남고 창은 안 뜬다 (DETACHED_PROCESS 는 powershell 이 못 뜸)
+                proc = subprocess.Popen(cmd, creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP, close_fds=False,
+                                        stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, cwd=app)
+        except OSError as ex:
+            # powershell 이 없거나 스크립트를 쓸 수 없음: 잠금을 남기면 2분 동안 앱이 '적용 중' 으로 닫힌다
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
+            LOG.error("교체 스크립트를 띄우지 못함: %s", ex)
+            raise UpdateError("blocked", f"이 PC 에서는 자동 교체가 막혀 있습니다 (PowerShell 을 실행할 수 없음: {ex}). "
+                                         "수동 업데이트 안내를 따라 주세요.") from ex
         marker = os.path.join(staged.stage_dir, "started")
         deadline = time.monotonic() + self.spec.replacer_start_wait_sec
         while time.monotonic() < deadline:

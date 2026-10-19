@@ -12,7 +12,8 @@ import base64
 import re
 from dataclasses import dataclass
 
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# ASCII 숫자만, 끝 줄바꿈 불허 ($ 는 끝 줄바꿈 앞에서도 맞고 \d 는 유니코드 숫자도 받는다)
+VERSION_RE = re.compile(r"\A[0-9]+\.[0-9]+\.[0-9]+\Z")
 
 
 @dataclass(frozen=True)

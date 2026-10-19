@@ -101,7 +101,10 @@ class _State:
             self.manifest = f.read()
         self.version = sm.manifest_version(self.manifest)
         sig_path = os.path.join(folder, "latest.json.minisig")
-        self.sig = open(sig_path, "rb").read() if os.path.isfile(sig_path) else None
+        self.sig = None
+        if os.path.isfile(sig_path):
+            with open(sig_path, "rb") as f:
+                self.sig = f.read()
         self.kp = _load_key(key) if key else None
         if mode in ("old_version", "old_published"):
             if not self.kp:

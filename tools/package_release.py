@@ -83,7 +83,7 @@ def main(argv=None) -> int:
     if built != a.version:
         raise SystemExit(f"빌드된 VERSION({built})이 --version({a.version})과 다릅니다")
     os.makedirs(a.out, exist_ok=True)
-    is_tag = bool(re.match(r"^v\d+\.\d+\.\d+$", a.ref or ""))
+    is_tag = bool(re.match(r"\Av[0-9]+\.[0-9]+\.[0-9]+\Z", a.ref or ""))
     if a.ref and not is_tag:
         label = f"dev-{(a.sha or 'unknown')[:7]}"
         names = {"full": f"{SPEC.name}-{label}-win64.zip", "lite": f"{SPEC.name}-{label}-win64-update.zip"}
