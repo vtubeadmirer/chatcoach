@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/ai-result.schema.json",
+  "title": "AI 분석 결과 가져오기 형식 (ai-result)",
+  "description": "분석 엔진이 방송 1편에 대해 낸 결과. StreamLabeler 는 1차 세션이 잠긴 프로젝트에서, 검토자(reviewer) 세션으로만 이 파일을 가져온다(블라인드, 안내서 원칙 3). 가져온 파일은 프로젝트 폴더가 아니라 <앱>\\data\\ai\\<project_id>\\<run_id>.json 에 복사한다. 엔진이 내지 않는 종류는 배열을 빼면 된다. 채팅은 chat_id(sl-chat-id-v1 공개 규칙)로 맞춘다. 비교 지표는 docs/design/06-evaluation-and-agreement.md. 설계 문서: docs/design/03-data-model.md 17장.",
+  "type": "object",
+  "required": ["schema", "schema_version", "run_id", "created_at", "engine", "target", "time_axis"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "streamlabeler/ai-result"},
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", "description": "엔진 실행 ID. 파일 이름에 쓰이므로 영문·숫자·_.- 만."},
+    "created_at": {"type": "string", "format": "date-time"},
+    "engine": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "version": {"type": "string", "minLength": 1, "maxLength": 40},
+        "components": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "엔진이 쓴 전처리 모델. 라벨링 도구의 참고 자료(VAD·ASR)와 같으면 보고서에 '공유 전처리' 경고를 낸다.",
+          "properties": {
+            "vad": {"type": ["string", "null"], "maxLength": 80},
+            "asr": {"type": ["string", "null"], "maxLength": 80},
+            "ocr": {"type": ["string", "null"], "maxLength": 80},
+            "other": {"type": ["string", "null"], "maxLength": 200}
+          }
+        },
+        "config_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$", "description": "엔진 임계값 설정 파일 해시(사전 등록한 설정과 같은지 확인)."},
+        "preregistered": {"type": ["boolean", "null"], "description": "라벨링 전에 설정을 사전 등록했는지."}
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["platform", "video_no", "chat_id_algorithm"],
+      "additionalProperties": false,
+      "properties": {
+        "platform": {"const": "chzzk"},
+        "video_no": {"type": "string", "pattern": "^[0-9]{1,12}$", "description": "project.json broadcast.video_no 와 같아야 한다."},
+        "chat_id_algorithm": {"const": "sl-chat-id-v1"},
+        "messages_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$", "description": "엔진이 쓴 chat/messages.jsonl 의 해시(내보내기로 받았다면). 프로젝트 값과 다르면 경고하고, 없는 chat_id 는 건수로 보고한다."}
+      }
+    },
+    "time_axis": {"enum": ["vod_ms", "media_ms"], "description": "결과 시각의 기준. vod_ms = 치지직 playerMessageTime 축(권장), media_ms = 엔진이 분석한 영상 파일 시각(media 블록 필수, 가져올 때 프로젝트 보정값으로 바꾼다)."},
+    "media": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "time_axis 가 media_ms 일 때 엔진이 분석한 파일. 부분 지문이 프로젝트 영상과 다르면 가져오기를 거부한다.",
+      "required": ["partial_fp"],
+      "properties": {
+        "partial_fp": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "project.schema.json mediaRef.partial_fp 와 같은 방식의 부분 지문."},
+        "note": {"type": "string", "maxLength": 300}
+      }
+    },
+    "segments": {
+      "type": "array",
+      "description": "활동 구간 예측.",
+      "items": {
+        "type": "object",
+        "required": ["start_ms", "end_ms", "category"],
+        "additionalProperties": false,
+        "properties": {
+          "start_ms": {"type": "integer"},
+          "end_ms": {"type": "integer"},
+          "category": {"enum": ["just_chatting", "game", "singing", "other", "undeterminable"]},
+          "score": {"type": ["number", "null"]}
+        }
+      }
+    },
+    "reactions": {
+      "type": "array",
+      "description": "채팅별 반응 예측. 채팅 하나에 한 줄.",
+      "items": {
+        "type": "object",
+        "required": ["chat_id", "result"],
+        "additionalProperties": false,
+        "properties": {
+          "chat_id": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$"},
+          "result": {"enum": ["graded", "unconfirmed"], "description": "graded = 반응 후보가 있음, unconfirmed = 반응 없음."},
+          "grade": {"enum": ["direct", "likely", "related_only", "unclear", null]},
+          "reaction_time_ms": {"type": ["integer", "null"], "description": "예측한 반응 시각."},
+          "utterance_start_ms": {"type": ["integer", "null"]},
+          "utterance_end_ms": {"type": ["integer", "null"]},
+          "score": {"type": ["number", "null"], "description": "엔진 점수(있으면). 임계값 곡선 분석에 쓴다."}
+        }
+      }
+    },
+    "continuations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["chat_id", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "chat_id": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$"},
+          "type": {"enum": ["none", "short", "extended", "new_topic"]},
+          "span_start_ms": {"type": ["integer", "null"]},
+          "span_end_ms": {"type": ["integer", "null"]},
+          "score": {"type": ["number", "null"]}
+        }
+      }
+    },
+    "missed_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["chat_id", "is_candidate"],
+        "additionalProperties": false,
+        "properties": {
+          "chat_id": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$"},
+          "is_candidate": {"type": "boolean"},
+          "reason_code": {"enum": ["A", "B", "C", "D", "E", "F", "G", null]},
+          "score": {"type": ["number", "null"]}
+        }
+      }
+    },
+    "origins": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["chat_id", "origin"],
+        "additionalProperties": false,
+        "properties": {
+          "chat_id": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$"},
+          "origin": {"enum": ["real", "virtual", "undeterminable"]},
+          "score": {"type": ["number", "null"]}
+        }
+      }
+    }
+  },
+  "if": {"properties": {"time_axis": {"const": "media_ms"}}, "required": ["time_axis"]},
+  "then": {"required": ["media"], "properties": {"media": {"type": "object"}}}
+}

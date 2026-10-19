@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/guide-config.schema.json",
+  "title": "기준서 시작값 설정 (guide-config)",
+  "description": "라벨링 안내서의 숫자(시작값)와 증거 강도 표를 담는 파일 형식. 기본값 파일은 assets/guide-config.v0.1.json 이고, 프로젝트에 기준서 버전을 붙일 때 values 를 project.json 의 guides[].thresholds 로 그대로 복사한다(스냅샷). 시간은 사람이 고치기 쉽게 초 단위로 적고 프로그램 안에서 ms 로 바꾼다. null 은 '안내서에 숫자가 없음(미정)' 이며, 프로그램은 null 인 값에 기대는 자동 제안을 하지 않는다. 설계 문서: docs/design/03-data-model.md 9장.",
+  "type": "object",
+  "required": ["schema", "schema_version", "guide_version", "guide_doc", "guide_doc_sha256", "effective_date", "change_log", "values"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "streamlabeler/guide-config",
+      "description": "파일 종류 표시. 다른 JSON 과 섞였을 때 구분하는 용도."
+    },
+    "schema_version": {
+      "const": 1,
+      "description": "이 설정 파일 형식의 버전(정수). 키를 더하거나 빼면 올린다."
+    },
+    "guide_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+(-[a-z0-9]+)?$",
+      "description": "이 시작값이 속한 기준서 버전. 예: \"0.1\", 시범용 초안 \"0.2-draft\"(03 9-2 규칙 8). 값 하나라도 바꾸면 기준서 버전을 올리거나 change_log 에 개정 기록을 남겨야 한다."
+    },
+    "guide_doc": {
+      "type": "string",
+      "minLength": 1,
+      "description": "기준서 마크다운 파일의 저장소 기준 상대 경로. 예: docs/labeling-guide/v0.1.md"
+    },
+    "guide_doc_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "기준서 마크다운 파일 바이트의 SHA-256(소문자 16진수). 같은 버전 번호인데 본문이 바뀐 경우를 잡는다."
+    },
+    "effective_date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+      "description": "기준서 작성·적용 기준일. 예: 2026-10-18"
+    },
+    "change_log": {
+      "type": "array",
+      "description": "이전 버전 대비 바뀐 항목과 이유(안내서 8장). v0.1 은 빈 배열.",
+      "items": {
+        "type": "object",
+        "required": ["item", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "item": {"type": "string", "minLength": 1, "description": "바뀐 키 또는 안내서 절. 예: reaction.time_window_sec"},
+          "before": {"description": "이전 값(숫자·문자열·null 등)."},
+          "after": {"description": "새 값."},
+          "reason": {"type": "string", "minLength": 1, "description": "바꾼 이유. 시범 라벨링 수치를 함께 적는다."}
+        }
+      }
+    },
+    "values": {"$ref": "#/$defs/values"}
+  },
+  "$defs": {
+    "values": {
+      "type": "object",
+      "description": "시작값 묶음. 이 객체를 정규화(키 정렬, 공백 없음, UTF-8, NaN 금지)한 JSON 의 SHA-256 이 thresholds_sha256 이고, 라벨마다 앞 12자리(thresholds_sha12)가 기록된다. 일치도 허용 오차 같은 분석 설정은 기준서 시작값이 아니라 여기 두지 않는다(eval_settings, docs/design/06-evaluation-and-agreement.md 10장 D13, 03 9-3).",
+      "required": ["segment", "reaction", "evidence_strength", "continuation", "sample", "missed", "recheck", "relabel", "pilot", "origin"],
+      "additionalProperties": false,
+      "properties": {
+        "segment": {
+          "type": "object",
+          "description": "안내서 3장 활동 구간.",
+          "required": ["silence_keep_max_sec", "song_interlude_merge_max_sec", "long_silence_review_sec", "boundary_buffer_sec", "min_length_sec"],
+          "additionalProperties": false,
+          "properties": {
+            "silence_keep_max_sec": {"type": "number", "minimum": 1, "maximum": 600, "description": "대화 중 이보다 짧은 침묵은 활동 유지(3장 표 저스트채팅). v0.1 시작값 30."},
+            "song_interlude_merge_max_sec": {"type": "number", "minimum": 1, "maximum": 600, "description": "곡 사이 이보다 짧은 멘트는 노래에 포함, 넘으면 저스트채팅으로 분리(3장 표 노래). v0.1 시작값 60."},
+            "long_silence_review_sec": {"type": "number", "minimum": 10, "maximum": 3600, "description": "잡담 화면에서 이 시간 이상 침묵하면 '재검토 신호' 를 표시한다. 분류를 자동으로 바꾸지 않는다(검토 의견 2). v0.1 시작값 120."},
+            "boundary_buffer_sec": {"type": "number", "minimum": 0, "maximum": 120, "description": "활동 전환 시각의 앞과 뒤 각각 이 시간만큼을 경계 완충으로 두고 채팅 반응 평가에서 뺀다. v0.1 시작값 10(양쪽 각 10초로 해석)."},
+            "min_length_sec": {"type": "number", "minimum": 1, "maximum": 600, "description": "이보다 짧은 구간은 앞이나 뒤 구간에 합치도록 제안한다. v0.1 시작값 30."}
+          }
+        },
+        "reaction": {
+          "type": "object",
+          "description": "안내서 4-1, 4-2 채팅 반응 등급 규칙.",
+          "required": ["time_window_sec", "direct_min_strong", "likely_min_medium", "similar_chat_window_sec"],
+          "additionalProperties": false,
+          "properties": {
+            "time_window_sec": {"type": "number", "minimum": 1, "maximum": 300, "description": "채팅이 화면에 뜬 뒤 이 시간 안의 반응을 '시간 창 안 반응' 증거로 본다. v0.1 시작값 20."},
+            "direct_min_strong": {"type": "integer", "minimum": 1, "maximum": 3, "description": "직접 반응에 필요한 강한 증거 수. v0.1 시작값 1."},
+            "likely_min_medium": {"type": "integer", "minimum": 1, "maximum": 3, "description": "연결 가능성 높음에 필요한 중간 증거 수(강한 증거 0개일 때). 이보다 적으면 관련성만 있음. v0.1 시작값 2."},
+            "similar_chat_window_sec": {"type": ["number", "null"], "minimum": 1, "maximum": 600, "description": "'같은 시간대에 비슷한 다른 채팅' 을 찾는 창 길이. 안내서 v0.1 에 숫자가 없어 null(미정). null 이면 유사 채팅 후보를 자동으로 나열하지 않는다."}
+          }
+        },
+        "evidence_strength": {
+          "type": "object",
+          "description": "증거 종류별 강도(안내서 4-1 표). gate 는 '증거로 세지 않고, 벗어나면 높은 등급을 막는 조건' 이며 v0.1 에서는 쓰지 않는다.",
+          "required": ["nickname_called", "text_repeated", "direct_reference", "answer_form", "unique_content", "within_time_window", "same_topic"],
+          "additionalProperties": false,
+          "properties": {
+            "nickname_called": {"$ref": "#/$defs/strength", "description": "닉네임을 부름. v0.1: strong."},
+            "text_repeated": {"$ref": "#/$defs/strength", "description": "채팅 문구를 읽거나 거의 그대로 되풀이. v0.1: strong."},
+            "direct_reference": {"$ref": "#/$defs/strength", "description": "채팅을 직접 가리키는 말. v0.1: strong."},
+            "answer_form": {"$ref": "#/$defs/strength", "description": "질문에 맞는 답의 형태. v0.1: medium."},
+            "unique_content": {"$ref": "#/$defs/strength", "description": "채팅에만 있던 구체적 내용이 발화에 등장. v0.1: medium."},
+            "within_time_window": {"$ref": "#/$defs/strength", "description": "채팅이 화면에 뜬 뒤 time_window_sec 안에 반응. v0.1: medium."},
+            "same_topic": {"$ref": "#/$defs/strength", "description": "같은 주제만 있음. v0.1: weak."}
+          }
+        },
+        "continuation": {
+          "type": "object",
+          "description": "안내서 4-3 이어짐. '이어지지 않음 = 한두 문장' 은 숫자가 아니라 서술이라 여기 두지 않는다.",
+          "required": ["short_max_sec", "extended_min_other_chats"],
+          "additionalProperties": false,
+          "properties": {
+            "short_max_sec": {"type": "number", "minimum": 1, "maximum": 3600, "description": "같은 주제가 이보다 짧게 이어지면 짧게 이어짐, 이상이면 확장됨. v0.1 시작값 60."},
+            "extended_min_other_chats": {"type": "integer", "minimum": 1, "maximum": 50, "description": "다른 시청자 채팅이 이 개수 이상 같은 주제로 이어지면 확장됨. v0.1 시작값 3."}
+          }
+        },
+        "sample": {
+          "type": "object",
+          "description": "안내서 2장 3단계 무작위 표본(sha256-tau-v1, docs/design/06-evaluation-and-agreement.md 2장). 적격 채팅이 census_max 이하이면 전부(전수)를 쓴다.",
+          "required": ["per_segment", "census_max", "max_extend_ratio"],
+          "additionalProperties": false,
+          "properties": {
+            "per_segment": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "저스트채팅 구간당 표본 수(임계 키 τ 를 정하는 n). v0.1 시작값 100."},
+            "census_max": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "적격 채팅(경계 완충·후원·구독·시스템을 뺀 일반 채팅)이 이 수 이하이면 전수. per_segment 보다 작게 두지 않는다. v0.1 시작값 100(안내서 2장). 120 은 v0.2 후보(06 2-3)."},
+            "max_extend_ratio": {"type": "number", "minimum": 0, "maximum": 10, "description": "실제 시청자 표본 보충(τ_real, v1) 상한. per_segment 의 이 배수까지만 판정 큐에 보탠다(06 2-4). 시작값 0.5(안내서에 없는 새 값)."}
+          }
+        },
+        "missed": {
+          "type": "object",
+          "description": "안내서 6장 놓친 채팅 후보.",
+          "required": ["min_visible_sec", "max_chat_rate_per_10s", "visible_lines", "prior_handling_window_sec"],
+          "additionalProperties": false,
+          "properties": {
+            "min_visible_sec": {"type": "number", "minimum": 1, "maximum": 300, "description": "조건 ② 화면에 이 시간 이상 보임. v0.1 시작값 10."},
+            "max_chat_rate_per_10s": {"type": ["integer", "null"], "minimum": 1, "maximum": 10000, "description": "조건 ② '채팅이 너무 빠르게 올라감' 의 기준(직전 10초 채팅 수). 안내서에 숫자가 없어 null(미정). null 이면 보조값만 표시하고 사유 B 를 자동 제안하지 않는다."},
+            "visible_lines": {"type": ["integer", "null"], "minimum": 1, "maximum": 200, "description": "노출 시간 추정에 쓰는 '채팅창에 보이는 줄 수' 가정. 안내서에 없음, null(미정·확인 필요)."},
+            "prior_handling_window_sec": {"type": "number", "minimum": 1, "maximum": 3600, "description": "조건 ④ 앞뒤 이 시간 안에 같은 내용을 이미 다뤘는지 본다. v0.1 시작값 120."}
+          }
+        },
+        "recheck": {
+          "type": "object",
+          "description": "안내서 7-2 영상 재확인.",
+          "required": ["pre_roll_sec", "post_roll_sec", "min_views_direct_likely"],
+          "additionalProperties": false,
+          "properties": {
+            "pre_roll_sec": {"type": "number", "minimum": 0, "maximum": 300, "description": "확인 범위 시작: 채팅이 화면에 뜨기 이 시간 전부터. v0.1 시작값 10."},
+            "post_roll_sec": {"type": "number", "minimum": 0, "maximum": 600, "description": "확인 범위 끝: 반응 후보 발화가 끝난 이 시간 뒤까지. v0.1 시작값 30."},
+            "min_views_direct_likely": {"type": "integer", "minimum": 1, "maximum": 5, "description": "직접 반응·연결 가능성 높음 라벨이 완료되려면 필요한 영상 확인 횟수. v0.1 시작값 2."}
+          }
+        },
+        "relabel": {
+          "type": "object",
+          "description": "안내서 7-3 일관성 확인용 재라벨링.",
+          "required": ["fraction_min", "fraction_max", "min_interval_days", "unit", "block_minutes", "random_share", "hard_share", "enforce_interval"],
+          "additionalProperties": false,
+          "properties": {
+            "fraction_min": {"type": "number", "minimum": 0.01, "maximum": 1, "description": "재라벨 비율 하한. v0.1 시작값 0.20."},
+            "fraction_max": {"type": "number", "minimum": 0.01, "maximum": 1, "description": "재라벨 비율 상한. v0.1 시작값 0.30."},
+            "min_interval_days": {"type": "number", "minimum": 0, "maximum": 365, "description": "원 라벨 잠금 뒤 재라벨을 시작할 수 있는 최소 일수. v0.1 시작값 3."},
+            "unit": {"enum": ["segment", "block"], "description": "재라벨 대상 단위. segment = 활동 구간(안내서 v0.1 문구 그대로), block = 일정 길이 시간 블록(구간 경계까지 다시 매김, v0.2 초안 후보)."},
+            "block_minutes": {"type": ["number", "null"], "minimum": 1, "maximum": 120, "description": "unit 이 block 일 때 블록 길이(분). unit 이 segment 이면 null."},
+            "random_share": {"type": "number", "minimum": 0, "maximum": 1, "description": "재라벨 대상 중 무작위 층 비율(후보 블록 전체 대비). 일치도 대표값에 쓴다(06 3-2). 시작값 0.15(안내서에 없는 새 값)."},
+            "hard_share": {"type": "number", "minimum": 0, "maximum": 1, "description": "어려움 층 비율(v1, 진단용이라 대표값에 섞지 않는다, 06 3-2). random_share + hard_share 는 fraction_min~fraction_max 안에 둔다. 시작값 0.10(안내서에 없는 새 값)."},
+            "enforce_interval": {"type": "boolean", "description": "true 면 min_interval_days 가 지나기 전에는 같은 사람 재라벨(relabel_same)을 사유를 적어도 열지 않는다('강제'). false 면 경고하고 사유를 받아 기록한다(06 3-3). 시작값 false."}
+          }
+        },
+        "pilot": {
+          "type": "object",
+          "description": "안내서 8장 시범 점검 목표.",
+          "required": ["target_direct_reaction_count"],
+          "additionalProperties": false,
+          "properties": {
+            "target_direct_reaction_count": {"type": "integer", "minimum": 1, "maximum": 100000, "description": "검증 구간에서 확보할 직접 반응 사례 수 목표. v0.1 시작값 30."}
+          }
+        },
+        "origin": {
+          "type": "object",
+          "description": "채팅 출처 판정(검토 의견 1). 생성 기록·OCR 대조 허용 오차. 숫자가 없어 null(미정).",
+          "required": ["match_time_tolerance_sec", "text_similarity_min", "ambiguous_margin"],
+          "additionalProperties": false,
+          "properties": {
+            "match_time_tolerance_sec": {"type": ["number", "null"], "minimum": 0, "maximum": 600, "description": "생성 기록 시각과 채팅(또는 OCR) 시각 차 허용치."},
+            "text_similarity_min": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "본문 유사도 하한(0~1)."},
+            "ambiguous_margin": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "1위와 2위 후보 점수 차가 이보다 작으면 판별 불가로 보낸다."}
+          }
+        }
+      }
+    },
+    "strength": {
+      "enum": ["strong", "medium", "weak", "gate"],
+      "description": "증거 강도. strong=강한 증거, medium=중간 증거, weak=약한 증거, gate=증거로 세지 않는 조건(v0.1 미사용)."
+    }
+  }
+}

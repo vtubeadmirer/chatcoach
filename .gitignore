@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# 빌드 산출물
+build/
+dist/
+dist_test/
+
+# 외부 바이너리 (용량 큼 — 저장소에 올리지 않음)
+bin/
+*.dll
+*.exe
+
+# 편집기 / OS / OneDrive
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.tmp
+~$*
+
+# 실행 중 생기는 것 (포터블 폴더 안)
+logs/
+data/
+settings.ini
+_backup/
+_update/
+selftest*.json
+# 잠금 파일은 이름을 하나씩 적는다. *.lock 으로 막으면 커밋해야 하는 requirements.lock 까지 빠진다
+instance.lock
+updating.lock
+_updating.lock
+open.lock
+# QLockFile 이 오래된 잠금을 지울 때 잠깐 만드는 파일
+*.rmlock
+!requirements.lock
+
+# 라벨 데이터·영상·채팅 로그는 개인정보가 있어 절대 올리지 않음
+*.jsonl
+# 골든 테스트 입력만 예외. tools/make_fixture.py 로 합성한 것만 둔다
+!tests/fixtures/**/*.jsonl
+# 채팅 원문 페이지(pages-*.jsonl.gz)·백업·패키지
+*.jsonl.gz
+*.gz
+*.zip
+# 실제 API 응답은 이 이름으로 로컬에만 둔다
+*.real.json
+*.raw.json
+# 프로젝트 메타. 예시는 project.example.json 처럼 다른 이름으로
+project.json
+# ASR·OCR 결과 (보호 등급)
+derived/
+*.sqlite
+*.sqlite3
+*.db
+*.mp4
+*.mkv
+*.ts
+*.m4a
+*.wav
+projects/
+# 루트의 개발용 표본 폴더만 막는다. 프로젝트 안 samples/ 는 data/·projects/ 가 막는다
+/samples/
+# tests/fixtures 아래에는 data·projects·derived 이름의 폴더를 만들지 않는다 (위 규칙에 막힌다)
+
+# 서명 비밀키·비밀 값 (절대 올리지 말 것)
+*.key
+*.pem
+minisign.key
+.env

@@ -1,0 +1,626 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/label-event.schema.json",
+  "title": "라벨 기록 한 줄 (labels/<session_id>.<machine4>.jsonl)",
+  "description": "세션 기록 파일의 한 줄. 파일은 추가만 하는 JSON Lines(UTF-8, BOM 없음, LF)이고, 한 줄 = 기록 1건이다. 수정은 새 줄(supersedes 로 이전 판을 가리킴), 삭제는 retract 줄로 하며 기존 줄은 절대 고치거나 지우지 않는다. kind 로 종류를 나누고 body 의 모양이 kind 마다 다르다. 라벨 종류(segment·utterance·reaction·continuation·video_check·missed_candidate·origin·adjudication·retract)는 공통 라벨 메타(entity_id·supersedes·guide_version·guide_sha12·thresholds_sha12·media_rev·calibration_rev)가 필수다. 시각은 모두 VOD 시각(치지직 playerMessageTime 축) ms 정수. 줄 사이 관계(판 연결·참조·잠금)는 스키마로 표현할 수 없어 tools/verify_project.py 가 검사한다. 설계 문서: docs/design/03-data-model.md 6장, 10~13장.",
+  "type": "object",
+  "required": ["v", "id", "seq", "kind", "session_id", "labeler_id", "created_at", "app_version", "body"],
+  "properties": {
+    "v": {"const": 1, "description": "기록 형식 버전(schema_version). 앱이 아는 값보다 크면 그 세션을 읽기 전용으로 연다. 옛 줄은 고치지 않고 읽을 때 변환한다."},
+    "id": {"$ref": "#/$defs/uuid", "description": "이 줄(판)의 고유 ID(UUID v4). 라벨이면 이것이 label_id(판 ID)다."},
+    "seq": {"type": "integer", "minimum": 1, "description": "파일 안 순번. 1부터 1씩 늘어난다. 순서 판단은 벽시계(created_at)가 아니라 (파일, seq) 와 supersedes 연결로 한다."},
+    "kind": {
+      "enum": [
+        "session.open", "run.start", "phase.mark", "view.exposed", "warning",
+        "segment", "utterance", "reaction", "continuation", "video_check",
+        "missed_candidate", "origin", "adjudication", "retract"
+      ],
+      "description": "기록 종류. 점이 있는 것은 세션 운영 기록, 없는 것은 라벨."
+    },
+    "session_id": {"$ref": "#/$defs/sessionId"},
+    "labeler_id": {"$ref": "#/$defs/labelerId"},
+    "created_at": {"$ref": "#/$defs/datetime", "description": "기록한 벽시계 시각(OS 시간대 오프셋 포함). 표시·보고용이며 순서 판단에 쓰지 않는다."},
+    "app_version": {"$ref": "#/$defs/semver"},
+    "entity_id": {"$ref": "#/$defs/uuid", "description": "라벨 대상(구간·발화·반응 등)의 고정 ID. 같은 대상을 고쳐도 그대로 유지된다. 다른 라벨은 이 ID 로 참조한다. retract 는 지우려는 대상의 entity_id 를 쓴다."},
+    "supersedes": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}], "description": "이 판이 대체하는 이전 판의 id. 첫 판이면 null. 같은 세션·같은 entity_id·같은 종류(retract 제외) 안에서만 가리킬 수 있다."},
+    "guide_version": {"$ref": "#/$defs/guideVersion"},
+    "guide_sha12": {"$ref": "#/$defs/sha12", "description": "적용 기준서 본문 SHA-256 앞 12자리."},
+    "thresholds_sha12": {"$ref": "#/$defs/sha12", "description": "적용 시작값(정규화 JSON) SHA-256 앞 12자리."},
+    "media_rev": {"type": "integer", "minimum": 0, "description": "기록할 때의 영상 번호(project.json media.media_rev)."},
+    "calibration_rev": {"type": "integer", "minimum": 0, "description": "기록할 때의 시각 보정 번호. 보정이 바뀌면 이 값으로 원래 파일 위치를 되살려 다시 계산한다."},
+    "body": {"type": "object", "description": "kind 별 내용. 아래 oneOf 참고."},
+    "x": {"type": "object", "description": "시범용 실험 필드. 점수 계산에 쓰지 않는다."}
+  },
+  "oneOf": [
+    {"properties": {"kind": {"const": "session.open"}, "body": {"$ref": "#/$defs/sessionOpenBody"}}},
+    {"properties": {"kind": {"const": "run.start"}, "body": {"$ref": "#/$defs/runStartBody"}}},
+    {"properties": {"kind": {"const": "phase.mark"}, "body": {"$ref": "#/$defs/phaseMarkBody"}}},
+    {"properties": {"kind": {"const": "view.exposed"}, "body": {"$ref": "#/$defs/viewExposedBody"}}},
+    {"properties": {"kind": {"const": "warning"}, "body": {"$ref": "#/$defs/warningBody"}}},
+    {"properties": {"kind": {"const": "segment"}, "body": {"$ref": "#/$defs/segmentBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]},
+    {"properties": {"kind": {"const": "utterance"}, "body": {"$ref": "#/$defs/utteranceBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]},
+    {"properties": {"kind": {"const": "reaction"}, "body": {"$ref": "#/$defs/reactionBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]},
+    {"properties": {"kind": {"const": "continuation"}, "body": {"$ref": "#/$defs/continuationBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]},
+    {"properties": {"kind": {"const": "video_check"}, "body": {"$ref": "#/$defs/videoCheckBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]},
+    {"properties": {"kind": {"const": "missed_candidate"}, "body": {"$ref": "#/$defs/missedCandidateBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]},
+    {"properties": {"kind": {"const": "origin"}, "body": {"$ref": "#/$defs/originBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]},
+    {"properties": {"kind": {"const": "adjudication"}, "body": {"$ref": "#/$defs/adjudicationBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]},
+    {"properties": {"kind": {"const": "retract"}, "supersedes": {"$ref": "#/$defs/uuid"}, "body": {"$ref": "#/$defs/retractBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]}
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", "description": "UUID v4, 소문자."},
+    "sha12": {"type": "string", "pattern": "^[0-9a-f]{12}$", "description": "SHA-256 앞 12자리."},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "datetime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+      "description": "ISO 8601, 시간대 오프셋 필수."
+    },
+    "semver": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?$"},
+    "guideVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+(-[a-z0-9]+)?$", "description": "기준서 버전. 예: 0.1, 0.2-draft(시범용 초안, 03 9-2 규칙 8)."},
+    "labelerId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}$", "description": "라벨러 짧은 코드. 예: L01"},
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]{1,7}-(P|RS|R2|AD|OR)-[0-9]{8}-[a-z0-9]{4}$",
+      "description": "세션(회차) ID: '<labeler_id>-<종류 코드>-<만든 날 yyyymmdd>-<무작위 4자>'. 종류 코드 P=primary, RS=relabel_same, R2=relabel_second, AD=adjudication, OR=origin_review. 파일 이름은 '<session_id>.<machine4>.jsonl'."
+    },
+    "chatId": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$", "description": "채팅 ID(sl-chat-id-v1). chat-message.schema.json 참고."},
+    "ms": {"type": "integer", "minimum": -3600000, "maximum": 172800000, "description": "VOD 시각(ms 정수, playerMessageTime 축). 영상 파일 위치 = 이 값 + calibration offset_ms."},
+    "nullableMs": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/ms"}]},
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 300, "description": "근거 한 줄. 시각을 포함해 적는다(예: '13:42 ○○님 호명'). 시각이 없으면 앱이 경고한다."},
+    "confidence": {"enum": ["certain", "probably", "undeterminable"], "description": "확신도(안내서 5장): 확실함 / 아마도 / 판단 불가. 등급과 별개."},
+    "category": {"enum": ["just_chatting", "game", "singing", "other", "undeterminable"], "description": "활동 분류(안내서 3장): 저스트채팅 / 게임 / 노래 / 기타 / 판단 불가."},
+    "grade": {"enum": ["direct", "likely", "related_only", "unclear"], "description": "반응 등급(안내서 4-2): 직접 반응 / 연결 가능성 높음 / 관련성만 있음 / 불명확."},
+    "nullableGrade": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/grade"}]},
+    "reasonCode": {"enum": ["A", "B", "C", "D", "E", "F", "G"], "description": "놓친 채팅 후보가 아닌 사유(안내서 6장): A 구간 밖(경계 완충 포함) / B 기회 부족 / C 대화 가치 낮음 / D 이미 다룸 / E 반복·도배 / F 후원·시스템 / G 판단 불가."},
+    "sessionKind": {"enum": ["primary", "relabel_same", "relabel_second", "adjudication", "origin_review"], "description": "1차 / 같은 사람 재라벨 / 두 번째 사람 독립 라벨 / 조정 / 출처 판정."},
+    "labelKind": {"enum": ["segment", "utterance", "reaction", "continuation", "video_check", "missed_candidate", "origin"]},
+    "range": {
+      "type": "array",
+      "prefixItems": [{"$ref": "#/$defs/ms"}, {"$ref": "#/$defs/ms"}],
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "[시작, 끝) VOD 시각 ms. 시작 < 끝."
+    },
+    "snapped": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["kind", "ms"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"enum": ["vad", "silence_edge"], "description": "자석이 붙은 대상: 음성 활동 감지 구간 시작 / 무음 경계."},
+            "ms": {"$ref": "#/$defs/ms"}
+          }
+        }
+      ],
+      "description": "자석(가장 가까운 발화 시작 등으로 이동)이 적용됐으면 그 결과. 적용 안 했으면 null."
+    },
+    "sampleRef": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["sample_set_id", "order"],
+          "additionalProperties": false,
+          "properties": {
+            "sample_set_id": {"type": "string", "pattern": "^S-[0-9a-f]{8}-d[0-9]+-r[0-9]+$", "description": "표본 매니페스트 ID(samples/<id>.json, 'S-<구간 entity_id 앞 8자>-d<draw_no>-r<sample_rev>'). 판정할 때 유효했던 sample_rev 의 파일을 가리킨다."},
+            "order": {"type": "integer", "minimum": 1, "description": "표본 안 제시 순서."}
+          }
+        }
+      ]
+    },
+    "evidenceItem": {
+      "type": "object",
+      "required": ["present"],
+      "additionalProperties": false,
+      "properties": {
+        "present": {"type": "boolean", "description": "이 증거가 있다고 봤는지."},
+        "at_ms": {"$ref": "#/$defs/nullableMs", "description": "증거가 들린·보인 VOD 시각."},
+        "note": {"type": "string", "maxLength": 200, "description": "무엇으로 봤는지(안내서 7-1 '증거 체크')."}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "description": "후보 발화 하나에 대한 증거 체크(candidate.evidence). 안내서 4-1 증거 표 7항목을 모두 적는다(빠진 항목이 있으면 저장 거부). 강도는 기준서 시작값(evidence_strength)에서 정해지므로 여기 저장하지 않는다.",
+      "required": ["nickname_called", "text_repeated", "direct_reference", "answer_form", "unique_content", "within_time_window", "same_topic"],
+      "additionalProperties": false,
+      "properties": {
+        "nickname_called": {"$ref": "#/$defs/evidenceItem", "description": "닉네임을 부름."},
+        "text_repeated": {"$ref": "#/$defs/evidenceItem", "description": "채팅 문구를 읽거나 거의 그대로 되풀이."},
+        "direct_reference": {"$ref": "#/$defs/evidenceItem", "description": "채팅을 직접 가리키는 말('방금 올라온 질문')."},
+        "answer_form": {"$ref": "#/$defs/evidenceItem", "description": "질문에 맞는 답의 형태."},
+        "unique_content": {"$ref": "#/$defs/evidenceItem", "description": "채팅에만 있던 구체적 내용이 발화에 등장."},
+        "within_time_window": {"$ref": "#/$defs/evidenceItem", "description": "채팅이 뜬 뒤 시간 창(시작값 20초) 안에 이 후보 발화로 반응. 앱이 시각에서 자동으로 채우고 라벨러가 확인한다."},
+        "same_topic": {"$ref": "#/$defs/evidenceItem", "description": "같은 주제."}
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "description": "연결 후보 발화 하나와 그 후보에 대한 증거(01 G4, 안내서 v0.2 초안 4-1 [제안] — 증거를 채팅–발화 짝마다 적는다, 07 ADR-21). 발화 시각(start_ms·end_ms)과 들은 내용(heard_text)은 utterance_id 가 가리키는 발화 라벨에 있다. 한 반응 안에서 utterance_id 는 겹치지 않는다(verify_project 가 검사).",
+      "required": ["utterance_id", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "utterance_id": {"$ref": "#/$defs/uuid", "description": "후보 발화의 utterance entity_id."},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "sessionOpenBody": {
+      "type": "object",
+      "description": "기록 파일의 첫 줄(seq 1). 세션 메타를 담는다. 한 세션의 파일이 여러 PC 에 있으면 각 파일 첫 줄에 같은 메타가 반복되고 machine 값만 다르다.",
+      "required": ["project_id", "session_kind", "session_created_at", "machine_id", "machine4", "guide_version", "guide_doc_sha256", "thresholds_sha256", "scope", "blind", "dataset_split"],
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {"$ref": "#/$defs/uuid"},
+        "session_kind": {"$ref": "#/$defs/sessionKind"},
+        "session_created_at": {"$ref": "#/$defs/datetime", "description": "세션을 처음 만든 시각(모든 파일에서 같음)."},
+        "machine_id": {"$ref": "#/$defs/uuid", "description": "이 파일을 쓰는 PC 의 ID(<앱>\\data\\machine.json 에 한 번 만들어 둠)."},
+        "machine4": {"type": "string", "pattern": "^[a-z2-7]{4}$", "description": "machine_id 의 SHA-256 을 base32 로 바꾼 앞 4자. 파일 이름에 들어간다."},
+        "guide_version": {"$ref": "#/$defs/guideVersion"},
+        "guide_doc_sha256": {"$ref": "#/$defs/sha256"},
+        "thresholds_sha256": {"$ref": "#/$defs/sha256"},
+        "scope": {
+          "type": "object",
+          "required": ["type"],
+          "additionalProperties": false,
+          "description": "이 세션이 라벨을 만들 수 있는 범위. 재라벨 세션은 계획의 블록·구간 밖 라벨을 거부한다.",
+          "properties": {
+            "type": {"enum": ["whole", "blocks"], "description": "whole = 방송 전체, blocks = 재라벨 계획의 시간 범위들."},
+            "ranges": {"type": "array", "items": {"$ref": "#/$defs/range"}, "description": "type 이 blocks 일 때 범위 목록."}
+          }
+        },
+        "relabel_plan_id": {"type": ["string", "null"], "pattern": "^RP-[0-9]{8}-[a-z0-9]{4}$", "description": "재라벨 세션이면 계획 ID(relabel/<id>.json)."},
+        "blind": {
+          "type": "object",
+          "required": ["to_ai", "to_other_sessions", "to_origin", "nickname_masked_default"],
+          "additionalProperties": false,
+          "description": "이 세션이 시작할 때의 블라인드 상태. 해제는 view.exposed 줄로 남는다.",
+          "properties": {
+            "to_ai": {"type": "boolean", "description": "AI 결과를 열지 않음."},
+            "to_other_sessions": {"type": "boolean", "description": "다른 세션의 라벨 파일을 열지 않음(파일 자체를 읽지 않는다)."},
+            "to_origin": {"type": "boolean", "description": "채팅 출처 판정 결과를 보이지 않음."},
+            "nickname_masked_default": {"type": "boolean", "description": "닉네임 가림이 기본으로 켜짐."}
+          }
+        },
+        "tool": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "판정에 영향을 줄 수 있는 도구 설정(기준서가 아닌 앱 설정).",
+          "properties": {
+            "heard_max_speed": {"type": "number", "minimum": 0.25, "maximum": 4, "description": "'소리를 들었다' 로 인정하는 최대 재생 속도. 기본 2.0."},
+            "snap_default": {"type": "boolean", "description": "반응 지점 자석 기본값. 기본 false."},
+            "grade_conditions_display": {"type": "boolean", "description": "등급 조건 충족 표시를 화면에 켰는지(01 3-1). 등급을 미리 골라 주는 제안 기능은 없다. 꺼도 reaction 의 eligible_grades 는 기록한다."}
+          }
+        },
+        "tool_models": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "참고 자료를 만든 모델(엔진과 같은 전처리를 쓰는지 비교하려고 남긴다).",
+          "properties": {
+            "vad": {"type": ["string", "null"], "maxLength": 80},
+            "asr": {"type": ["string", "null"], "maxLength": 80},
+            "asr_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]}
+          }
+        },
+        "dataset_split": {"enum": ["dev", "test"], "description": "세션을 만들 때의 project.dataset_split 사본(03 6-1·6-4). 나중에 프로젝트 값을 바꿔도 이 세션의 값은 그대로라, 세션마다 dev / test 가 남는다(06 9-4)."}
+      }
+    },
+    "runStartBody": {
+      "type": "object",
+      "description": "앱을 켜고 세션을 열 때마다 1줄. 시계 점검 결과와 업데이트 확인 상태(03 6-4, 04 6-2 '라벨링 세션 메타')를 남긴다.",
+      "required": ["utc_offset_min", "clock_source", "data_dir_mode", "update_check_state", "checked_at", "latest_seen_version"],
+      "additionalProperties": false,
+      "properties": {
+        "os": {"type": "string", "maxLength": 80},
+        "tz_name": {"type": "string", "maxLength": 80},
+        "utc_offset_min": {"type": "integer", "minimum": -840, "maximum": 840, "description": "OS 의 UTC 오프셋(분). 한국 표준시면 540."},
+        "clock_skew_ms": {"type": ["integer", "null"], "description": "PC 시계 − 기준 시각(GitHub·치지직 응답 Date 헤더). 확인 못 했으면 null. 5분을 넘으면 상태바 경고."},
+        "clock_source": {"enum": ["http_date", "none"]},
+        "data_dir_mode": {"enum": ["portable", "fallback"], "description": "portable = <앱>\\data, fallback = %LOCALAPPDATA% 로 폴백."},
+        "media_vfr": {"type": ["boolean", "null"], "description": "열린 영상이 가변 프레임으로 보이는지."},
+        "compat_mode": {"type": "boolean", "description": "재생 호환 모드(원격 데스크톱·VM 대응)."},
+        "update_check_state": {"enum": ["latest", "newer", "failed", "never"], "description": "이 줄을 쓸 때 data\\update\\state.json 에서 계산한 마지막 업데이트 확인 결과: 최신 / 새 버전 있음 / 확인 실패 / 확인한 적 없음. 확인은 앱 시작 30초 뒤에 돌므로 이번 실행이 아니라 직전 확인의 결과다."},
+        "checked_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/datetime"}], "description": "그 결과가 나온 시각. 확인한 적이 없으면 null."},
+        "latest_seen_version": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/semver"}], "description": "마지막으로 본 최신 버전. 봉투의 app_version 보다 크면 '구버전으로 매긴 실행' 으로 걸러 낼 수 있다. 본 적이 없으면 null."}
+      },
+      "if": {"properties": {"update_check_state": {"const": "never"}}, "required": ["update_check_state"]},
+      "then": {"properties": {"checked_at": {"type": "null"}, "latest_seen_version": {"type": "null"}}}
+    },
+    "phaseMarkBody": {
+      "type": "object",
+      "description": "단계 완료 표시. 앞 단계가 끝나지 않은 구간에서는 다음 단계 라벨을 만들 수 없다(안내서 원칙 5). 다시 열 때는 done=false 로 한 줄 더 쓴다.",
+      "required": ["phase", "scope", "done"],
+      "additionalProperties": false,
+      "properties": {
+        "phase": {"enum": ["segments", "reactions", "samples", "missed", "origin"], "description": "1단계 구간 / 2단계 반응 / 3단계 표본 / 4단계 후보 / 출처 판정."},
+        "scope": {
+          "oneOf": [
+            {"const": "all"},
+            {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/uuid"}, "description": "구간 entity_id 목록."}
+          ]
+        },
+        "done": {"type": "boolean"},
+        "note": {"type": "string", "maxLength": 300}
+      }
+    },
+    "viewExposedBody": {
+      "type": "object",
+      "description": "숨겨 둔 자료를 열어 봤다는 기록. 일치도 계산에서 이 세션을 따로 볼 수 있게 한다.",
+      "required": ["what"],
+      "additionalProperties": false,
+      "properties": {
+        "what": {"enum": ["nickname_raw", "asr_text", "other_session_labels", "ai_results", "origin_info", "raw_chat_page"], "description": "원 닉네임 / 자동 인식 문장 / 다른 세션 라벨 / AI 결과 / 출처 판정 / 채팅 원문 페이지."},
+        "chat_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/chatId"}]},
+        "entity_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}], "description": "열어 본 대상 라벨(있으면)."},
+        "during_entity_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}], "description": "그때 편집 중이던 라벨."},
+        "note": {"type": "string", "maxLength": 300}
+      }
+    },
+    "warningBody": {
+      "type": "object",
+      "description": "앱 경고와 라벨러의 처리. 경고를 반복해서 닫는 패턴을 8장 점검에 쓴다.",
+      "required": ["code", "action"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "audio_not_heard", "recheck_missing", "grade_rule_override", "rationale_without_time",
+            "repeat_before_chat", "calibration_unverified", "relabel_too_early", "segment_too_short",
+            "long_silence_signal", "clock_skew", "other"
+          ],
+          "description": "확인 범위를 듣지 않고 저장 / 재확인 부족 / 등급 규칙과 다르게 확정 / 근거에 시각 없음 / 발화가 채팅보다 앞서는데 '되풀이' 체크 / 시각 보정 미확인 / 재라벨 간격 부족 / 30초 미만 구간 / 긴 침묵 재검토 신호 / 시계 오차 / 기타."
+        },
+        "action": {"enum": ["shown", "dismissed", "resolved"]},
+        "entity_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}]},
+        "detail": {"type": "string", "maxLength": 300}
+      }
+    },
+    "segmentBody": {
+      "type": "object",
+      "description": "활동 구간(안내서 3장). 한 세션의 현재 유효 구간들은 범위 안을 겹치지 않게 나눈다. 경계를 옮기면 맞닿은 두 구간에 새 판이 생긴다.",
+      "required": ["start_ms", "end_ms", "category", "confidence", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "start_ms": {"$ref": "#/$defs/ms", "description": "'전환이 시작된 시각'."},
+        "end_ms": {"$ref": "#/$defs/ms"},
+        "category": {"$ref": "#/$defs/category"},
+        "confidence": {"$ref": "#/$defs/confidence"},
+        "rationale": {"$ref": "#/$defs/rationale"},
+        "active_chat": {"type": ["boolean", "null"], "description": "게임 구간의 '채팅 대화 활발' 표시. 게임이 아니면 null."},
+        "start_signal": {"enum": ["screen", "audio", "speech", "action", "unknown", null], "default": null, "description": "시작 경계를 정한 신호 종류(화면 / 소리 / 말 / 행동). 방법론 검토의 v0.2 후보라 선택 입력. null 또는 생략 = 미입력(unknown = 봤지만 모름과 다르다)."},
+        "long_silence_reviewed": {"type": ["boolean", "null"], "description": "긴 침묵 재검토 신호를 보고 검토했는지. 신호가 없으면 null."},
+        "split_from": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}], "description": "다른 구간을 쪼개 만든 경우 원래 구간 entity_id."},
+        "merged_from": {"type": "array", "items": {"$ref": "#/$defs/uuid"}, "description": "이 구간에 합쳐진 구간들의 entity_id(그 구간들은 retract(merged) 된다)."},
+        "out_of_media": {"type": "boolean", "description": "영상 길이를 벗어남(영상이 바뀐 경우). 버리지 않고 표시한다."}
+      },
+      "if": {"properties": {"active_chat": {"const": true}}, "required": ["active_chat"]},
+      "then": {"properties": {"category": {"const": "game"}}}
+    },
+    "utteranceBody": {
+      "type": "object",
+      "description": "스트리머 발화 한 덩이(안내서 7-1 '연결 발화'). 반응 라벨이 candidates[].utterance_id 로 참조한다. 한 발화가 여러 채팅에 답하면 여러 반응 라벨이 같은 발화를 가리킨다.",
+      "required": ["start_ms", "end_ms", "heard_text", "heard_text_source"],
+      "additionalProperties": false,
+      "properties": {
+        "segment_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}], "description": "속한 구간 entity_id."},
+        "start_ms": {"$ref": "#/$defs/ms"},
+        "end_ms": {"$ref": "#/$defs/ms"},
+        "heard_text": {"type": "string", "minLength": 1, "maxLength": 300, "description": "라벨러가 직접 듣고 적은 말한 내용(핵심 구절). 30자 안팎 권장."},
+        "heard_text_source": {"enum": ["typed", "asr_edited", "asr_unedited"], "description": "직접 입력 / 자동 인식 문장을 복사해 고침 / 복사 후 그대로. 자동 인식 문장 원문은 라벨에 넣지 않는다."},
+        "speaker": {"enum": ["streamer", "tts", "other_audio", "unknown", null], "default": null, "description": "소리 출처: 스트리머 본인 / 후원 TTS 등 / 재생 중인 영상·게임 소리 / 모름. v0.1 에 없는 항목(v0.2 개정안 4-1 [제안])이라 선택 입력. null 또는 생략 = 미입력(unknown = 들었지만 모름과 다르다). v0.2 가 확정되면 강한 증거는 streamer 일 때만 성립한다."},
+        "modality": {"enum": ["verbal", "nonverbal", "both", null], "default": null, "description": "말 / 비언어(웃음·끄덕임) / 둘 다. 방법론 검토의 v0.2 후보라 선택 입력. null 또는 생략 = 미입력."},
+        "raw_click_ms": {"$ref": "#/$defs/nullableMs", "description": "라벨러가 처음 찍은 위치(자석 적용 전)."},
+        "snapped": {"$ref": "#/$defs/snapped"},
+        "outcome": {"enum": ["linked", "no_candidate_in_vod", "candidate_ambiguous", null], "default": null, "description": "발화 쪽 결과. 채팅에 반응한 것이 분명한데 VOD 채팅에 대응 채팅이 없으면 no_candidate_in_vod. v0.2 후보(v0.2 개정안 4-2 [제안])라 선택 입력. 반응 라벨이 하나도 가리키지 않는 발화면 앱이 묻지만 비워 둘 수 있다. null 또는 생략 = 미입력."},
+        "note": {"type": "string", "maxLength": 300}
+      }
+    },
+    "reactionBody": {
+      "type": "object",
+      "description": "채팅 반응 라벨(안내서 4장). 채팅 1건 = 라벨 1건. 2단계(발화에서 출발)와 3단계(표본, 채팅에서 출발) 모두 이 모양이다. 원시 관찰값(후보별 증거·시각·후보)과 라벨러의 결정(등급·확신도)을 함께 저장해 시작값이 바뀌어도 다시 분류할 수 있게 한다. 연결 후보 발화는 candidates[] 에 두고 후보마다 증거 7항목을 적는다. 등급·확신도·이어짐은 채팅 단위(이 라벨 최상위와 이 반응을 가리키는 continuation)다. 예전의 단일 evidence 는 candidates[0].evidence 로 흡수했다(03 6-7).",
+      "required": [
+        "chat_id", "segment_id", "entry", "result", "grade", "eligible_grades", "grade_vs_conditions",
+        "candidates", "linked_utterance_id", "first_visible_ms", "first_visible_source",
+        "reaction_time_ms", "confidence", "rationale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "chat_id": {"$ref": "#/$defs/chatId"},
+        "segment_id": {"$ref": "#/$defs/uuid", "description": "속한 저스트채팅 구간 entity_id."},
+        "entry": {"enum": ["from_utterance", "from_sample"], "description": "2단계(발화에서 출발) / 3단계(표본에서 출발)."},
+        "sample_ref": {"$ref": "#/$defs/sampleRef"},
+        "result": {"enum": ["graded", "unconfirmed"], "description": "graded = 연결 후보가 있어 등급을 줌, unconfirmed = 후보가 아예 없음(반응 미확인)."},
+        "grade": {"$ref": "#/$defs/nullableGrade", "description": "확정 등급. unconfirmed 이면 null."},
+        "eligible_grades": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/grade"}, "description": "저장 시점의 조건 충족 상태(01 3-1). 후보마다 그 후보의 증거 수·'비슷한 채팅 없음' 체크·후보 수로 앱이 셀 수 있는 조건이 충족된 등급을 모은 목록(후보별 결과의 합집합). 사람만 정하는 부분(이 채팅이 계기인지 등)은 셈에 넣지 않는다. 등급을 미리 골라 주는 제안이 아니다. 앱이 자동으로 채운다(라벨러 입력 아님). unconfirmed 면 빈 배열."},
+        "grade_vs_conditions": {"enum": ["consistent", "deviates", "not_applicable"], "description": "고른 등급과 조건 충족 상태의 관계(앱 계산, 라벨러 입력 아님): 어긋나지 않음 / 조건 충족 상태와 다르게 고름(더 높은 등급의 조건이 충족됐는데 낮게 고름 등, override_reason 필수. 연결한 후보의 강한 증거가 0개인 직접 반응은 앱이 저장을 거부한다) / 등급 없음(unconfirmed)."},
+        "override_reason": {"type": ["string", "null"], "maxLength": 300, "description": "조건 충족 상태와 다르게 고른 이유(01 3-1 '사유 한 줄')."},
+        "unclear_cause": {"enum": ["multiple_similar_chats", "multiple_utterances", "audio_unclear", "other", null], "description": "불명확 사유: 비슷한 채팅 여러 개 / 후보 발화 여러 개 / 소리가 안 들림 / 기타."},
+        "candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}, "description": "연결 후보 발화 전부와 후보마다의 증거(불명확이면 후보를 전부 기록, 안내서 4-2·7-1). graded 면 1개 이상, unconfirmed 면 0개."},
+        "linked_utterance_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}], "description": "직접 반응·연결 가능성 높음일 때 연결한 발화. candidates[].utterance_id 중 하나(verify_project 가 검사)."},
+        "competing_chat_ids": {"type": "array", "items": {"$ref": "#/$defs/chatId"}, "description": "같은 발화의 계기일 수 있는 다른 채팅들(예시 4)."},
+        "first_visible_ms": {"$ref": "#/$defs/ms", "description": "채팅이 화면에 처음 뜬 VOD 시각(안내서 7-1). 기본은 채팅 t_ms."},
+        "first_visible_source": {"enum": ["chat_clock", "ocr", "manual"], "description": "채팅 시각 그대로 / OCR 로 잡음 / 라벨러가 직접 지정."},
+        "reaction_time_ms": {"$ref": "#/$defs/nullableMs", "description": "읽은(반응한) 순간 — VOD 시각 한 점(안내서 4-3). 반응 미확인이면 null."},
+        "raw_click_ms": {"$ref": "#/$defs/nullableMs", "description": "반응 지점을 처음 찍은 위치(자석 적용 전)."},
+        "snapped": {"$ref": "#/$defs/snapped"},
+        "no_similar_chat_nearby": {"type": ["boolean", "null"], "description": "'같은 시간대에 비슷한 다른 채팅이 없음'(연결 가능성 높음 조건)."},
+        "similar_chat_ids": {"type": "array", "items": {"$ref": "#/$defs/chatId"}, "description": "비슷한 다른 채팅으로 본 것들."},
+        "streamer_already_on_topic": {"type": ["boolean", "null"], "description": "스트리머가 이미 그 주제를 말하던 중(관련성만 있음 판단 보조)."},
+        "confidence": {"$ref": "#/$defs/confidence"},
+        "rationale": {"$ref": "#/$defs/rationale"},
+        "first_judgment": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["version_id", "result", "grade", "confidence", "rationale"],
+              "additionalProperties": false,
+              "properties": {
+                "version_id": {"$ref": "#/$defs/uuid", "description": "처음 판단이 담긴 판 id."},
+                "result": {"enum": ["graded", "unconfirmed"]},
+                "grade": {"$ref": "#/$defs/nullableGrade"},
+                "confidence": {"$ref": "#/$defs/confidence"},
+                "rationale": {"$ref": "#/$defs/rationale"}
+              }
+            }
+          ],
+          "description": "재확인에서 판단이 바뀌었으면 처음 판단을 복사해 둔다(안내서 7-2). 앱이 자동으로 채운다."
+        },
+        "changed_on_recheck": {"type": "boolean", "description": "재확인에서 판단이 바뀌어 생긴 판이면 true."},
+        "aids_used": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["asr_text", "vad_snap", "grade_conditions", "ocr"]},
+          "description": "판정에 쓴 보조 자료. 앱이 자동으로 채운다(라벨러가 지울 수 없음)."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"result": {"const": "unconfirmed"}}},
+          "then": {
+            "properties": {
+              "grade": {"type": "null"},
+              "eligible_grades": {"maxItems": 0},
+              "grade_vs_conditions": {"const": "not_applicable"},
+              "candidates": {"maxItems": 0},
+              "linked_utterance_id": {"type": "null"},
+              "reaction_time_ms": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"result": {"const": "graded"}}},
+          "then": {
+            "properties": {
+              "grade": {"$ref": "#/$defs/grade"},
+              "grade_vs_conditions": {"enum": ["consistent", "deviates"]},
+              "candidates": {"minItems": 1}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"grade": {"enum": ["direct", "likely"]}}, "required": ["grade"]},
+          "then": {
+            "properties": {
+              "linked_utterance_id": {"$ref": "#/$defs/uuid"},
+              "reaction_time_ms": {"$ref": "#/$defs/ms"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"grade": {"const": "unclear"}}, "required": ["grade"]},
+          "then": {"required": ["unclear_cause"], "properties": {"unclear_cause": {"enum": ["multiple_similar_chats", "multiple_utterances", "audio_unclear", "other"]}}}
+        },
+        {
+          "if": {"properties": {"grade_vs_conditions": {"const": "deviates"}}, "required": ["grade_vs_conditions"]},
+          "then": {"required": ["override_reason"], "properties": {"override_reason": {"type": "string", "minLength": 1}}}
+        },
+        {
+          "if": {"properties": {"entry": {"const": "from_sample"}}, "required": ["entry"]},
+          "then": {"required": ["sample_ref"], "properties": {"sample_ref": {"type": "object"}}}
+        }
+      ]
+    },
+    "continuationBody": {
+      "type": "object",
+      "description": "이어짐 라벨(안내서 4-3). 등급이 직접 반응·연결 가능성 높음인 반응에만 붙는다(verify_project 가 검사). 이어진 구간은 소속 저스트채팅 구간 끝에서 자르되, 실제로 대화가 끝난 시각(observed_end_ms)도 남긴다.",
+      "required": ["reaction_entity_id", "type", "truncated_at_segment_end", "related_chat_ids", "confidence", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "reaction_entity_id": {"$ref": "#/$defs/uuid"},
+        "type": {"enum": ["none", "short", "extended", "new_topic"], "description": "이어지지 않음 / 짧게 이어짐 / 확장됨 / 새 주제로 전환."},
+        "span_start_ms": {"$ref": "#/$defs/nullableMs", "description": "대화가 이어진 구간 시작."},
+        "span_end_ms": {"$ref": "#/$defs/nullableMs", "description": "대화가 이어진 구간 끝(구간 끝에서 잘린 값)."},
+        "observed_end_ms": {"$ref": "#/$defs/nullableMs", "description": "자르기 전 실제로 같은 주제가 끝난 시각."},
+        "truncated_at_segment_end": {"type": "boolean", "description": "저스트채팅 구간 끝에서 잘렸음(앱이 자동 표시)."},
+        "related_chat_ids": {"type": "array", "items": {"$ref": "#/$defs/chatId"}, "description": "같은 주제로 이어진 다른 시청자 채팅."},
+        "confidence": {"$ref": "#/$defs/confidence"},
+        "rationale": {"$ref": "#/$defs/rationale"}
+      },
+      "if": {"properties": {"type": {"enum": ["short", "extended", "new_topic"]}}, "required": ["type"]},
+      "then": {
+        "required": ["span_start_ms", "span_end_ms"],
+        "properties": {"span_start_ms": {"$ref": "#/$defs/ms"}, "span_end_ms": {"$ref": "#/$defs/ms"}}
+      }
+    },
+    "videoCheckBody": {
+      "type": "object",
+      "description": "영상 확인 기록(안내서 7-1, 7-2). 확인한 벽시계 시각은 줄의 created_at. 직접 반응·연결 가능성 높음은 first + recheck 2건 이상이어야 완료로 본다.",
+      "required": ["target_kind", "target_entity_id", "check", "window_start_ms", "window_end_ms", "watched_ranges", "coverage_ratio", "audio_heard"],
+      "additionalProperties": false,
+      "properties": {
+        "target_kind": {"$ref": "#/$defs/labelKind"},
+        "target_entity_id": {"$ref": "#/$defs/uuid"},
+        "target_version_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}], "description": "확인할 때 보고 있던 판 id."},
+        "check": {"enum": ["first", "recheck"], "description": "처음 확인 / 다시 듣기."},
+        "window_start_ms": {"$ref": "#/$defs/ms", "description": "확인 범위 시작(채팅 뜨기 pre_roll 전)."},
+        "window_end_ms": {"$ref": "#/$defs/ms", "description": "확인 범위 끝(후보 발화 끝 post_roll 뒤)."},
+        "watched_ranges": {"type": "array", "items": {"$ref": "#/$defs/range"}, "description": "확인 범위 안에서 실제로 소리를 켜고(heard_max_speed 이하로) 재생한 구간들(합친 값)."},
+        "coverage_ratio": {"type": "number", "minimum": 0, "maximum": 1, "description": "watched_ranges 가 확인 범위를 덮은 비율."},
+        "audio_heard": {"type": "boolean", "description": "확인 범위를 소리로 들었다고 인정되는지(앱 계산)."},
+        "max_speed": {"type": ["number", "null"], "minimum": 0, "maximum": 16},
+        "judgment": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "그 시점의 판단 스냅샷(재확인에서 바뀌었는지 비교용).",
+          "properties": {
+            "result": {"enum": ["graded", "unconfirmed", null]},
+            "grade": {"$ref": "#/$defs/nullableGrade"},
+            "confidence": {"enum": ["certain", "probably", "undeterminable", null]},
+            "category": {"enum": ["just_chatting", "game", "singing", "other", "undeterminable", null]}
+          }
+        }
+      }
+    },
+    "missedCandidateBody": {
+      "type": "object",
+      "description": "놓친 채팅 후보 판정(안내서 6장). 네 조건이 모두 참일 때만 후보이고, 아니면 사유 코드가 반드시 있다. 조건 ① 은 앱이 계산하며 라벨러가 바꿀 수 없다.",
+      "required": ["chat_id", "segment_id", "scope", "cond1", "cond2", "cond3", "cond4", "is_candidate", "reason_code", "check_question", "confidence", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "chat_id": {"$ref": "#/$defs/chatId"},
+        "segment_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}], "description": "속한 구간(구간 밖이면 null + 사유 A)."},
+        "scope": {"enum": ["sample", "extra"], "description": "표본 안 반응 미확인 채팅에서 체계적으로 본 것 / 표본 밖에서 따로 발견한 것(통계 분리)."},
+        "sample_ref": {"$ref": "#/$defs/sampleRef"},
+        "cond1": {
+          "type": "object",
+          "required": ["value", "in_segment", "in_buffer"],
+          "additionalProperties": false,
+          "description": "① 저스트채팅 구간 안이고 경계 완충이 아님(자동).",
+          "properties": {
+            "value": {"type": "boolean"},
+            "in_segment": {"type": "boolean"},
+            "in_buffer": {"type": "boolean"}
+          }
+        },
+        "cond2": {
+          "type": "object",
+          "required": ["value"],
+          "additionalProperties": false,
+          "description": "② 읽힐 기회. 보조값은 앱이 계산해 보여 주고 판단은 라벨러가 한다.",
+          "properties": {
+            "value": {"type": ["boolean", "null"]},
+            "exposure_est_ms": {"type": ["integer", "null"], "minimum": 0, "description": "노출 시간 추정(이후 visible_lines 개 채팅이 올라오기까지의 시간)."},
+            "chat_rate_10s": {"type": ["integer", "null"], "minimum": 0, "description": "직전 10초 채팅 수."},
+            "visible_lines": {"type": ["integer", "null"], "minimum": 1, "description": "추정에 쓴 줄 수 가정."}
+          }
+        },
+        "cond3": {"type": ["boolean", "null"], "description": "③ 대화 가치."},
+        "cond4": {"type": ["boolean", "null"], "description": "④ 앞뒤 prior_handling_window 안에 이미 다루지 않음."},
+        "is_candidate": {"type": "boolean"},
+        "reason_code": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/reasonCode"}]},
+        "reason_code_source": {"enum": ["auto", "auto_suggested", "manual", null], "description": "F 는 자동, A 는 ① 실패 시 자동 제안."},
+        "check_question": {"type": ["boolean", "null"], "description": "점검 질문: 읽고 답했다면 대화가 한 번 이상 더 이어졌을 것 같은가."},
+        "confidence": {"$ref": "#/$defs/confidence"},
+        "rationale": {"$ref": "#/$defs/rationale"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"is_candidate": {"const": true}}},
+          "then": {
+            "properties": {
+              "reason_code": {"type": "null"},
+              "cond1": {"properties": {"value": {"const": true}}},
+              "cond2": {"properties": {"value": {"const": true}}},
+              "cond3": {"const": true},
+              "cond4": {"const": true}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"is_candidate": {"const": false}}},
+          "then": {"properties": {"reason_code": {"$ref": "#/$defs/reasonCode"}}}
+        }
+      ]
+    },
+    "originBody": {
+      "type": "object",
+      "description": "채팅 출처 판정(검토 의견 1, v1). origin_review 세션에서만 만든다. 반응 라벨링 중에는 보이지 않는다.",
+      "required": ["chat_id", "origin", "method", "confidence", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "chat_id": {"$ref": "#/$defs/chatId"},
+        "origin": {"enum": ["real", "virtual", "undeterminable"], "description": "실제 / 가상 / 판별 불가."},
+        "method": {"enum": ["generation_log_match", "viewer_id_match", "ocr_match", "manual", "none"], "description": "생성 기록 대조 / 봇 계정 가명 일치 / OCR 대조 / 수동 / 근거 없음."},
+        "generation_ref": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["file", "gen_id"],
+              "additionalProperties": false,
+              "properties": {
+                "file": {"type": "string", "maxLength": 200, "description": "origin/ 아래 생성 기록 파일 이름."},
+                "gen_id": {"type": "string", "maxLength": 100}
+              }
+            }
+          ]
+        },
+        "ocr_ref": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["frame_ms", "line_index"],
+              "additionalProperties": false,
+              "properties": {
+                "frame_ms": {"$ref": "#/$defs/ms"},
+                "line_index": {"type": "integer", "minimum": 0}
+              }
+            }
+          ]
+        },
+        "score": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "second_score": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "2위 후보 점수(차이가 작으면 판별 불가)."},
+        "confidence": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/confidence"}], "description": "확신도. origin 이 real·virtual 이면 필수(null 불가). undeterminable 이면 null 허용 — v0.2 개정안 5장 [제안] '어느 쪽도 정할 수 없으면 확신도를 따로 적지 않고 판별 불가를 고른다'. 확신도 '판단 불가'(undeterminable)와 출처 '판별 불가'는 다른 칸이다."},
+        "rationale": {"$ref": "#/$defs/rationale"}
+      },
+      "if": {"properties": {"origin": {"enum": ["real", "virtual"]}}, "required": ["origin"]},
+      "then": {"properties": {"confidence": {"$ref": "#/$defs/confidence"}}}
+    },
+    "adjudicationBody": {
+      "type": "object",
+      "description": "조정(v1). 서로 다른 세션의 라벨이 갈렸을 때 검토자가 최종값을 정한다. 원 라벨들은 그대로 남고, '최종 세트' 뷰에서만 조정값이 우선한다. 잠긴 세션의 라벨을 고치는 유일한 길이다.",
+      "required": ["target_kind", "targets", "decision", "cause"],
+      "additionalProperties": false,
+      "properties": {
+        "target_kind": {"$ref": "#/$defs/labelKind"},
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["session_id", "entity_id", "version_id"],
+            "additionalProperties": false,
+            "properties": {
+              "session_id": {"$ref": "#/$defs/sessionId"},
+              "entity_id": {"$ref": "#/$defs/uuid"},
+              "version_id": {"$ref": "#/$defs/uuid"}
+            }
+          }
+        },
+        "decision": {"enum": ["final", "exclude_from_eval", "keep_as_ambiguous"], "description": "최종값 확정 / AI 평가에서 제외 / 진짜 모호함으로 남김."},
+        "final": {"type": ["object", "null"], "description": "decision 이 final 일 때 target_kind 의 body 와 같은 모양의 최종값. 검증은 verify_project 가 target_kind 로 고른 body 정의로 한다."},
+        "cause": {"enum": ["guide_unclear", "simple_mistake", "truly_ambiguous", "other"], "description": "불일치 원인: 기준 흐림 / 단순 실수 / 진짜 모호."},
+        "pattern_tag": {"type": ["string", "null"], "maxLength": 60, "description": "불일치 유형 태그(반복 유형 찾기)."},
+        "note": {"type": "string", "maxLength": 1000}
+      },
+      "if": {"properties": {"decision": {"const": "final"}}, "required": ["decision"]},
+      "then": {"required": ["final"], "properties": {"final": {"type": "object"}}}
+    },
+    "retractBody": {
+      "type": "object",
+      "description": "라벨 철회(삭제 대신). entity_id 는 철회할 대상, supersedes 는 그 대상의 현재 판 id. 다시 살리려면 철회 줄을 supersedes 로 가리키는 새 판을 쓴다.",
+      "required": ["reason"],
+      "additionalProperties": false,
+      "properties": {
+        "reason": {"enum": ["undo", "merged", "split_cleanup", "wrong_target", "other"], "description": "되돌리기(Ctrl+Z) / 다른 구간에 합쳐짐 / 쪼개기 정리 / 대상 잘못 고름 / 기타."},
+        "merged_into": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}], "description": "reason 이 merged 일 때 합쳐진 구간 entity_id."},
+        "note": {"type": "string", "maxLength": 300}
+      }
+    }
+  }
+}

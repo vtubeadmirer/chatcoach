@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/sample-manifest.schema.json",
+  "title": "무작위 표본 매니페스트 (samples/<sample_set_id>.json)",
+  "description": "3단계 무작위 표본 한 묶음(구간·sample_rev 마다 한 파일). 프로그램이 뽑고 라벨러는 고르거나 바꾸거나 다시 뽑을 수 없다. 한 번 쓰면 고치지 않는다(구간 경계가 바뀌면 sample_rev 를 올린 새 파일을 쓰고, 같은 계열에서는 가장 큰 sample_rev 가 유효하다). 같은 입력이면 누가 언제 다시 계산해도 같은 목록이 나오도록 알고리즘·seed_material·모집단과 적격 채팅의 해시·임계 키를 남긴다. 알고리즘 sha256-tau-v1: 순서 키 = SHA-256(UTF-8(seed_material + '|' + chat_id)) 의 소문자 hex 이고, seed_material = '{project.sample_seed}|{draw_no}' 이다(구간·기준서 버전은 넣지 않는다). 적격 채팅 = 구간 범위 안 일반 채팅에서 후원·구독·시스템, 시각 이상, 경계 완충 안 채팅을 뺀 것. 임계 키 τ = 적격이 sample.census_max 이하이면 적격 중 가장 큰 key(전수), 아니면 key 오름차순 requested_size 번째 key 이고, 같은 계열에 이전 sample_rev 가 있으면 그 tau_key 보다 작아지지 않는다(불감소). 표본 = 적격이면서 key ≤ τ. 처음 뽑을 때 판정 수는 전수가 아니면 정확히 requested_size 개다. 언어 독립이라 AI 엔진 쪽도 같은 목록을 재현할 수 있다. 설계 문서: docs/design/03-data-model.md 6-13·15장, docs/design/06-evaluation-and-agreement.md 2장.",
+  "type": "object",
+  "required": [
+    "schema", "schema_version", "sample_set_id", "project_id", "source_segment", "guide_version", "thresholds_sha256",
+    "algorithm", "seed_material", "draw_no", "sample_rev", "previous_sample_rev", "reason", "changes",
+    "population", "excluded", "eligible", "requested_size", "census", "tau_key", "tau_real_key",
+    "items", "presentation_order", "drawn_at", "drawn_by", "app_version"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "streamlabeler/sample-manifest"},
+    "schema_version": {"const": 1},
+    "sample_set_id": {"type": "string", "pattern": "^S-[0-9a-f]{8}-d[0-9]+-r[0-9]+$", "description": "'S-' + 원 구간 entity_id 앞 8자 + '-d' + draw_no + '-r' + sample_rev. 예: S-7f3c2a1b-d1-r1."},
+    "project_id": {"$ref": "#/$defs/uuid"},
+    "source_segment": {
+      "type": "object",
+      "required": ["session_id", "entity_id", "version_id", "start_ms", "end_ms"],
+      "additionalProperties": false,
+      "description": "추출 기준이 된 1차 세션의 저스트채팅 구간 판. 재라벨 세션에는 이 정보를 주지 않는다(재라벨 계획이 채팅 목록만 넘긴다).",
+      "properties": {
+        "session_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}-(P|RS|R2|AD|OR)-[0-9]{8}-[a-z0-9]{4}$"},
+        "entity_id": {"$ref": "#/$defs/uuid"},
+        "version_id": {"$ref": "#/$defs/uuid"},
+        "start_ms": {"$ref": "#/$defs/ms"},
+        "end_ms": {"$ref": "#/$defs/ms"}
+      }
+    },
+    "guide_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+(-[a-z0-9]+)?$", "description": "기준서 버전. 예: 0.1, 0.2-draft(03 9-2 규칙 8)."},
+    "thresholds_sha256": {"$ref": "#/$defs/sha256", "description": "뽑을 때 적용한 기준서 시작값(values) 해시. sample.per_segment·sample.census_max·segment.boundary_buffer_sec 가 이 시작값에서 온다."},
+    "algorithm": {"const": "sha256-tau-v1", "description": "추출 알고리즘 이름. 규칙을 바꾸면 새 이름을 쓴다. 기준서 시작값이 아니다. 옛 sha256-sort-v1(seed 에 구간·기준서 버전을 넣고, 완충을 모집단에 넣은 채 표시만 함)은 폐기했다."},
+    "seed_material": {"type": "string", "pattern": "^[0-9a-f]{32}\\|[1-9][0-9]*$", "description": "'{sample_seed}|{draw_no}' 문자열(sample_seed 는 project.json 의 32자 hex). 순서 키 = SHA-256(UTF-8(seed_material + '|' + chat_id)). 매니페스트 하나만 받아도 재현할 수 있게 그대로 적는다."},
+    "draw_no": {"type": "integer", "minimum": 1, "description": "추출 번호. 1 이 기본. 검토자(role=reviewer)가 사유를 적고 '다시 뽑기' 할 때만 올린다(seed 의 일부라 순서 전체가 바뀐다). 구간 경계 변경에는 쓰지 않고 sample_rev 로 다룬다."},
+    "sample_rev": {"type": "integer", "minimum": 1, "description": "같은 계열(원 구간 entity_id·draw_no)의 몇 번째 매니페스트인지. 처음은 1. 구간 경계가 바뀌어 적격 채팅이 달라지면 1 올린 새 파일을 쓴다."},
+    "previous_sample_rev": {"type": ["integer", "null"], "minimum": 1, "description": "sample_rev 가 2 이상이면 바로 앞 sample_rev. 1 이면 null."},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 300, "description": "이 매니페스트를 쓴 사유. 처음 추출은 'initial'. 경계 변경이나 검토자의 다시 뽑기는 무엇이 바뀌었는지 적는다."},
+    "changes": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["added", "removed"],
+          "additionalProperties": false,
+          "properties": {
+            "added": {"type": "array", "items": {"$ref": "#/$defs/chatId"}, "description": "이전 sample_rev 에 없었고 이번에 표본이 되어 판정 큐에 들어간 채팅."},
+            "removed": {
+              "type": "array",
+              "description": "이전 sample_rev 에 있었지만 이번에 빠진 채팅. 판정은 지우지 않고 out_of_sample 로 계산한다.",
+              "items": {
+                "type": "object",
+                "required": ["chat_id", "reason"],
+                "additionalProperties": false,
+                "properties": {
+                  "chat_id": {"$ref": "#/$defs/chatId"},
+                  "reason": {"enum": ["boundary_changed"], "description": "구간 밖이나 경계 완충 안으로 나감."}
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "sample_rev 2 이상에서 이전 판과의 차이. sample_rev 가 1 이면 null."
+    },
+    "population": {
+      "type": "object",
+      "required": ["kinds", "range_start_ms", "range_end_ms", "size", "chat_ids_sha256", "messages_sha256"],
+      "additionalProperties": false,
+      "description": "모집단. 구간 범위 안에서 kinds 에 든 종류이고 시각이 정상인 채팅(06 2-2 의 1·2번을 뺀 것). 경계 완충은 여기서 빼지 않고 eligible 에서 뺀다. 출처는 뽑기 조건이 아니다.",
+      "properties": {
+        "kinds": {"type": "array", "minItems": 1, "items": {"enum": ["text", "image", "sticker", "video", "rich", "donation", "subscription", "system", "other"]}, "description": "모집단에 넣는 메시지 종류. v0.1 은 [\"text\"]."},
+        "statuses": {"type": ["array", "null"], "items": {"type": "string"}, "description": "넣을 messageStatusType 목록. null 이면 전부(클린봇 가림 채팅은 판정하고 표시해 따로 센다 — 확인 필요, 06 2-2)."},
+        "range_start_ms": {"$ref": "#/$defs/ms"},
+        "range_end_ms": {"$ref": "#/$defs/ms"},
+        "size": {"type": "integer", "minimum": 0},
+        "chat_ids_sha256": {"$ref": "#/$defs/sha256", "description": "모집단 chat_id 를 정렬해 '\\n' 으로 이은 UTF-8 바이트의 SHA-256."},
+        "messages_sha256": {"$ref": "#/$defs/sha256", "description": "추출할 때의 chat/messages.jsonl 해시."}
+      }
+    },
+    "excluded": {
+      "type": "object",
+      "required": ["non_text", "invalid_time", "buffer"],
+      "additionalProperties": false,
+      "description": "구간 범위 안에서 뺀 건수(06 2-2 의 1~3번). 한 채팅은 처음 걸린 사유 하나로만 센다. eligible.size = population.size − buffer.",
+      "properties": {
+        "non_text": {"type": "integer", "minimum": 0, "description": "후원·구독·시스템 등 kinds 밖 메시지(excluded_non_text)."},
+        "invalid_time": {"type": "integer", "minimum": 0, "description": "채팅 시각이 없거나 범위 밖(excluded_invalid_time)."},
+        "buffer": {"type": "integer", "minimum": 0, "description": "경계 완충 안(excluded_buffer). 순서 키는 매기지만 τ 계산·표본 수·판정 큐에 넣지 않는다."}
+      }
+    },
+    "eligible": {
+      "type": "object",
+      "required": ["size", "chat_ids_sha256"],
+      "additionalProperties": false,
+      "description": "적격 채팅 = 모집단에서 경계 완충 안 채팅을 뺀 것. 표본은 이 안에서만 정한다.",
+      "properties": {
+        "size": {"type": "integer", "minimum": 0},
+        "chat_ids_sha256": {"$ref": "#/$defs/sha256", "description": "적격 채팅 chat_id 를 정렬해 '\\n' 으로 이은 UTF-8 바이트의 SHA-256."}
+      }
+    },
+    "requested_size": {"type": "integer", "minimum": 1, "description": "표본 크기 n(기준서 sample.per_segment)."},
+    "census": {"type": "boolean", "description": "적격 채팅 수가 기준서 sample.census_max 이하라 전부를 썼으면 true(이때 tau_key = 적격 중 가장 큰 key)."},
+    "tau_key": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}], "description": "임계 키 τ(소문자 hex). 표본 = 적격이면서 key ≤ tau_key. 적격 채팅이 0개면 null. 같은 계열의 이전 sample_rev 의 tau_key 보다 작아지지 않는다(불감소)."},
+    "tau_real_key": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}], "description": "실제 시청자 통계용 임계 키 τ_real = max(τ, 출처가 실제인 적격 채팅 중 requested_size 번째 key)(v1, 06 2-4). 보충 상한은 기준서 sample.max_extend_ratio. 출처 판정 전이거나 쓰지 않으면 null."},
+    "items": {
+      "type": "array",
+      "description": "표본 채팅. order 순으로 제시한다. 처음 뽑을 때 role=base 는 전수면 적격 전부, 아니면 정확히 requested_size 개이고, 경계 변경 뒤에는 조금 넘을 수 있다.",
+      "items": {
+        "type": "object",
+        "required": ["order", "chat_id", "t_ms", "rank", "role"],
+        "additionalProperties": false,
+        "properties": {
+          "order": {"type": "integer", "minimum": 1, "description": "화면 제시 순서(presentation_order 규칙, 06 2-8)."},
+          "chat_id": {"$ref": "#/$defs/chatId"},
+          "t_ms": {"$ref": "#/$defs/ms"},
+          "rank": {"type": "integer", "minimum": 1, "description": "적격 채팅 중 순서 키 오름차순 순위."},
+          "sort_key": {"$ref": "#/$defs/sha256", "description": "순서 키 SHA-256(seed_material + '|' + chat_id)(재현 검증용, 선택)."},
+          "role": {"enum": ["base", "origin_extend"], "description": "base = key ≤ tau_key, origin_extend = tau_key < key ≤ tau_real_key 인 실제 시청자 보충분(v1, 06 2-4)."}
+        }
+      }
+    },
+    "presentation_order": {"enum": ["time", "key"], "description": "items 제시 순서 규칙. time = 구간 안 채팅 시각 순(기본, 06 2-8), key = 순서 키 순(시범에서 순서 효과를 비교할 때)."},
+    "drawn_at": {"type": "string", "format": "date-time"},
+    "drawn_by": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}$"},
+    "app_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?$"}
+  },
+  "if": {"properties": {"sample_rev": {"const": 1}}, "required": ["sample_rev"]},
+  "then": {"properties": {"previous_sample_rev": {"type": "null"}, "changes": {"type": "null"}}},
+  "else": {"properties": {"previous_sample_rev": {"type": "integer"}, "changes": {"type": "object"}}},
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "chatId": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$", "description": "채팅 ID(sl-chat-id-v1)."},
+    "ms": {"type": "integer", "minimum": -3600000, "maximum": 172800000, "description": "VOD 시각(ms 정수)."}
+  }
+}

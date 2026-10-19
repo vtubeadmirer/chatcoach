@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/export-row.schema.json",
+  "title": "내보내기 행 (labels.jsonl / ground_truth_*.jsonl 한 줄)",
+  "description": "내보내기 파일의 한 줄 = 라벨 1건(보통 '현재 유효' 판, 이력 포함 옵션이면 대체된 판도 effective=false 로). 라벨 기록에서 발화·영상 확인 기록·채팅 정보를 합쳐 펼친 모양이라 분석 도구에서 바로 쓸 수 있다(안내서 7-1 항목 전부). 시각은 VOD 시각 ms 정수. 채팅 본문과 가린 닉네임은 내보내기 옵션을 켰을 때만 들어간다. 내보내기는 항상 zip 하나에 manifest.json($defs/exportManifest)과 함께 묶는다. CSV 는 같은 열을 펼친 검토용 사본이며 다시 가져올 수 없다. 설계 문서: docs/design/03-data-model.md 16장.",
+  "type": "object",
+  "required": [
+    "label_kind", "label_id", "entity_id", "source", "effective", "conflict",
+    "session_id", "session_kind", "labeler_id", "created_at",
+    "guide_version", "guide_sha12", "thresholds_sha12", "app_version", "schema_version",
+    "media_rev", "calibration_rev", "eval"
+  ],
+  "properties": {
+    "label_kind": {"enum": ["segment", "reaction", "continuation", "missed_candidate", "origin"], "description": "라벨 종류(안내서 7-1 '종류'). 발화·영상 확인 기록은 반응 행 안에 펼쳐 넣는다."},
+    "label_id": {"$ref": "#/$defs/uuid", "description": "판 ID(라벨 기록 줄의 id)."},
+    "entity_id": {"$ref": "#/$defs/uuid", "description": "라벨 대상 고정 ID."},
+    "source": {"enum": ["label", "adjudication"], "description": "원 라벨 / 조정 결과(최종 세트)."},
+    "effective": {"type": "boolean", "description": "현재 유효 판이면 true. 이력 포함 내보내기에서 대체된 판은 false."},
+    "superseded_by": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}]},
+    "conflict": {"type": "boolean", "description": "판 연결이 갈라져(포크) 자동으로 고르지 않은 라벨이면 true. 정답 세트에서는 빠진다."},
+    "session_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}-(P|RS|R2|AD|OR)-[0-9]{8}-[a-z0-9]{4}$"},
+    "session_kind": {"enum": ["primary", "relabel_same", "relabel_second", "adjudication", "origin_review"]},
+    "labeler_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}$", "description": "라벨러 코드(표시 이름은 넣지 않는다)."},
+    "created_at": {"type": "string", "format": "date-time"},
+    "guide_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+(-[a-z0-9]+)?$", "description": "기준서 버전. 예: 0.1, 0.2-draft(03 9-2 규칙 8)."},
+    "guide_sha12": {"$ref": "#/$defs/sha12"},
+    "thresholds_sha12": {"$ref": "#/$defs/sha12"},
+    "app_version": {"type": "string"},
+    "schema_version": {"type": "integer", "minimum": 1, "description": "원 기록의 형식 버전(v)."},
+    "media_rev": {"type": "integer", "minimum": 0},
+    "calibration_rev": {"type": "integer", "minimum": 0},
+    "start_ms": {"$ref": "#/$defs/nullableMs", "description": "구간 시작(segment)."},
+    "end_ms": {"$ref": "#/$defs/nullableMs", "description": "구간 끝(segment)."},
+    "category": {"enum": ["just_chatting", "game", "singing", "other", "undeterminable", null]},
+    "active_chat": {"type": ["boolean", "null"]},
+    "chat_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/chatId"}]},
+    "chat_kind": {"enum": ["text", "image", "sticker", "video", "rich", "donation", "subscription", "system", "other", null]},
+    "chat_t_ms": {"$ref": "#/$defs/nullableMs", "description": "채팅 VOD 시각(playerMessageTime)."},
+    "viewer_id": {"type": ["string", "null"], "pattern": "^(vw_[a-z2-7]{12}|anon)$", "description": "작성자 가명(같은 방송 안에서 일관)."},
+    "nickname_masked": {"type": ["string", "null"], "description": "옵션을 켰을 때만."},
+    "text": {"type": ["string", "null"], "description": "채팅 본문. 옵션을 켰을 때만(정답 세트 기본값은 null)."},
+    "entry": {"enum": ["from_utterance", "from_sample", null]},
+    "sample_set_id": {"type": ["string", "null"]},
+    "sample_order": {"type": ["integer", "null"], "minimum": 1},
+    "result": {"enum": ["graded", "unconfirmed", null]},
+    "grade": {"enum": ["direct", "likely", "related_only", "unclear", null]},
+    "eligible_grades": {"type": ["array", "null"], "items": {"enum": ["direct", "likely", "related_only", "unclear"]}, "description": "저장 시점의 조건 충족 상태(label-event reactionBody 와 같음, 등급 제안이 아님). 반응 행이 아니면 null."},
+    "grade_vs_conditions": {"enum": ["consistent", "deviates", "not_applicable", null], "description": "고른 등급과 조건 충족 상태의 관계(label-event reactionBody 와 같음)."},
+    "override_reason": {"type": ["string", "null"], "description": "조건 충족 상태와 다르게 고른 이유."},
+    "unclear_cause": {"enum": ["multiple_similar_chats", "multiple_utterances", "audio_unclear", "other", null]},
+    "confidence": {"enum": ["certain", "probably", "undeterminable"], "description": "확신도. 모든 라벨 종류에 있다."},
+    "rationale": {"type": "string", "description": "근거 한 줄."},
+    "first_visible_ms": {"$ref": "#/$defs/nullableMs"},
+    "reaction_time_ms": {"$ref": "#/$defs/nullableMs"},
+    "delay_ms": {"type": ["integer", "null"], "description": "reaction_time_ms − first_visible_ms (내보낼 때 계산)."},
+    "linked_utterance_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}]},
+    "utterances": {
+      "type": "array",
+      "description": "연결 발화 후보 전부(안내서 7-1 '연결 발화').",
+      "items": {
+        "type": "object",
+        "required": ["utterance_id", "start_ms", "end_ms", "speaker", "modality"],
+        "additionalProperties": false,
+        "properties": {
+          "utterance_id": {"$ref": "#/$defs/uuid"},
+          "start_ms": {"$ref": "#/$defs/ms"},
+          "end_ms": {"$ref": "#/$defs/ms"},
+          "heard_text": {"type": ["string", "null"], "description": "옵션을 켰을 때만."},
+          "heard_text_source": {"enum": ["typed", "asr_edited", "asr_unedited", null]},
+          "speaker": {"enum": ["streamer", "tts", "other_audio", "unknown"]},
+          "modality": {"enum": ["verbal", "nonverbal", "both"]}
+        }
+      }
+    },
+    "competing_chat_ids": {"type": "array", "items": {"$ref": "#/$defs/chatId"}},
+    "evidence_strong": {"type": "array", "items": {"$ref": "#/$defs/evidenceType"}, "description": "있다고 본 강한 증거(적용 기준서의 강도 표로 분류)."},
+    "evidence_medium": {"type": "array", "items": {"$ref": "#/$defs/evidenceType"}},
+    "evidence_weak": {"type": "array", "items": {"$ref": "#/$defs/evidenceType"}},
+    "evidence_detail": {"type": ["array", "null"], "items": {"type": "object"}, "description": "후보별 증거 원본 배열. label-event 의 candidates[] 와 같은 모양(utterance_id + evidence 7항목 present·at_ms·note). evidence_strong/medium/weak 행 값은 연결한 후보(linked_utterance_id)의 증거이고, 연결 발화가 없으면 후보 전체의 합집합이다(03 16-3)."},
+    "no_similar_chat_nearby": {"type": ["boolean", "null"]},
+    "streamer_already_on_topic": {"type": ["boolean", "null"]},
+    "video_checks": {
+      "type": "array",
+      "description": "영상 확인 기록(안내서 7-1).",
+      "items": {
+        "type": "object",
+        "required": ["check", "checked_at", "window_start_ms", "window_end_ms", "audio_heard", "coverage_ratio"],
+        "additionalProperties": false,
+        "properties": {
+          "check": {"enum": ["first", "recheck"]},
+          "checked_at": {"type": "string", "format": "date-time"},
+          "window_start_ms": {"$ref": "#/$defs/ms"},
+          "window_end_ms": {"$ref": "#/$defs/ms"},
+          "audio_heard": {"type": "boolean"},
+          "coverage_ratio": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "first_judgment": {"type": ["object", "null"], "description": "재확인에서 바뀌기 전 판단(안내서 7-2)."},
+    "changed_on_recheck": {"type": ["boolean", "null"]},
+    "aids_used": {"type": "array", "items": {"enum": ["asr_text", "vad_snap", "grade_conditions", "ocr"]}},
+    "reaction_entity_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}], "description": "이어짐이 붙은 반응."},
+    "continuation_type": {"enum": ["none", "short", "extended", "new_topic", null]},
+    "span_start_ms": {"$ref": "#/$defs/nullableMs"},
+    "span_end_ms": {"$ref": "#/$defs/nullableMs"},
+    "observed_end_ms": {"$ref": "#/$defs/nullableMs"},
+    "truncated_at_segment_end": {"type": ["boolean", "null"]},
+    "related_chat_count": {"type": ["integer", "null"], "minimum": 0},
+    "missed_scope": {"enum": ["sample", "extra", null]},
+    "cond1": {"type": ["boolean", "null"]},
+    "cond2": {"type": ["boolean", "null"]},
+    "cond3": {"type": ["boolean", "null"]},
+    "cond4": {"type": ["boolean", "null"]},
+    "exposure_est_ms": {"type": ["integer", "null"]},
+    "chat_rate_10s": {"type": ["integer", "null"]},
+    "is_candidate": {"type": ["boolean", "null"]},
+    "reason_code": {"enum": ["A", "B", "C", "D", "E", "F", "G", null]},
+    "check_question": {"type": ["boolean", "null"]},
+    "origin": {"enum": ["real", "virtual", "undeterminable", null]},
+    "origin_method": {"enum": ["generation_log_match", "viewer_id_match", "ocr_match", "manual", "none", null]},
+    "origin_score": {"type": ["number", "null"]},
+    "adjudication": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "source 가 adjudication 일 때 조정 정보.",
+      "properties": {
+        "decision": {"enum": ["final", "exclude_from_eval", "keep_as_ambiguous"]},
+        "cause": {"enum": ["guide_unclear", "simple_mistake", "truly_ambiguous", "other"]},
+        "pattern_tag": {"type": ["string", "null"]},
+        "target_label_ids": {"type": "array", "items": {"$ref": "#/$defs/uuid"}}
+      }
+    },
+    "eval": {
+      "type": "object",
+      "required": ["strict", "lenient", "excluded_reasons"],
+      "additionalProperties": false,
+      "description": "AI 평가 정답으로 쓸 수 있는지(내보낼 때 계산). 판정 규칙은 docs/design/06-evaluation-and-agreement.md 가 정한다.",
+      "properties": {
+        "in_boundary_buffer": {"type": ["boolean", "null"], "description": "채팅이 경계 완충 안인지(채팅 라벨만)."},
+        "strict": {"type": "boolean", "description": "엄격 점수에 들어감(확신도 '확실함' + 제외 사유 없음 + 사람 불일치 아님)."},
+        "lenient": {"type": "boolean", "description": "참고 점수에 들어감('아마도' 포함)."},
+        "excluded_reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "confidence_undeterminable", "in_boundary_buffer", "non_text_message",
+              "origin_virtual", "origin_undeterminable", "human_disagreement",
+              "conflict_unresolved", "calibration_unverified", "out_of_media",
+              "audio_not_heard", "recheck_incomplete", "adjudicated_exclude", "view_exposed",
+              "grade_unclear", "confidence_probably", "agreement_below_gate"
+            ]
+          },
+          "description": "정답에서 빠진 사유들(건수는 매니페스트 counts.excluded 에). 뜻·세는 순서는 docs/design/06-evaluation-and-agreement.md 6-6. confidence_probably 는 엄격에서만 빠지고, agreement_below_gate 는 엄격을 보류시킨다."
+        }
+      }
+    },
+    "x": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"label_kind": {"const": "segment"}}, "required": ["label_kind"]},
+      "then": {"required": ["start_ms", "end_ms", "category", "confidence", "rationale"]}
+    },
+    {
+      "if": {"properties": {"label_kind": {"const": "reaction"}}, "required": ["label_kind"]},
+      "then": {"required": ["chat_id", "result", "grade", "confidence", "rationale", "first_visible_ms", "reaction_time_ms", "utterances", "evidence_strong", "evidence_medium", "evidence_weak", "video_checks"]}
+    },
+    {
+      "if": {"properties": {"label_kind": {"const": "continuation"}}, "required": ["label_kind"]},
+      "then": {"required": ["reaction_entity_id", "continuation_type", "confidence", "rationale"]}
+    },
+    {
+      "if": {"properties": {"label_kind": {"const": "missed_candidate"}}, "required": ["label_kind"]},
+      "then": {"required": ["chat_id", "cond1", "cond2", "cond3", "cond4", "is_candidate", "reason_code", "confidence", "rationale"]}
+    },
+    {
+      "if": {"properties": {"label_kind": {"const": "origin"}}, "required": ["label_kind"]},
+      "then": {"required": ["chat_id", "origin", "origin_method", "confidence", "rationale"]}
+    }
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "sha12": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "chatId": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$"},
+    "ms": {"type": "integer", "minimum": -3600000, "maximum": 172800000},
+    "nullableMs": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/ms"}]},
+    "evidenceType": {"enum": ["nickname_called", "text_repeated", "direct_reference", "answer_form", "unique_content", "within_time_window", "same_topic"]},
+    "exportManifest": {
+      "type": "object",
+      "title": "내보내기 매니페스트 (zip 안 manifest.json)",
+      "description": "모든 내보내기 zip 에 들어가는 목록 파일. 받는 쪽이 손상·편집·버전 불일치를 알 수 있게 파일별 해시와 필터·기준서·보정값을 적는다.",
+      "required": ["schema", "schema_version", "export_id", "export_type", "project_id", "video_no", "created_at", "created_by", "app_version", "filters", "guides", "calibration", "files", "counts"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "streamlabeler/export-manifest"},
+        "schema_version": {"const": 1},
+        "export_id": {"$ref": "#/$defs/uuid"},
+        "export_type": {"enum": ["full_labels", "ground_truth_strict", "ground_truth_lenient", "review_csv", "labeler_package", "backup"], "description": "전체 라벨 / 엄격 정답 세트 / 참고 정답 세트 / 검토용 CSV / 라벨러 패키지 / 백업."},
+        "project_id": {"$ref": "#/$defs/uuid"},
+        "video_no": {"type": "string", "pattern": "^[0-9]{1,12}$"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "created_by": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}$"},
+        "app_version": {"type": "string"},
+        "filters": {
+          "type": "object",
+          "required": ["include_history", "include_text", "include_nickname_masked", "include_heard_text", "include_protected"],
+          "additionalProperties": false,
+          "properties": {
+            "guide_versions": {"type": ["array", "null"], "items": {"type": "string"}, "description": "특정 기준서 버전만(null 이면 전부)."},
+            "session_ids": {"type": ["array", "null"], "items": {"type": "string"}},
+            "include_history": {"type": "boolean", "description": "대체된 판도 포함."},
+            "include_text": {"type": "boolean", "description": "채팅 본문 포함."},
+            "include_nickname_masked": {"type": "boolean"},
+            "include_heard_text": {"type": "boolean"},
+            "include_protected": {"type": "boolean", "description": "보호 구역 포함(기본 false, 켜면 경고 후 기록)."}
+          }
+        },
+        "guides": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["guide_version", "doc_sha256", "thresholds_sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "guide_version": {"type": "string"},
+              "doc_sha256": {"$ref": "#/$defs/sha256"},
+              "thresholds_sha256": {"$ref": "#/$defs/sha256"}
+            }
+          }
+        },
+        "calibration": {
+          "type": "object",
+          "required": ["active_rev", "offset_ms", "status"],
+          "additionalProperties": false,
+          "description": "VOD 시각을 영상 파일 시각으로 바꿀 때 쓰는 현재 보정값.",
+          "properties": {
+            "active_rev": {"type": "integer", "minimum": 0},
+            "offset_ms": {"type": "integer"},
+            "status": {"enum": ["verified", "unverified", "skipped"]}
+          }
+        },
+        "messages_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "size", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string", "description": "zip 안 경로."},
+              "size": {"type": "integer", "minimum": 0},
+              "sha256": {"$ref": "#/$defs/sha256"},
+              "rows": {"type": ["integer", "null"], "minimum": 0}
+            }
+          }
+        },
+        "counts": {
+          "type": "object",
+          "required": ["by_kind", "excluded"],
+          "additionalProperties": false,
+          "properties": {
+            "by_kind": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+            "excluded": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}, "description": "제외 사유별 건수(안내서 7-3, 검토 의견 1 '제외 건수 별도 표시')."},
+            "invalid_records": {"type": "integer", "minimum": 0, "description": "판 연결 오류 등으로 뷰에서 뺀 기록 수."}
+          }
+        },
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "notes": {"type": "string", "description": "예: 'CSV 는 참고용이며 다시 가져올 수 없음. 정답 원본은 JSONL.'"}
+      }
+    }
+  }
+}

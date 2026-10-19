@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/chat-message.schema.json",
+  "title": "가명 채팅 메시지 한 줄 (chat/messages.jsonl)",
+  "description": "치지직 VOD 채팅 API 에서 받은 메시지 1건을 가명화한 형태. 파일은 한 줄에 한 메시지(JSON Lines, UTF-8, BOM 없음, LF)이고 수집 뒤에는 고치지 않는다. 원 닉네임·userIdHash·profile·extras 원문(후원 금액 등)은 이 파일에 넣지 않고 chat/protected/ 에만 둔다. 중복을 지우거나 솎아내지 않고 서버가 준 개수 그대로 둔다. 설계 문서: docs/design/03-data-model.md 6-2절.",
+  "type": "object",
+  "required": ["chat_id", "t_ms", "server_time_ms", "type_code", "kind", "status", "viewer_id", "is_anonymous", "text", "raw_ref"],
+  "additionalProperties": false,
+  "properties": {
+    "chat_id": {
+      "type": "string",
+      "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$",
+      "description": "메시지 고유 ID. 규칙 sl-chat-id-v1: 'c' + SHA-256(\"{video_no}|{messageTime}|{userIdHash}|{messageTypeCode}|{content}\", UTF-8) 앞 20자. 값이 없으면 빈 문자열로 이어 붙인다. 이 다섯 값이 완전히 같은 메시지가 여럿이면 두 번째부터 '_2', '_3' 을 붙인다(구별할 수 없는 메시지라 순서는 의미가 없다). 수집 순서·페이지 경계와 무관하게 같은 값이 나온다."
+    },
+    "t_ms": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 172800000,
+      "description": "VOD 시각(ms) = API 의 playerMessageTime. 라벨의 모든 시각이 이 축을 쓴다. 정수로 바꿀 수 없거나 VOD 길이 + 10분을 넘으면 null 로 두고 flags.invalid_time 을 켠다."
+    },
+    "server_time_ms": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "채팅 서버 수신 시각(epoch ms) = API 의 messageTime. VOD 시각과 섞지 않고 따로 둔다."
+    },
+    "type_code": {
+      "type": "integer",
+      "description": "API 의 messageTypeCode 원값. 관측: 1 일반, 10 후원, 11 구독. 라이브러리 기준 2 이미지, 3 스티커, 4 영상, 5 리치, 30 시스템(확인 필요)."
+    },
+    "kind": {
+      "enum": ["text", "image", "sticker", "video", "rich", "donation", "subscription", "system", "other"],
+      "description": "type_code 에서 정한 종류. 반응 판정·표본 모집단은 text 만 쓴다. 후원·구독·시스템은 안내서 2장에 따라 따로 표시하고 판정에서 뺀다(사유 코드 F)."
+    },
+    "status": {
+      "type": "string",
+      "maxLength": 40,
+      "description": "API 의 messageStatusType 원값. 관측: NORMAL, CBOTBLIND(클린봇 블라인드). 다른 값은 그대로 저장한다."
+    },
+    "viewer_id": {
+      "type": "string",
+      "pattern": "^(vw_[a-z2-7]{12}|anon)$",
+      "description": "작성자 가명. 'vw_' + base32(HMAC-SHA256(프로젝트 솔트, userIdHash)) 앞 12자(소문자). 익명 후원 등 userIdHash 가 없거나 'anonymous' 이면 'anon' — '다른 시청자 수' 계산에서 뺀다."
+    },
+    "is_anonymous": {"type": "boolean", "description": "viewer_id 가 anon 이면 true."},
+    "nickname_masked": {
+      "type": ["string", "null"],
+      "maxLength": 20,
+      "description": "가림 처리한 닉네임. project.json pseudonymization.nickname_mask 가 first_char 이면 첫 글자 + '*'(최대 7개), hidden 이면 '***'. 원 닉네임은 chat/protected/identities.jsonl 에만 있다."
+    },
+    "role": {
+      "enum": ["streamer", "manager", "viewer", "unknown"],
+      "description": "작성자 역할(profile.userRoleCode 를 줄인 값). streaming_channel_manager → manager, common_user → viewer. 다른 코드는 unknown(확인 필요)."
+    },
+    "text": {
+      "type": "string",
+      "maxLength": 4000,
+      "description": "본문(API content). 이모티콘 토큰 {:이름:} 은 그대로 둔다. 4,000자를 넘으면 자르고 flags.text_truncated 를 켠다(원문은 보호 구역 원문 페이지에 있다)."
+    },
+    "flags": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "수집 때 발견한 이상. 모두 기본 false.",
+      "properties": {
+        "invalid_time": {"type": "boolean", "description": "playerMessageTime 이 비정상이라 t_ms 를 null 로 둠."},
+        "text_truncated": {"type": "boolean", "description": "본문을 4,000자에서 자름."},
+        "profile_parse_error": {"type": "boolean", "description": "profile JSON 문자열을 읽지 못함."},
+        "extras_parse_error": {"type": "boolean", "description": "extras JSON 문자열을 읽지 못함."}
+      }
+    },
+    "raw_ref": {
+      "type": "object",
+      "required": ["fetch_id", "page", "index"],
+      "additionalProperties": false,
+      "description": "보호 구역 원문 페이지(chat/protected/pages-<fetch_id>.jsonl.gz) 안의 위치. 필드가 바뀌어도 다시 받지 않고 원문에서 다시 파싱할 수 있게 한다.",
+      "properties": {
+        "fetch_id": {"type": "string", "pattern": "^F[0-9]{8}-[a-z0-9]{4}$"},
+        "page": {"type": "integer", "minimum": 0, "description": "몇 번째 응답 페이지인지(0부터)."},
+        "index": {"type": "integer", "minimum": 0, "description": "그 페이지 videoChats 배열 안의 위치(0부터)."}
+      }
+    }
+  }
+}

@@ -1,0 +1,295 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/project.schema.json",
+  "title": "프로젝트 파일 (project.json)",
+  "description": "방송 1편에 대한 라벨링 작업 단위의 메타데이터. 방송·영상 참조·채팅 수집 요약·기준서 버전과 시작값 스냅샷·시각 보정·라벨러 명부·보호 구역을 담는다. 라벨 자체는 여기에 넣지 않는다(labels/*.jsonl). 저장은 임시 파일에 다 쓴 뒤 os.replace 로 바꾸고, rev 가 디스크 값과 같을 때만 rev+1 로 저장한다(다른 창·PC 의 변경을 덮지 않기 위해). 프로젝트 단계(구간→반응→표본→후보→잠금)는 여기에 저장하지 않고 라벨 기록과 잠금 파일에서 계산한다. 설계 문서: docs/design/03-data-model.md 6-1절.",
+  "type": "object",
+  "required": [
+    "schema", "schema_version", "project_id", "rev", "slug",
+    "created_at", "created_by", "created_app_version", "modified_at", "modified_by",
+    "purpose", "retention_until",
+    "broadcast", "media", "chat", "pseudonymization",
+    "guides", "active_guide_version", "calibration", "sample_seed", "dataset_split", "labelers", "protected_zone"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "streamlabeler/project", "description": "파일 종류 표시."},
+    "schema_version": {"const": 1, "description": "project.json 형식 버전(정수). 앱이 아는 값보다 크면 읽기 전용으로 연다."},
+    "project_id": {"$ref": "#/$defs/uuid", "description": "프로젝트 고유 ID(UUID v4). 표본 시드·내보내기·가져오기 검사에 쓴다."},
+    "rev": {"type": "integer", "minimum": 1, "description": "저장할 때마다 1씩 올리는 번호. 읽었던 rev 와 디스크 rev 가 다르면 저장하지 않고 다시 읽는다(비교 후 교체)."},
+    "slug": {"type": "string", "pattern": "^[^\\\\/:*?\"<>|]{1,30}-[0-9]{1,12}$", "description": "프로젝트 폴더 이름. 방송 제목 앞 30자(파일명 금지 문자 치환) + '-' + video_no. 긴 경로(260자) 문제를 피하려고 길이를 묶는다."},
+    "created_at": {"$ref": "#/$defs/datetime", "description": "만든 시각. OS 의 실제 시간대 오프셋을 붙인 ISO 8601."},
+    "created_by": {"$ref": "#/$defs/labelerId", "description": "만든 라벨러."},
+    "created_app_version": {"$ref": "#/$defs/semver", "description": "만들 때의 앱 버전."},
+    "modified_at": {"$ref": "#/$defs/datetime", "description": "마지막 저장 시각."},
+    "modified_by": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}@[a-z2-7]{4}$", "description": "마지막 저장자. '<labeler_id>@<machine4>' 형식."},
+    "purpose": {"type": "string", "minLength": 1, "maxLength": 500, "description": "수집·처리 목적 한 줄. 예: '분석 엔진 평가용 정답 라벨 작성(시범)'."},
+    "retention_until": {"type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "보존 기한. 지나면 앱이 '파기 대상' 으로 표시한다. 기본값은 생성일 + 12개월(확인 필요)."},
+    "consent_note": {"type": "string", "maxLength": 2000, "description": "스트리머 동의·계약 근거 메모(자유 텍스트). 앱은 이 값으로 기능을 막지 않는다."},
+    "notes": {"type": "string", "maxLength": 5000, "description": "비고."},
+    "broadcast": {"$ref": "#/$defs/broadcast"},
+    "media": {"$ref": "#/$defs/media"},
+    "chat": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/chatSummary"}], "description": "채팅 수집 요약. 아직 받지 않았으면 null."},
+    "pseudonymization": {"$ref": "#/$defs/pseudonymization"},
+    "guides": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/guideEntry"},
+      "description": "이 프로젝트에 붙은 기준서 버전 목록. 추가만 하고 지우거나 고치지 않는다. 세션은 시작할 때 이 중 하나에 묶인다."
+    },
+    "active_guide_version": {"$ref": "#/$defs/guideVersion", "description": "새 세션이 기본으로 쓸 기준서 버전. guides[] 안에 있어야 한다."},
+    "calibration": {"$ref": "#/$defs/calibration"},
+    "sample_seed": {"type": "string", "pattern": "^[0-9a-f]{32}$", "description": "프로젝트를 만들 때 한 번 만드는 임의 16바이트(hex 32자). 화면에서 바꿀 수 없고 비밀이 아니다. 재라벨 무작위 블록 순서(06 3-2)와 표본 순서 키(sha256-tau-v1: SHA-256('{sample_seed}|{draw_no}|{chat_id}'), 03 15-1·06 2-1)가 쓴다. 설계 문서: 03 6-1."},
+    "dataset_split": {"enum": ["dev", "test"], "default": "dev", "description": "평가 세트 구분. 기본 dev(시범처럼 기준을 고치는 데 쓴 라벨은 최종 엔진 평가에 기본으로 넣지 않는다, 06 9-4). 세션은 열 때 이 값을 복사한다(session.open.dataset_split). 바꾸는 것은 검토자만. 설계 문서: 03 6-1."},
+    "labelers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/labelerEntry"},
+      "description": "이 프로젝트에서 라벨을 매길 수 있는 라벨러 명부. 표시 이름(실명)은 넣지 않는다 — 그건 수집 PC 의 data\\labelers.json 에만 둔다."
+    },
+    "protected_zone": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "description": "보호 구역: 내보내기·라벨러 패키지·일반 백업에서 기본 제외하는 프로젝트 상대 경로(접두사 또는 glob). 기본값: chat/protected/, derived/asr*, derived/ocr*, origin/."
+    },
+    "storage_warning_acknowledged": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["at", "by", "path_kind"],
+          "additionalProperties": false,
+          "properties": {
+            "at": {"$ref": "#/$defs/datetime"},
+            "by": {"$ref": "#/$defs/labelerId"},
+            "path_kind": {"enum": ["onedrive", "unc", "removable", "other"], "description": "경고가 뜬 위치 종류."}
+          }
+        }
+      ],
+      "description": "프로젝트 폴더가 OneDrive·네트워크·이동식 드라이브 아래일 때 라벨러가 경고를 확인했다는 기록. 아니면 null."
+    },
+    "x": {"type": "object", "description": "시범용 실험 필드. 점수 계산에 쓰지 않는다. 키 이름은 자유."}
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "UUID v4, 소문자."
+    },
+    "datetime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+      "description": "ISO 8601 벽시계 시각. 시간대 오프셋 필수. +09:00 을 코드에 박지 않고 OS 오프셋을 그대로 쓴다."
+    },
+    "semver": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?$", "description": "앱 버전. 예: 0.1.0"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 소문자 16진수."},
+    "labelerId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}$", "description": "라벨러 짧은 코드. 예: L01"},
+    "guideVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+(-[a-z0-9]+)?$",
+      "description": "기준서 버전. 예: 0.1, 0.2-draft. 접미사(-draft 등)는 시범용 초안이다(07 ADR-19). 같은 버전 문자열 안의 실제 본문은 doc_sha256 으로 구분한다. 초안을 확정할 때('0.2-draft' → '0.2')는 guides[] 에 새 항목을 추가하고 초안 항목은 지우지 않는다. 두 항목의 해시가 같아도 버전 문자열이 다르면 다른 기준서로 집계한다(03 9-2 규칙 8). label-event·sample-manifest·export-row·guide-config 스키마의 버전 패턴과 같다."
+    },
+    "ms": {"type": "integer", "minimum": -3600000, "maximum": 172800000, "description": "VOD 시각(ms 정수). 치지직 playerMessageTime 축."},
+    "broadcast": {
+      "type": "object",
+      "description": "라벨링 대상 방송(치지직 VOD). 영상 정보 API(/service/v2/videos/{no})에서 받은 값.",
+      "required": ["platform", "video_no", "title", "duration_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "platform": {"const": "chzzk", "description": "플랫폼. v0.1 은 치지직만."},
+        "video_no": {"type": "string", "pattern": "^[0-9]{1,12}$", "description": "치지직 VOD 번호(chzzk.naver.com/video/{n}). 문자열로 저장."},
+        "channel_id": {"type": ["string", "null"], "maxLength": 64, "description": "스트리머 채널 ID(공개 정보). 모르면 null."},
+        "channel_name": {"type": ["string", "null"], "maxLength": 100, "description": "채널 이름(표시용)."},
+        "title": {"type": "string", "maxLength": 300, "description": "방송 제목."},
+        "duration_ms": {"type": "integer", "minimum": 0, "description": "API 가 알려 준 VOD 길이(ms)."},
+        "live_open_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/datetime"}], "description": "라이브 시작 시각(API liveOpenDate)."},
+        "publish_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/datetime"}], "description": "다시보기 게시 시각."},
+        "adult": {"type": ["boolean", "null"], "description": "19세 이상 VOD 여부(API adult)."}
+      }
+    },
+    "probe": {
+      "type": "object",
+      "description": "ffprobe 메타데이터 요약.",
+      "required": ["duration_ms", "vfr"],
+      "additionalProperties": false,
+      "properties": {
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "video_codec": {"type": ["string", "null"]},
+        "audio_codec": {"type": ["string", "null"]},
+        "width": {"type": ["integer", "null"], "minimum": 0},
+        "height": {"type": ["integer", "null"], "minimum": 0},
+        "r_frame_rate": {"type": ["string", "null"], "pattern": "^[0-9]+/[0-9]+$", "description": "ffprobe r_frame_rate 원문. 예: 60/1"},
+        "avg_frame_rate": {"type": ["string", "null"], "pattern": "^[0-9]+/[0-9]+$"},
+        "vfr": {"type": "boolean", "description": "r_frame_rate 와 avg_frame_rate 가 다르면 true(가변 프레임). true 면 프레임 번호 표시를 끄고 ms 만 보인다."},
+        "nb_frames": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "mediaRef": {
+      "type": "object",
+      "description": "로컬 영상 파일 참조. 영상은 프로젝트에 넣지 않는다. 경로가 바뀌어도 지문으로 다시 찾는다.",
+      "required": ["path_abs", "size", "mtime_ns", "partial_fp", "probe"],
+      "additionalProperties": false,
+      "properties": {
+        "path_abs": {"type": "string", "minLength": 3, "description": "마지막으로 연 절대 경로. 드라이브 문자로 시작해야 한다(UNC·URL 은 받지 않는다)."},
+        "path_rel": {"type": ["string", "null"], "description": "프로젝트 폴더 기준 상대 경로(같은 드라이브일 때)."},
+        "size": {"type": "integer", "minimum": 0, "description": "파일 크기(바이트)."},
+        "mtime_ns": {"type": "integer", "minimum": 0, "description": "수정 시각(ns). 참고용."},
+        "partial_fp": {"$ref": "#/$defs/sha256", "description": "부분 지문: 크기 + 앞 1MB + 10% 간격 64KB×8 + 끝 1MB 를 이은 바이트의 SHA-256. 같은 파일인지 판정하는 기준."},
+        "full_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}], "description": "파일 전체 SHA-256(선택, 백그라운드 계산)."},
+        "ntfs_file_id": {"type": ["string", "null"], "pattern": "^[0-9]+$", "description": "NTFS 파일 참조 번호(os.stat st_ino). 2^53 을 넘을 수 있어 문자열로 저장."},
+        "volume_serial": {"type": ["string", "null"], "pattern": "^[0-9]+$", "description": "볼륨 번호(st_dev). 문자열."},
+        "probe": {"$ref": "#/$defs/probe"}
+      }
+    },
+    "media": {
+      "type": "object",
+      "description": "영상 참조와 교체 이력. 지문이 다른 파일로 바꾸려면 '미디어 교체' 절차로 media_rev 를 올리고 사유를 남긴다. 라벨마다 media_rev 가 기록된다.",
+      "required": ["media_rev", "current", "history"],
+      "additionalProperties": false,
+      "properties": {
+        "media_rev": {"type": "integer", "minimum": 0, "description": "영상 교체 번호. 처음 지정하면 1, 지정 전 0."},
+        "current": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/mediaRef"}], "description": "현재 영상. 지정 전이면 null."},
+        "history": {
+          "type": "array",
+          "description": "이전 영상들(추가만).",
+          "items": {
+            "type": "object",
+            "required": ["media_rev", "partial_fp", "size", "replaced_at", "replaced_by", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "media_rev": {"type": "integer", "minimum": 1},
+              "partial_fp": {"$ref": "#/$defs/sha256"},
+              "size": {"type": "integer", "minimum": 0},
+              "duration_ms": {"type": ["integer", "null"], "minimum": 0},
+              "replaced_at": {"$ref": "#/$defs/datetime"},
+              "replaced_by": {"$ref": "#/$defs/labelerId"},
+              "reason": {"type": "string", "minLength": 1, "maxLength": 500}
+            }
+          }
+        }
+      }
+    },
+    "chatSummary": {
+      "type": "object",
+      "description": "채팅 수집 요약. 자세한 수집 기록은 chat/fetch-<fetch_id>.json, 메시지는 chat/messages.jsonl(가명), 원문 페이지는 chat/protected/ 에 있다.",
+      "required": ["chat_rev", "fetch_id", "fetched_at", "source", "chat_id_algorithm", "message_count", "messages_sha256", "complete"],
+      "additionalProperties": false,
+      "properties": {
+        "chat_rev": {"type": "integer", "minimum": 1, "description": "채팅 집합 번호. 라벨이 하나라도 있으면 다시 받기를 막는다(MVP). 다시 받으면 새 번호."},
+        "fetch_id": {"type": "string", "pattern": "^F[0-9]{8}-[a-z0-9]{4}$", "description": "수집 ID. 예: F20261019-a1b2"},
+        "fetched_at": {"$ref": "#/$defs/datetime"},
+        "source": {"enum": ["chzzk_vod_api_v1"], "description": "수집 경로. api.chzzk.naver.com/service/v1/videos/{no}/chats (비공식 웹 API)."},
+        "chat_id_algorithm": {"const": "sl-chat-id-v1", "description": "chat_id 를 만드는 공개 규칙의 이름. AI 엔진도 같은 규칙으로 계산할 수 있다."},
+        "message_count": {"type": "integer", "minimum": 0},
+        "messages_sha256": {"$ref": "#/$defs/sha256", "description": "chat/messages.jsonl 파일 바이트의 SHA-256. 라벨러 패키지·AI 결과 가져오기 때 같은 채팅 집합인지 확인."},
+        "complete": {"type": "boolean", "description": "끝까지 받았으면 true. 상한·오류로 멈췄으면 false."},
+        "incomplete_reason": {"type": ["string", "null"], "maxLength": 300},
+        "server_minus_player_ms": {"type": ["integer", "null"], "description": "messageTime − playerMessageTime. 실측에서 상수였다(확인용). 상수가 아니면 null 로 두고 fetch 기록에 분포를 남긴다."},
+        "anonymous_count": {"type": "integer", "minimum": 0, "description": "작성자 식별값이 없는(익명) 메시지 수."},
+        "kind_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}, "description": "메시지 종류(kind)별 개수."}
+      }
+    },
+    "pseudonymization": {
+      "type": "object",
+      "description": "시청자 가명화 설정. 솔트 원본은 chat/protected/salt.json 에만 있다.",
+      "required": ["method", "salt_id", "nickname_mask"],
+      "additionalProperties": false,
+      "properties": {
+        "method": {"const": "hmac-sha256-v1", "description": "viewer_id = 'vw_' + base32(HMAC-SHA256(프로젝트 솔트, userIdHash)) 앞 12자."},
+        "salt_id": {"type": "string", "pattern": "^[0-9a-f]{12}$", "description": "솔트 바이트 SHA-256 의 앞 12자리. 보호 파일의 솔트가 바뀌지 않았는지 확인하는 용도(솔트 자체가 아님)."},
+        "nickname_mask": {"enum": ["first_char", "hidden"], "description": "가명 채팅 파일의 nickname_masked 규칙. first_char = 첫 글자 + '*', hidden = '***' 고정."}
+      }
+    },
+    "guideEntry": {
+      "type": "object",
+      "description": "이 프로젝트에 붙은 기준서 버전 한 개와 시작값 스냅샷. 붙인 뒤에는 바꾸지 않는다.",
+      "required": ["guide_version", "doc_path", "doc_sha256", "thresholds", "thresholds_sha256", "added_at", "added_by"],
+      "additionalProperties": false,
+      "properties": {
+        "guide_version": {"$ref": "#/$defs/guideVersion"},
+        "doc_path": {"type": "string", "description": "프로젝트 안 기준서 사본 경로. 예: guide/v0.1.md, guide/v0.2-draft.md"},
+        "doc_sha256": {"$ref": "#/$defs/sha256"},
+        "thresholds": {"type": "object", "description": "guide-config.schema.json 의 values 와 같은 모양(검증은 그 스키마로)."},
+        "thresholds_sha256": {"$ref": "#/$defs/sha256", "description": "thresholds 를 정규화한 JSON 의 SHA-256."},
+        "added_at": {"$ref": "#/$defs/datetime"},
+        "added_by": {"$ref": "#/$defs/labelerId"},
+        "reason": {"type": ["string", "null"], "maxLength": 500, "description": "새 버전을 붙인 이유."}
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "description": "시각 보정 앵커: 같은 순간을 VOD 시각과 영상 파일 시각으로 동시에 짚은 기록.",
+      "required": ["anchor_id", "kind", "vod_ms", "file_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "anchor_id": {"$ref": "#/$defs/uuid"},
+        "kind": {"enum": ["nickname_call", "text_read", "other"], "description": "닉네임 호명 / 채팅을 그대로 읽음 / 기타."},
+        "chat_id": {"type": ["string", "null"], "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$"},
+        "vod_ms": {"$ref": "#/$defs/ms", "description": "그 순간의 VOD 시각(채팅 시각에서 계산한 기대 시각)."},
+        "file_ms": {"type": "integer", "minimum": 0, "description": "영상 파일에서 실제로 들린 시각."},
+        "note": {"type": "string", "maxLength": 300}
+      }
+    },
+    "calibrationRev": {
+      "type": "object",
+      "description": "시각 보정 한 판. file_ms = vod_ms + offset_ms. 라벨마다 calibration_rev 가 기록되어 나중에 보정이 바뀌어도 다시 계산할 수 있다.",
+      "required": ["rev", "media_rev", "method", "offset_ms", "anchors", "status", "created_at", "created_by"],
+      "additionalProperties": false,
+      "properties": {
+        "rev": {"type": "integer", "minimum": 0, "description": "보정 번호. 0 은 프로젝트를 만들 때 자동으로 생기는 '오프셋 0, 미확인' 판."},
+        "media_rev": {"type": "integer", "minimum": 0, "description": "이 보정이 적용되는 영상 번호."},
+        "method": {"enum": ["single_offset", "piecewise_linear"], "description": "single_offset = 한 값(MVP), piecewise_linear = 앵커 사이 선형 보간(v1, 방송 중간에 오프셋이 바뀌는 경우)."},
+        "offset_ms": {"type": "integer", "minimum": -86400000, "maximum": 86400000, "description": "영상 파일 시각 − VOD 시각. 파일 앞 12초가 잘렸으면 −12000."},
+        "anchors": {"type": "array", "items": {"$ref": "#/$defs/anchor"}},
+        "residual_max_ms": {"type": ["integer", "null"], "minimum": 0, "description": "앵커들이 offset 에서 벗어난 최대 크기. 크면 오프셋이 일정하지 않다는 신호."},
+        "status": {"enum": ["verified", "unverified", "skipped"], "description": "verified = 앵커 3개 이상으로 확정, unverified = 확인 전, skipped = 사유를 적고 건너뜀. 반응 라벨링은 verified 또는 skipped 에서만 연다."},
+        "skip_reason": {"type": ["string", "null"], "maxLength": 500},
+        "broadcast_delay_ms": {"type": ["integer", "null"], "minimum": 0, "maximum": 120000, "description": "시청자 화면 지연(방송 지연) 추정값. 표시·경고에만 쓰고 저장된 시각을 고치지 않는다."},
+        "delay_anchors": {
+          "type": "array",
+          "description": "방송 지연 측정에 쓴 '시청자가 스트리머 말을 인용한 채팅' 들.",
+          "items": {
+            "type": "object",
+            "required": ["chat_id", "chat_ms", "utterance_ms"],
+            "additionalProperties": false,
+            "properties": {
+              "chat_id": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$"},
+              "chat_ms": {"$ref": "#/$defs/ms"},
+              "utterance_ms": {"$ref": "#/$defs/ms"},
+              "note": {"type": "string", "maxLength": 300}
+            }
+          }
+        },
+        "created_at": {"$ref": "#/$defs/datetime"},
+        "created_by": {"$ref": "#/$defs/labelerId"},
+        "note": {"type": "string", "maxLength": 500}
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "description": "시각 보정 기록. 판(rev)은 추가만 한다.",
+      "required": ["active_rev", "revs"],
+      "additionalProperties": false,
+      "properties": {
+        "active_rev": {"type": "integer", "minimum": 0, "description": "지금 쓰는 보정 번호."},
+        "revs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/calibrationRev"}}
+      }
+    },
+    "labelerEntry": {
+      "type": "object",
+      "required": ["labeler_id", "role", "assigned_session_kinds", "engine_author"],
+      "additionalProperties": false,
+      "properties": {
+        "labeler_id": {"$ref": "#/$defs/labelerId"},
+        "engine_author": {"type": "boolean", "description": "AI 엔진의 규칙·코드를 만든 사람인지. 명부에 넣을 때 묻는다. 블라인드로도 막을 수 없는 쏠림이 있어 보고서 머리에 표시한다(03 6-1, 06 5장)."},
+        "role": {"enum": ["primary", "second", "reviewer"], "description": "1차 / 두 번째 사람(독립 재라벨) / 검토자(조정·출처 판정·AI 비교)."},
+        "assigned_session_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"enum": ["primary", "relabel_same", "relabel_second", "adjudication", "origin_review"]},
+          "description": "이 라벨러가 만들 수 있는 세션 종류. 라벨러 패키지를 만들 때 지정한다."
+        }
+      }
+    }
+  }
+}
