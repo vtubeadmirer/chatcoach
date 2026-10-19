@@ -1,89 +1,73 @@
-# StreamLabeler (가칭)
+# StreamLabeler
 
-상태: M0 '빈 껍데기와 배포 경로' 구현 중 (2026-10-20) · 라벨링 기능 없음 · 공개 릴리스 없음
+**치지직 방송 다시보기를 보면서, 스트리머가 "어느 채팅을 읽고 대답했는지" 를 사람이 직접 표시하는 Windows 프로그램입니다.**
 
-사람이 치지직 VOD 영상과 채팅 로그를 보며 정답 라벨을 매기는 Windows 포터블 도구다. 이 정답으로 방송 분석 엔진(AI)이 얼마나 정확한지 잰다.
+> 지금은 만드는 중입니다. 빈 창과 자동 업데이트만 되고, 아래에 설명한 표시 기능은 아직 없습니다.
 
-지금 저장소에는 라벨링 안내서와 설계 문서만 있고 코드는 없다. 검토 의견에 따라 시범 라벨링으로 안내서를 먼저 검증하고, 도구는 그 시범에 필요한 범위(MVP)부터 만든다 ([07](docs/design/07-roadmap.md)).
+## 이게 왜 필요한가요?
 
-## 이 도구가 하는 일
+방송을 보고 "이 장면에서 스트리머가 이 채팅에 답했다" 를 알아내는 AI 를 만들고 있습니다. AI 가 잘 맞히는지 채점하려면 **정답지**가 필요합니다. 정답지는 사람이 소리를 직접 듣고 만들어야 믿을 수 있습니다.
 
-1. 치지직 VOD 채팅을 받아 원문 그대로 보관하고, 로컬 영상 파일과 시각을 맞춘다. (MVP)
-2. 방송 전체를 활동 구간(저스트채팅·게임·노래·기타·판단 불가)으로 나눈다. (MVP)
-3. 저스트채팅 구간 안에서 채팅과 스트리머 발화를 연결하고 증거·등급·확신도·이어짐을 적는다. (MVP)
-4. 구간마다 프로그램이 뽑은 무작위 표본을 판정한다(MVP). 놓친 채팅 후보는 사유 코드와 함께 기록한다(v1).
-5. 라벨을 JSONL·CSV 로 내보낸다(MVP). 재라벨 일치도와 AI 결과 비교는 v1 에서 한다.
+StreamLabeler 는 그 정답지를 만드는 작업대입니다. 영상과 채팅을 나란히 띄워 두고, 몇 시간짜리 방송도 헷갈리지 않고 빠르게 표시할 수 있게 돕습니다.
 
-판단 기준은 [라벨링 안내서](docs/labeling-guide/v0.1.md)가 정한다. 도구는 그 기준을 지키게 돕는다. 기준을 새로 만들지는 않는다.
+## 무엇을 표시하나요?
 
-## 하지 않는 일
+방송 하나를 네 단계로 봅니다.
 
-| 하지 않는 일 | 이유 |
+**1. 방송을 구간으로 나눕니다.**
+지금 스트리머가 뭘 하고 있는지만 봅니다.
+
+| 구간 | 이럴 때 |
 |---|---|
-| AI 판정을 대신하거나 사람 라벨을 자동으로 채우기 | 정답은 사람이 소리를 듣고 정한다(안내서 1장 3·4항). 자동 인식 문장은 참고로만 보이고, 등급은 미리 고르지 않고 조건 충족 여부만 보인다([01](docs/design/01-analysis-and-ideas.md) 3-1) |
-| 라벨링 중 AI 결과 보여 주기 | 1차 라벨을 잠근 뒤에만 AI 결과를 가져올 수 있다 |
-| 가상 채팅 만들기·방송에 넣기 | 별도 프로그램이 할 일이다. 이 도구는 채팅 출처(실제·가상·판별 불가)를 판정만 한다(v1, 검토 의견 1) |
-| 가상 채팅이 방송에 도움이 되는지 평가하기 | 안내서 0장의 별도 '시험 평가표'에서 다룬다 |
-| 영상 다운로드·편집 | 영상은 경로와 지문으로만 참조하고, 쓰기 코드를 두지 않는다 |
-| 라벨·채팅을 외부 서버로 보내기 | 시청자 개인정보가 들어 있다. 앱이 접속하는 곳은 GitHub(업데이트)와 치지직 API(채팅 수집)뿐이다(예정) |
+| 저스트채팅 | 시청자와 이야기하는 중, 잡담 |
+| 게임 | 게임을 하는 중 |
+| 노래 | 노래를 부르는 중 |
+| 기타 | 영상 같이 보기, 자리 비움, 방송 준비 화면 |
 
-## 문서 지도
+**2. 저스트채팅 구간에서 "채팅에 반응한 순간" 을 찾아 그 채팅과 이어 줍니다.**
 
-| 문서 | 내용 |
-|---|---|
-| [labeling-guide/v0.1.md](docs/labeling-guide/v0.1.md) | 라벨링 안내서 v0.1 원문 (고치지 않고 보존) |
-| [labeling-guide/v0.1-review.md](docs/labeling-guide/v0.1-review.md) | v0.1 에 대한 외부 검토 의견 |
-| [labeling-guide/v0.2-draft.md](docs/labeling-guide/v0.2-draft.md) | 안내서 개정안 (시범 라벨링 전 초안) |
-| [design/01-analysis-and-ideas.md](docs/design/01-analysis-and-ideas.md) | 안내서 분석, 제품 아이디어, 우선순위 |
-| [design/02-architecture.md](docs/design/02-architecture.md) | 스택, 모듈, 폴더 구조, 데이터 흐름 |
-| [design/03-data-model.md](docs/design/03-data-model.md) | 엔터티, 저장 형식, 버전, 병합 |
-| [schemas/](schemas/) | 프로젝트·라벨·내보내기 JSON 스키마. 저장소 루트에 있다. 위치는 [02](docs/design/02-architecture.md) 4장, 파일 목록은 [03](docs/design/03-data-model.md) 19장이 기준이다 |
-| [design/04-update-and-release.md](docs/design/04-update-and-release.md) | 릴리스 파이프라인, 업데이터, 서명 |
-| [design/05-security.md](docs/design/05-security.md) | 위협 모델, 확정 항목과 완화, 개인정보 |
-| [design/06-evaluation-and-agreement.md](docs/design/06-evaluation-and-agreement.md) | 일치도, AI 비교 지표, 표본 추출 |
-| [design/07-roadmap.md](docs/design/07-roadmap.md) | 단계별 계획, 열린 질문 |
-
-## 예정
-
-- 스택: Python 3.12 · PySide6 (Widgets, QtWebEngine 제외) · libmpv(python-mpv) · ffmpeg · PyInstaller onedir. 업데이터·플레이어 등 인프라 코드는 [ClipSlicer](https://github.com/vtubeadmirer/clipslicer)에서 복사해 시작한다 ([02](docs/design/02-architecture.md)).
-- 배포: 설치 없는 포터블 zip(폴더째 복사)을 GitHub Releases 로 낸다. 새 버전은 프로그램 안에서 알리고 버튼 한 번으로 바꾼다 ([04](docs/design/04-update-and-release.md)).
-- 설치 위치: OneDrive 밖 사용자 폴더(예: `%LOCALAPPDATA%\Programs\StreamLabeler`)를 권장한다. 이유는 [05](docs/design/05-security.md)에 있다.
-- 코드 서명이 없어 첫 실행 때 Windows SmartScreen 경고가 뜬다.
-
-## 개발 시작
-
-의존성은 `requirements.in`(최상위만) → `requirements.lock`(전이 의존성까지 버전·해시 고정, `tools\lock_deps.ps1` 로 생성) 이다. 설치는 항상 잠금 파일로 하고 pip 가 해시를 검사한다 ([04](docs/design/04-update-and-release.md) 4-4).
-
-```powershell
-py -3.12 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install pip==25.2
-pip install --require-hashes -r requirements.lock
-python tools\get_ffmpeg.py      # bin\ffmpeg\  (SHA-256 고정값과 비교)
-python tools\get_libmpv.py      # bin\libmpv-2.dll (7-Zip·Bandizip 또는 py7zr 로 해제)
-python tools\make_icon.py       # assets\icon.ico
-python main.py
-```
-
-- 테스트: `python -m pytest -q -m "not local_only"` (CI 와 같음). 실제 robocopy·PowerShell 로 교체를 시험하는 `local_only` 묶음은 `tools\release.ps1` 이 릴리스 전에 돌린다.
-- 시험 빌드: `.\build.ps1 -DistPath dist_test -Channel test` (PyInstaller onedir, 약 365MB). 실제 배포 빌드는 CI 가 `-Channel release` 로 만든다.
-- 업데이트 왕복 시험(가짜 릴리스 서버): `tools\fake_release_server.py` 와 `tools\update_roundtrip.py` 의 머리 주석을 본다.
-- 주의: PySide6 메타 패키지와 PySide6-Essentials 를 같은 venv 에서 바꿔 끼우면 공용 파일(`PySide6\__init__.py`)이 지워진다. 그때는 `pip install --force-reinstall --no-deps --require-hashes -r requirements.lock`.
-
-라벨·채팅·영상은 개인정보가 들어 있어 저장소에 올리지 않는다. `.gitignore` 가 `data/` · `projects/` · `*.jsonl` 등을 이미 제외한다.
-
-## 릴리스와 서명
-
-**릴리스는 저장소 루트의 `release.cmd` 를 더블클릭하면 된다.** 새 버전 번호(Enter 면 패치 +1)를 정하고, 메모장에 릴리스 노트를 적고, 서명 암호를 한 번 넣으면 나머지는 알아서 한다. 중간에 멈추면 다시 더블클릭해서 이어 간다. 시험만 하려면 `release.cmd --dry-run`.
-
-버전은 저장소 루트 `VERSION` 한 파일이 정한다(`tools\sync_version.py` 가 `app\__init__.py` 와 매니페스트를 생성). `release.cmd` 가 내부에서 하는 순서는 `tools\release.ps1` → GitHub Actions(빌드·초안 릴리스) → 개발 PC 에서 `tools\publish_release.py check` → `tools\sign_manifest.py sign`(오프라인 minisign 키, 암호 입력) → `upload-sig` → `publish` → `make-latest` 순서다 ([04](docs/design/04-update-and-release.md) 4장·13장). 앱은 내장 공개키 K1·K2 로 서명이 맞는 `latest.json` 만 믿고, 서명이 없거나 틀리면 거부한다. 공개키는 `app\appspec.py` 에 있고, 손으로 확인할 때는 `minisign -Vm latest.json -P <공개키>` 또는 `python tools\sign_manifest.py verify latest.json` 을 쓴다 (04 8장).
-
-| 키 | 키 ID | 공개키 (minisign) |
+| 채팅 | 스트리머가 한 말 | 표시 |
 |---|---|---|
-| K1 (운용) | `F0DA83E17841C95C` | `RWRcyUF44YPa8Bfo4jqfCXr/dSMQlH853FAHFR5U58miyChvUp/iC0gp` |
-| K2 (예비) | `7297CBEEF96A118F` | `RWSPEWr57suXcry8hkMgzUrqbh2tgeod3EiIJ/YGKa1NbwwrG0QA5B5u` |
+| "여행 가면 꼭 하는 거 있어요?" | "○○님이 여행 가면 뭐 하냐고 물어보셨는데…" | 직접 반응 (닉네임을 부르고 질문을 되풀이함) |
+| 같은 채팅 | 8초 뒤 "저는 무조건 맛집부터 찾아요" | 반응했을 가능성 높음 (부르지는 않았지만 바로 답함) |
+| 여행 이야기 중에 올라온 여행 채팅 여러 개 | 원래 하던 여행 이야기를 계속함 | 주제만 같음 (그 채팅 때문은 아님) |
 
-## 이름과 라이선스
+대화가 그 뒤로 얼마나 이어졌는지도 함께 적습니다. 한마디 답하고 끝났는지, 몇 분 동안 그 이야기를 했는지 같은 것입니다.
 
-- 이름은 StreamLabeler, 저장소는 `vtubeadmirer/streamlabeler`(공개)로 정했다 (2026-10-20, [07](docs/design/07-roadmap.md) 질문 3·4). 로컬 저장소에 원격은 아직 연결되지 않았다.
-- 라이선스: 앱 코드는 [MIT](LICENSE). 함께 묶는 Qt(LGPL)·ffmpeg(GPL)·libmpv(GPL) 의 고지는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 에 있다. 첫 공개 릴리스 전에 배포자가 '확인 필요' 항목을 확인한다 (07 질문 31).
+**3. 무작위로 뽑은 채팅을 하나씩 확인합니다.**
+반응한 채팅만 모으면 "안 읽고 지나간 채팅" 이 어떤지 알 수 없습니다. 그래서 프로그램이 구간마다 채팅 100개 정도를 무작위로 뽑아 주고, 사람이 하나씩 "읽었다 / 안 읽었다" 를 판정합니다.
+
+**4. (나중에) 놓친 채팅을 찾습니다.**
+스트리머가 답할 만했는데 지나친 질문을 표시합니다.
+
+다 하면 결과를 표 파일(CSV)로 저장합니다. 이 표가 AI 를 채점하는 정답지가 됩니다.
+
+판단 기준은 [라벨링 안내서](docs/labeling-guide/v0.1.md)에 정해져 있습니다. 누가 표시해도 같은 결과가 나오게 하려는 규칙입니다. 프로그램은 그 규칙을 지키기 쉽게 도와줄 뿐, 기준을 새로 만들지 않습니다.
+
+## 누가 쓰나요?
+
+- **표시하는 사람(라벨러):** 방송을 보고 표시합니다. 방송 흐름을 잘 아는 시청자라면 안내서를 읽고 할 수 있습니다.
+- **스트리머·버튜버:** 직접 쓸 일은 거의 없습니다. 자기 방송의 다시보기가 자료로 쓰입니다.
+
+## 이 프로그램이 하지 않는 일
+
+- **영상을 내려받거나 고치지 않습니다.** 다시보기 영상은 [ClipSlicer](https://github.com/vtubeadmirer/clipslicer) 같은 프로그램으로 미리 받아 둡니다. StreamLabeler 는 그 파일을 열어 보기만 합니다.
+- **AI 가 정답을 대신 채우지 않습니다.** 사람이 소리를 듣고 정합니다. 표시하는 동안에는 AI 결과를 보여 주지도 않습니다. 보면 그쪽으로 쏠리기 때문입니다.
+- **채팅과 닉네임을 인터넷에 올리지 않습니다.** 시청자 정보는 내 PC 에만 두고, 닉네임은 가려서 보관합니다. 프로그램이 접속하는 곳은 업데이트 확인용 GitHub 와 채팅을 받아 오는 치지직뿐입니다.
+- **가짜 채팅을 만들거나 방송에 넣지 않습니다.**
+
+## 쓰는 방법 (완성되면)
+
+1. 릴리스 페이지에서 zip 을 받아 원하는 폴더에 풉니다. 설치는 필요 없습니다. `%LOCALAPPDATA%\Programs\StreamLabeler` 처럼 OneDrive 밖에 두는 것을 권합니다.
+2. 처음 실행하면 Windows 가 "PC 보호" 경고를 띄울 수 있습니다. [추가 정보] → [실행] 을 누르면 됩니다.
+3. 다시보기 주소를 넣으면 채팅을 받아 옵니다. 미리 받아 둔 영상 파일을 고릅니다.
+4. 영상과 채팅의 시간을 맞춥니다. 채팅 한두 개를 영상에서 찾아 짚어 주면 됩니다.
+5. 위의 1~3단계대로 표시하고, 다 되면 내보내기를 누릅니다.
+
+새 버전이 나오면 프로그램 아래쪽에 알림이 뜨고, 버튼 한 번으로 바뀝니다. 내가 표시한 내용은 업데이트해도 그대로 남습니다.
+
+## 더 알아보기
+
+- 개발·빌드·릴리스·업데이트 서명: [docs/development.md](docs/development.md)
+- 판단 기준: [라벨링 안내서 v0.1](docs/labeling-guide/v0.1.md)
+- 앱 코드는 [MIT 라이선스](LICENSE)이고, 함께 들어 있는 프로그램의 라이선스는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있습니다.
