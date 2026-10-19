@@ -74,7 +74,9 @@ python main.py
 
 ## 릴리스와 서명
 
-버전은 저장소 루트 `VERSION` 한 파일이 정한다(`tools\sync_version.py` 가 `app\__init__.py` 와 매니페스트를 생성). 릴리스는 `tools\release.ps1` → GitHub Actions(빌드·초안 릴리스) → 개발 PC 에서 `tools\publish_release.py check` → `tools\sign_manifest.py sign`(오프라인 minisign 키, 암호 입력) → `upload-sig` → `publish` → `make-latest` 순서다 ([04](docs/design/04-update-and-release.md) 4장·13장). 앱은 내장 공개키 K1·K2 로 서명이 맞는 `latest.json` 만 믿고, 서명이 없거나 틀리면 거부한다. 공개키는 `app\appspec.py` 에 있고, 손으로 확인할 때는 `minisign -Vm latest.json -P <공개키>` 또는 `python tools\sign_manifest.py verify latest.json` 을 쓴다 (04 8장).
+**릴리스는 저장소 루트의 `release.cmd` 를 더블클릭하면 된다.** 새 버전 번호(Enter 면 패치 +1)를 정하고, 메모장에 릴리스 노트를 적고, 서명 암호를 한 번 넣으면 나머지는 알아서 한다. 중간에 멈추면 다시 더블클릭해서 이어 간다. 시험만 하려면 `release.cmd --dry-run`.
+
+버전은 저장소 루트 `VERSION` 한 파일이 정한다(`tools\sync_version.py` 가 `app\__init__.py` 와 매니페스트를 생성). `release.cmd` 가 내부에서 하는 순서는 `tools\release.ps1` → GitHub Actions(빌드·초안 릴리스) → 개발 PC 에서 `tools\publish_release.py check` → `tools\sign_manifest.py sign`(오프라인 minisign 키, 암호 입력) → `upload-sig` → `publish` → `make-latest` 순서다 ([04](docs/design/04-update-and-release.md) 4장·13장). 앱은 내장 공개키 K1·K2 로 서명이 맞는 `latest.json` 만 믿고, 서명이 없거나 틀리면 거부한다. 공개키는 `app\appspec.py` 에 있고, 손으로 확인할 때는 `minisign -Vm latest.json -P <공개키>` 또는 `python tools\sign_manifest.py verify latest.json` 을 쓴다 (04 8장).
 
 | 키 | 키 ID | 공개키 (minisign) |
 |---|---|---|
