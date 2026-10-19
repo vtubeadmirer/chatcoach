@@ -1,0 +1,7 @@
+# GitHub Actions 의 고정 커밋 SHA 를 주간 PR 로 올린다 (docs/design/04-update-and-release.md 4-4). PR 을 보고 병합한다.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

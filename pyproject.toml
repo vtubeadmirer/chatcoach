@@ -1,0 +1,26 @@
+# 배포 패키지를 만들려는 파일이 아니다. 메타데이터와 pytest 설정만 둔다.
+# 의존성은 requirements.in → requirements.lock (tools/lock_deps.ps1) 에서 관리한다.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streamlabeler"
+description = "치지직 방송 라벨링 도구 (Windows 데스크톱)"
+requires-python = ">=3.12"
+license = "MIT"
+dynamic = ["version"]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "local_only: 실제 robocopy·PowerShell 을 쓰는 테스트. tools/release.ps1 에서만 돈다 (CI 제외)",
+]
+addopts = "-q"

@@ -4,11 +4,12 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+.pytest_cache/
 
 # 빌드 산출물
 build/
 dist/
-dist_test/
+dist_test*/
 
 # 외부 바이너리 (용량 큼 — 저장소에 올리지 않음)
 bin/
@@ -22,6 +23,8 @@ Thumbs.db
 desktop.ini
 *.tmp
 ~$*
+# 받다가 끊긴 파일 (업데이트 다운로드 등)
+*.part
 
 # 실행 중 생기는 것 (포터블 폴더 안)
 logs/

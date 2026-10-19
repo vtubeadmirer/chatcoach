@@ -1,0 +1,15 @@
+# 최상위 의존성만 적는다. 전이 의존성과 해시는 tools/lock_deps.ps1 이 requirements.lock 으로 만든다.
+# 설치는 항상 잠금 파일로: pip install --require-hashes -r requirements.lock
+#
+# 실행 (앱 번들에 들어간다)
+PySide6-Essentials==6.12.0   # Core·Gui·Widgets·Svg 만 쓴다. 메타 패키지 PySide6 는 WebEngine·Addons 까지 끌어와 빌드가 커진다
+mpv==1.0.8           # python-mpv. libmpv 2026-10 빌드(tools/get_libmpv.py)와 같이 검증됨
+#
+# 개발·빌드 도구 (번들에 들어가지 않는다)
+pyinstaller==6.20.0
+pillow==11.3.0       # tools/make_icon.py
+py7zr==1.1.4         # tools/get_libmpv.py 의 7z 폴백 (7-Zip·Bandizip 이 없을 때)
+pynacl==1.6.2        # tools/sign_manifest.py (Ed25519 서명·scrypt 키 보호) · 테스트의 서명 생성. 앱 검증은 app/minisign.py(순수 Python)
+#
+# 테스트
+pytest==9.1.1

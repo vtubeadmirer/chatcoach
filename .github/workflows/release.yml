@@ -1,0 +1,111 @@
+# vendored from vtubeadmirer/clipslicer@07d13cc (.github/workflows/release.yml) — 변경: 빌드·게시 잡 분리(S-03), 액션 커밋 SHA 고정, 권한 최소화, 해시 고정 설치, 태그 검증·한글 경로 점검·묶기를 tools/*.py 로, 초안 릴리스만 만든다
+name: Release
+
+# vX.Y.Z 태그를 push 하면(tools/release.ps1) build 잡이 빌드·점검·묶기를 하고, release 잡이 초안(draft) Release 를 만든다.
+# 서명(latest.json.minisig)·게시·latest 전환은 개발 PC 에서 한다 (docs/design/04-update-and-release.md 4장·13장).
+# Actions 탭의 "Run workflow"(수동 실행)는 build 잡만 돌아 artifact 를 만든다. Release 는 만들지 않는다.
+#
+# artifact(out/)에 들어가는 것 (tools/package_release.py):
+#   StreamLabeler-vX.Y.Z-win64.zip         전체
+#   StreamLabeler-vX.Y.Z-win64-update.zip  경량 (_internal\ffmpeg\ 와 _internal\libmpv-2.dll 제외)
+#   SHA256SUMS · latest.json(서명 없음) · notes.md(Release 본문)
+#
+# 신뢰할 수 없는 값(태그 이름 등)은 ${{ }} 로 스크립트에 바로 넣지 않고 env 로 넘긴다 (스크립트 주입 방지).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions: {}                      # 기본은 아무 권한 없음. 잡마다 필요한 것만 연다
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    env:
+      REF_NAME: ${{ github.ref_name }}
+      COMMIT_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          persist-credentials: false         # 토큰을 .git/config 에 남기지 않는다
+          fetch-depth: 0                     # 태그 커밋의 main 포함 여부 검사용
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: 태그 검증 (형식 · VERSION · 생성 파일 · main 포함)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python tools/check_tag.py "$env:REF_NAME"
+
+      # pwsh 단계는 마지막 명령의 종료 코드만 보므로 명령을 한 단계에 하나씩 둔다
+      - name: pip 고정
+        run: python -m pip install pip==25.2
+
+      - name: 의존성 설치 (해시 고정)
+        run: python -m pip install --require-hashes -r requirements.lock
+
+      - name: ffmpeg (SHA-256 고정)
+        run: python tools/get_ffmpeg.py
+
+      - name: libmpv (SHA-256 고정, 러너의 7z 사용)
+        run: python tools/get_libmpv.py
+
+      - name: 아이콘 생성
+        run: python tools/make_icon.py
+
+      - name: 단위 테스트 (로컬 전용 제외)
+        run: python -m pytest -q -m "not local_only"
+
+      - name: 빌드
+        shell: pwsh
+        run: .\build.ps1 -Channel release
+
+      - name: 버전 읽기
+        shell: pwsh
+        run: |
+          $v = python -c "print(open('VERSION', encoding='utf-8-sig').read().strip())"
+          if ($LASTEXITCODE -ne 0 -or -not $v) { throw "VERSION 을 읽지 못했습니다" }
+          "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "APP_VERSION=$v"
+
+      - name: 한글 경로 자체 점검
+        run: python tools/ci_selftest.py --dist dist --korean-dir "${{ runner.temp }}\테스트 문서" --expect-version "$env:APP_VERSION"
+
+      - name: zip · SHA256SUMS · latest.json
+        run: python tools/package_release.py --dist dist --out out --version "$env:APP_VERSION" --ref "$env:REF_NAME" --sha "$env:COMMIT_SHA"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: release
+          path: out/
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # checkout 없음: 쓰기 권한 잡에서는 저장소 코드·서드파티 액션을 돌리지 않는다 (gh 는 러너에 기본 설치)
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: release
+          path: out
+
+      - name: 초안 릴리스
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: >
+          gh release create "$TAG" --draft --verify-tag
+          --title "StreamLabeler $TAG" --notes-file out/notes.md
+          out/*.zip out/SHA256SUMS out/latest.json
