@@ -1,0 +1,10 @@
+# 엔진 도구(engine/) 전용 의존성. 앱 .venv 와 섞지 않는다 (.venv-engine). D-04, ADR-18.
+#   잠금: .\tools\setup_engine.ps1 -Lock   (pip-compile --generate-hashes)
+#   설치: .\tools\setup_engine.ps1          (pip install --require-hashes)
+faster-whisper>=1.2,<2
+# av 19 는 av.open(metadata_errors=) 인자를 없애 faster-whisper 1.2.1 의 decode_audio 가 TypeError 로 실패한다 (2026-10-20 확인)
+av<19
+# ctranslate2 4.x(CUDA 12 빌드)가 Windows 에서 찾는 cuBLAS 12 · cuDNN 9 DLL 을 휠로 받는다
+nvidia-cublas-cu12>=12.4,<13
+nvidia-cudnn-cu12>=9.1,<10
+pytest
