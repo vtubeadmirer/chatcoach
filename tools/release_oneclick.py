@@ -7,8 +7,8 @@
   --version 을 안 주면 지금 VERSION 의 패치 번호 +1 을 제안한다 (Enter 로 수락).
   --dry-run 은 검사·테스트까지만 하고 커밋·push·태그를 하지 않는다.
 
-서명 키는 %LOCALAPPDATA%\\StreamLabeler-signing\\streamlabeler-K1.key. 같은 폴더에
-streamlabeler-K1.password.txt 가 있으면 그 암호를 쓰고, 없으면 한 번 묻는다.
+서명 키는 %LOCALAPPDATA%\\ChatCoach-signing\\chatcoach-K1.key. 같은 폴더에
+chatcoach-K1.password.txt 가 있으면 그 암호를 쓰고, 없으면 한 번 묻는다.
 설계 문서 04 4-2·13장의 순서를 그대로 따른다. 중간에 실패하면 거기서 멈추고, 다시 실행하면 끝난 단계는 건너뛴다.
 """
 from __future__ import annotations
@@ -34,10 +34,10 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 from app.appspec import SPEC  # noqa: E402
 
-KEY_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "StreamLabeler-signing")
-KEY = os.path.join(KEY_DIR, "streamlabeler-K1.key")
-PW_FILE = os.path.join(KEY_DIR, "streamlabeler-K1.password.txt")
-GENERATED = ["VERSION", "app/__init__.py", "assets/StreamLabeler.manifest"]
+KEY_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "ChatCoach-signing")
+KEY = os.path.join(KEY_DIR, "chatcoach-K1.key")
+PW_FILE = os.path.join(KEY_DIR, "chatcoach-K1.password.txt")
+GENERATED = ["VERSION", "app/__init__.py", "assets/ChatCoach.manifest"]
 
 
 def say(msg: str) -> None:

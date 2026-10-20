@@ -5,7 +5,7 @@
 확인하는 것 (하나라도 틀리면 사유를 출력하고 exit 1):
   1. 태그 형식이 ^v<숫자>.<숫자>.<숫자>$ 이다 (접미사 없음, 04 2-2)
   2. 태그의 X.Y.Z 가 VERSION 과 같다
-  3. 생성 파일(app/__init__.py · assets/StreamLabeler.manifest)이 VERSION 과 맞다 (sync_version.py --check 와 같은 검사)
+  3. 생성 파일(app/__init__.py · assets/ChatCoach.manifest)이 VERSION 과 맞다 (sync_version.py --check 와 같은 검사)
   4. 태그 커밋이 지금 작업 트리의 커밋(HEAD)이다 — 아니면 2·3 의 비교가 그 태그의 내용이 아니다
   5. 태그 커밋이 origin/main(없으면 main)에 포함된다 (git merge-base --is-ancestor)
 """

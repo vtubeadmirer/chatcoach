@@ -33,7 +33,7 @@ DEPS_TEXT = "".join(f"{k}={v}\n" for k, v in LOCAL_DEPS.items())
 
 
 def fake_app(app_dir: str, version: str, heavy: bool = True, exe: bytes = b"EXE" * 1000) -> str:
-    """빌드 폴더(<dist>\\StreamLabeler) 흉내. data\\ 는 zip 에 들어가면 안 되는 보존 폴더다."""
+    """빌드 폴더(<dist>\\ChatCoach) 흉내. data\\ 는 zip 에 들어가면 안 되는 보존 폴더다."""
     internal = os.path.join(app_dir, "_internal")
     os.makedirs(internal, exist_ok=True)
     _w(os.path.join(app_dir, SPEC.exe_name), exe)
@@ -69,7 +69,7 @@ def dumps(obj) -> bytes:
 @dataclass
 class SignedRelease:
     work: str
-    dist_app: str            # <dist>\StreamLabeler
+    dist_app: str            # <dist>\ChatCoach
     out: str                 # zip 두 개 · latest.json · latest.json.minisig
     notes: str
     version: str

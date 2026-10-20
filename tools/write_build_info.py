@@ -1,6 +1,6 @@
 """빌드 폴더에 VERSION · build_info.json · deps.txt 를 쓴다 (build.ps1 이 부른다. docs/design/04-update-and-release.md 2-1).
 
-사용: python tools/write_build_info.py --app dist\\StreamLabeler --channel release|test
+사용: python tools/write_build_info.py --app dist\\ChatCoach --channel release|test
 
 <app>\\_internal\\ 아래에 쓰는 것 (모두 UTF-8, BOM 없음, LF):
   VERSION          저장소 VERSION 의 값 한 줄
@@ -48,7 +48,7 @@ def _write(path: str, text: str) -> None:
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="빌드 폴더에 VERSION · build_info.json · deps.txt 를 쓴다")
-    ap.add_argument("--app", required=True, help=r"빌드된 앱 폴더 (예: dist\StreamLabeler)")
+    ap.add_argument("--app", required=True, help=r"빌드된 앱 폴더 (예: dist\ChatCoach)")
     ap.add_argument("--channel", required=True, choices=["release", "test"])
     args = ap.parse_args(argv)
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/chat-message.schema.json",
+  "$id": "https://github.com/vtubeadmirer/chatcoach/blob/main/schemas/chat-message.schema.json",
   "title": "가명 채팅 메시지 한 줄 (chat/messages.jsonl)",
   "description": "치지직 VOD 채팅 API 에서 받은 메시지 1건을 가명화한 형태. 파일은 한 줄에 한 메시지(JSON Lines, UTF-8, BOM 없음, LF)이고 수집 뒤에는 고치지 않는다. 원 닉네임·userIdHash·profile·extras 원문(후원 금액 등)은 이 파일에 넣지 않고 chat/protected/ 에만 둔다. 중복을 지우거나 솎아내지 않고 서버가 준 개수 그대로 둔다. 설계 문서: docs/design/03-data-model.md 6-2절.",
   "type": "object",

@@ -1,7 +1,7 @@
 """빌드 폴더 → 전체 zip · 경량 zip · SHA256SUMS · latest.json(서명 없음) · notes.md (04 4-2 7~8단계).
 
 사용: python tools/package_release.py --dist dist --out out --version X.Y.Z [--ref vX.Y.Z --sha <커밋>]
-- zip 은 Python zipfile 로 만든다 (Compress-Archive 의 역슬래시 항목 문제를 피한다). 최상위 폴더 StreamLabeler/ 하나.
+- zip 은 Python zipfile 로 만든다 (Compress-Archive 의 역슬래시 항목 문제를 피한다). 최상위 폴더 ChatCoach/ 하나.
 - 보존 폴더(data·_backup·_update)가 빌드 폴더에 있으면 넣지 않는다.
 - --ref 가 vX.Y.Z 태그가 아니면(workflow_dispatch) 이름을 dev-<커밋 7자리> 로 하고 latest.json 은 만들지 않는다.
 """

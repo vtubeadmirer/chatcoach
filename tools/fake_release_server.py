@@ -6,7 +6,7 @@
       → package_release 로 zip 두 개·SHA256SUMS·latest.json 을 만들고 시험 키로 서명한다
   python tools/fake_release_server.py serve --dir <폴더> [--port 0] [--mode normal] [--key <test.key>] [--port-file p.txt]
 
-앱 쪽: -Channel test 빌드를 STREAMLABELER_TEST_PUBKEY=<test.pub 둘째 줄> 환경 변수와
+앱 쪽: -Channel test 빌드를 CHATCOACH_TEST_PUBKEY=<test.pub 둘째 줄> 환경 변수와
        --update-base-url http://127.0.0.1:<port>/ 로 실행한다 (release 채널은 둘 다 무시한다).
 
 모드 (기대 결과):
@@ -58,7 +58,7 @@ def cmd_keygen(a) -> int:
     with open(os.path.join(a.out, "test.pub"), "w", encoding="utf-8", newline="\n") as f:
         f.write(kp.public_file_text())
     print(f"시험 키쌍: {a.out}\\test.key / test.pub  (키 ID {kp.key_id_hex})")
-    print(f"STREAMLABELER_TEST_PUBKEY={kp.public_line()}")
+    print(f"CHATCOACH_TEST_PUBKEY={kp.public_line()}")
     return 0
 
 
@@ -88,7 +88,7 @@ def cmd_prepare(a) -> int:
     kp = _load_key(a.key)
     out = sign_file(os.path.join(a.out, "latest.json"), kp)
     print(f"서명: {out} (키 ID {kp.key_id_hex})")
-    print(f"STREAMLABELER_TEST_PUBKEY={kp.public_line()}")
+    print(f"CHATCOACH_TEST_PUBKEY={kp.public_line()}")
     return 0
 
 

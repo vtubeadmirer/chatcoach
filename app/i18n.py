@@ -1,14 +1,14 @@
-# vendored from vtubeadmirer/clipslicer@07d13cc (app/i18n.py) — 변경: 영어 사전(i18n_en) import 분기·시스템 언어 판정 삭제, 한국어 전용 tr() 껍데기, 로거 이름 streamlabeler
+# vendored from vtubeadmirer/clipslicer@07d13cc (app/i18n.py) — 변경: 영어 사전(i18n_en) import 분기·시스템 언어 판정 삭제, 한국어 전용 tr() 껍데기, 로거 이름 chatcoach
 """UI 문자열 번역 껍데기. 코드에는 한국어를 그대로 두고 tr("...") 로 감싼다.
 
-StreamLabeler 는 한국어 전용이다 (docs/design/02-architecture.md 12-5). 사전이 없으므로 tr() 은 받은 문자열을
+ChatCoach 는 한국어 전용이다 (docs/design/02-architecture.md 12-5). 사전이 없으므로 tr() 은 받은 문자열을
 그대로 돌려준다. ClipSlicer 와 같은 이름·자리를 유지해 역이식 diff 를 작게 하고, 나중에 사전을 붙일 자리를 남긴다.
 """
 from __future__ import annotations
 
 import logging
 
-LOG = logging.getLogger("streamlabeler")
+LOG = logging.getLogger("chatcoach")
 LANGUAGES = [("ko", "한국어")]
 
 _lang = "ko"

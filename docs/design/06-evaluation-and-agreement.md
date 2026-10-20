@@ -188,7 +188,7 @@ flowchart TD
 
 ```json
 {
-  "schema": "streamlabeler/sample-manifest",
+  "schema": "chatcoach/sample-manifest",
   "schema_version": 1,
   "sample_set_id": "S-7f3c2a1b-d1-r1",
   "project_id": "…",
@@ -505,7 +505,7 @@ p_e^w = Σ_ij w_ij · (n_i· · n_·j) / N²
 
 ```json
 {
-  "schema": "streamlabeler/ai-result",
+  "schema": "chatcoach/ai-result",
   "schema_version": 1,
   "run_id": "run-2026-10-25-a",
   "created_at": "2026-10-25T10:00:00+09:00",
@@ -529,7 +529,7 @@ p_e^w = Σ_ij w_ij · (n_i· · n_·j) / N²
 
 | 필드 | 규칙 |
 |---|---|
-| schema · schema_version | `streamlabeler/ai-result` · 1. 다르면 거부한다 (6-2) |
+| schema · schema_version | `chatcoach/ai-result` · 1. 다르면 거부한다 (6-2) |
 | target | video_no 는 project.json 의 broadcast.video_no 와 같아야 한다. chat_id_algorithm 은 `sl-chat-id-v1`. messages_sha256 은 엔진이 쓴 채팅 파일의 해시 (6-2) |
 | time_axis | `vod_ms`(채팅 시계와 같은 축, 권장) 또는 `media_ms`. media_ms 면 media.partial_fp 가 프로젝트 영상과 같아야 하고, 가져올 때 활성 보정값으로 vod_ms 로 바꾼다. 쓴 보정 판(calibration_rev)을 run 기록에 남긴다 |
 | reactions | 엔진이 판정한 채팅마다 한 줄. 여기에 없는 채팅은 '반응 미확인' 이 아니라 'AI 미평가'(ai_unevaluated, 6-6) 로 센다 |

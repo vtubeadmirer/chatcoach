@@ -3,7 +3,7 @@
 > **이 문서는 법률 자문이 아니다.** Claude 가 M0 에 쓴 초안이며, 첫 공개 릴리스 전에 배포자가 확인한다
 > ([07-roadmap.md](docs/design/07-roadmap.md) 질문 31). '확인 필요' 로 표시한 곳은 아직 확인하지 않았다.
 
-StreamLabeler 자체의 코드는 MIT 라이선스다 ([LICENSE](LICENSE)). 배포 zip(`StreamLabeler-vX.Y.Z-win64.zip`)에는
+ChatCoach 자체의 코드는 MIT 라이선스다 ([LICENSE](LICENSE)). 배포 zip(`ChatCoach-vX.Y.Z-win64.zip`)에는
 아래 구성 요소가 함께 들어가며, 각 구성 요소는 **자기 라이선스**를 따른다. 경량 업데이트 zip
 (`…-win64-update.zip`)에는 FFmpeg(`_internal\ffmpeg\`)와 libmpv(`_internal\libmpv-2.dll`)가 빠진다.
 
@@ -16,14 +16,14 @@ StreamLabeler 자체의 코드는 MIT 라이선스다 ([LICENSE](LICENSE)). 배�
 | libmpv (shinchiro/mpv-winbuild-cmake) | mpv v0.41.0-1151-g9d144e57b | GPL-2.0-or-later 로 보임 — 확인 필요 | 번들, 실행 중 동적 로드 (`_internal\libmpv-2.dll`) |
 | python-mpv | 1.0.8 | GPL-2.0-or-later 또는 LGPL-2.1-or-later (이중) | 번들 (Python 모듈) |
 | Python | 3.12 | PSF-2.0 | 번들 (`_internal\python312.dll`·표준 라이브러리) |
-| PyInstaller 부트로더 | 6.20.0 | GPL-2.0-or-later WITH Bootloader-exception | `StreamLabeler.exe` 에 들어간 실행기 |
+| PyInstaller 부트로더 | 6.20.0 | GPL-2.0-or-later WITH Bootloader-exception | `ChatCoach.exe` 에 들어간 실행기 |
 
 ---
 
 ## Qt 6 / PySide6 6.12.0
 
 - 라이선스: LGPL-3.0-only (Qt for Python 은 LGPL-3.0 / GPL-2.0 / GPL-3.0 / 상용 중 선택. 설치된 패키지 메타데이터
-  `LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only` 로 확인). StreamLabeler 는 LGPL-3.0 조건으로 쓴다. Shiboken6 도 같다.
+  `LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only` 로 확인). ChatCoach 는 LGPL-3.0 조건으로 쓴다. Shiboken6 도 같다.
 - 출처: https://www.qt.io/ · 소스 https://code.qt.io (qtbase · qtsvg · pyside/pyside-setup)
 - 쓰는 방식: **동적 링크**. Qt 라이브러리는 실행 파일에 합쳐 넣지 않고 `_internal\PySide6\` 아래 별도 DLL
   (`Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, `Qt6Svg.dll`)과 `.pyd` 로 둔다. Qt 소스를 고치지 않았다.
@@ -81,7 +81,7 @@ StreamLabeler 자체의 코드는 MIT 라이선스다 ([LICENSE](LICENSE)). 배�
 - 라이선스: GPL-2.0-or-later WITH Bootloader-exception. 부트로더 예외에 따라 PyInstaller 로 만든 실행 파일은
   자유롭게 배포할 수 있다 (패키지 메타데이터 · `COPYING.txt` 로 확인).
 - 출처: https://pyinstaller.org/ · 소스 https://github.com/pyinstaller/pyinstaller
-- 쓰는 방식: 빌드 도구. `StreamLabeler.exe` 안에 부트로더가 들어간다. PyInstaller 자체는 배포물에 들어가지 않는다.
+- 쓰는 방식: 빌드 도구. `ChatCoach.exe` 안에 부트로더가 들어간다. PyInstaller 자체는 배포물에 들어가지 않는다.
 
 ---
 
@@ -97,7 +97,7 @@ GPL 로 배포되는 FFmpeg·libmpv(와 LGPL 인 Qt)는 바이너리와 함께 �
    - libmpv: https://github.com/shinchiro/mpv-winbuild-cmake (빌드 스크립트) · https://github.com/mpv-player/mpv (커밋 `9d144e57b`)
    - Qt / PySide6: https://code.qt.io (6.12.0 태그)
 3. **요청 시 제공**: 배포 후 3년 동안, 요청하면 위 바이너리에 대응하는 전체 소스를 실비 이하로 제공한다.
-   요청 창구는 저장소 이슈(https://github.com/vtubeadmirer/streamlabeler/issues)로 한다.
+   요청 창구는 저장소 이슈(https://github.com/vtubeadmirer/chatcoach/issues)로 한다.
    - 상류 링크만으로는 GPL 의 소스 제공 의무를 다하지 못할 수 있다(상류가 파일을 지우면 끊긴다). 릴리스마다 대응 소스
      아카이브를 직접 보관·게시할지 — 확인 필요.
 4. 배포 zip 에 라이선스 전문(GPL-3.0 · GPL-2.0 · LGPL-3.0 · LGPL-2.1 · PSF-2.0)을 넣을지와 넣을 위치 — 확인 필요.

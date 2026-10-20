@@ -39,10 +39,10 @@ from typing import Callable, Iterable, Protocol
 from . import minisign
 from .appspec import SPEC, AppSpec, VERSION_RE
 
-LOG = logging.getLogger("streamlabeler")
+LOG = logging.getLogger("chatcoach")
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 CREATE_NEW_PROCESS_GROUP = 0x00000200 if os.name == "nt" else 0
-TEST_PUBKEY_ENV = "STREAMLABELER_TEST_PUBKEY"
+TEST_PUBKEY_ENV = "CHATCOACH_TEST_PUBKEY"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 STAGE_PREFIX = "upd-"
 ACTIVE_MARKER = "ACTIVE"      # 준비 폴더가 사용 중(pid). 그 pid 가 살아 있으면 정리하지 않는다
@@ -147,7 +147,7 @@ def load_installed(spec: AppSpec = SPEC, version: str | None = None) -> Installe
 
 
 def effective_pubkeys(spec: AppSpec, installed: InstalledInfo, env: dict | None = None) -> list[tuple[str, str]]:
-    """검증에 쓸 공개키. test·source 채널에서만 환경 변수 STREAMLABELER_TEST_PUBKEY 가 내장 키를 대신한다 (04 12-2).
+    """검증에 쓸 공개키. test·source 채널에서만 환경 변수 CHATCOACH_TEST_PUBKEY 가 내장 키를 대신한다 (04 12-2).
     release 채널은 환경 변수를 읽지 않는다. 자체 점검(pubkeys)이 이것을 확인한다."""
     env = os.environ if env is None else env
     if installed.channel in ("test", "source"):
@@ -722,7 +722,7 @@ class StagedUpdate:
     release: Release
     stage_dir: str          # <앱>\_update\<임의 이름>
     stage_id: str
-    new_dir: str            # <stage_dir>\new\StreamLabeler
+    new_dir: str            # <stage_dir>\new\ChatCoach
     lite: bool
     selftest: dict          # 새 exe 의 자체 점검 결과 (건너뛰었으면 {})
 
@@ -1117,7 +1117,7 @@ class RobocopyApplier:
         except OSError:
             pass
         if paths.is_under_onedrive(app):
-            warnings.append("OneDrive 아래에서 실행 중입니다. 동기화를 잠시 멈추거나 %LOCALAPPDATA%\\Programs\\StreamLabeler 로 옮기세요")
+            warnings.append("OneDrive 아래에서 실행 중입니다. 동기화를 잠시 멈추거나 %LOCALAPPDATA%\\Programs\\ChatCoach 로 옮기세요")
         return problems, warnings
 
     def apply(self, staged: StagedUpdate) -> None:
@@ -1169,7 +1169,7 @@ class RobocopyApplier:
         policy = execution_policy_report()
         LOG.error("교체 스크립트가 시작하지 않음 (exit=%s). 출력: %s | 실행 정책: %s", proc.poll(), tail, policy)
         raise UpdateError("blocked", "이 PC 에서는 자동 교체가 막혀 있습니다 (PowerShell 스크립트가 시작되지 않음). "
-                                     "수동 업데이트 안내를 따라 주세요. 자세한 내용은 data\\logs\\streamlabeler.log")
+                                     "수동 업데이트 안내를 따라 주세요. 자세한 내용은 data\\logs\\chatcoach.log")
 
     def rollback(self) -> None:
         raise UpdateError("precheck", "되돌리기는 M4 에서 넣는다 (04 15장)")

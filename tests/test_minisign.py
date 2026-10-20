@@ -84,7 +84,7 @@ def test_malleable_signature_s_plus_l_rejected():
     """S 에 L 을 더한 서명은 수학적으로 같은 점을 주지만 libsodium 처럼 거부해야 한다 (S < L)."""
     sk = nacl.signing.SigningKey(b"\x07" * 32)
     pk = bytes(sk.verify_key)
-    msg = b"streamlabeler latest.json"
+    msg = b"chatcoach latest.json"
     sig = sk.sign(msg).signature
     s = int.from_bytes(sig[32:], "little")
     forged = sig[:32] + (s + L).to_bytes(32, "little")
@@ -126,7 +126,7 @@ def _sig_lines(text: str) -> list[str]:
 
 def test_sign_bytes_parse_signature_74_bytes(kp):
     data = b'{"version": "0.0.2"}\n'
-    text = sm.sign_bytes(data, kp, "StreamLabeler latest.json v0.0.2")
+    text = sm.sign_bytes(data, kp, "ChatCoach latest.json v0.0.2")
     lines = _sig_lines(text)
     assert lines[0].startswith("untrusted comment: ") and lines[2].startswith("trusted comment: ")
     raw = base64.b64decode(lines[1])
@@ -135,7 +135,7 @@ def test_sign_bytes_parse_signature_74_bytes(kp):
     assert sig.algorithm == minisign.SIG_ALG_PREHASH == b"ED"
     assert sig.key_id == kp.key_id and sig.signature == raw[10:74] and len(sig.signature) == 64
     assert len(sig.global_signature) == 64
-    assert sig.trusted_comment == "StreamLabeler latest.json v0.0.2"
+    assert sig.trusted_comment == "ChatCoach latest.json v0.0.2"
     assert sig.untrusted_comment == "signature from minisign secret key"
     assert sig.key_id_hex == kp.key_id_hex == minisign.key_id_hex(kp.key_id)
     # 'ED' = BLAKE2b-512(파일) 에 서명
@@ -170,8 +170,8 @@ def test_verify_legacy_ed_algorithm(kp):
 
 def test_trusted_comment_tamper_is_global_signature_error(kp):
     data = b"manifest"
-    lines = _sig_lines(sm.sign_bytes(data, kp, "StreamLabeler latest.json v0.0.2"))
-    lines[2] = "trusted comment: StreamLabeler latest.json v9.9.9"
+    lines = _sig_lines(sm.sign_bytes(data, kp, "ChatCoach latest.json v0.0.2"))
+    lines[2] = "trusted comment: ChatCoach latest.json v9.9.9"
     with pytest.raises(MinisignError, match="전역 서명"):
         minisign.verify(data, "\n".join(lines), [("K1", kp.public_line())])
 
@@ -333,7 +333,7 @@ def test_key_path_problem(tmp_path, monkeypatch):
     assert "저장소 안" in sm.key_path_problem(str(fake_root / "secrets" / "k1.key"))
     assert "저장소 안" in sm.key_path_problem(str(fake_root))
     assert sm.key_path_problem(str(tmp_path / "repo-other" / "k1.key")) is None   # 접두사만 같은 형제 폴더
-    # %LOCALAPPDATA%\StreamLabeler-signing 은 허용 (기본 위치 · conftest 가 바꾼 임시 LOCALAPPDATA 둘 다)
-    assert sm.key_path_problem(os.path.join(sm.DEFAULT_DIR, "streamlabeler-K1.key")) is None
-    assert sm.key_path_problem(os.path.join(os.environ["LOCALAPPDATA"], "StreamLabeler-signing",
-                                            "streamlabeler-K1.key")) is None
+    # %LOCALAPPDATA%\ChatCoach-signing 은 허용 (기본 위치 · conftest 가 바꾼 임시 LOCALAPPDATA 둘 다)
+    assert sm.key_path_problem(os.path.join(sm.DEFAULT_DIR, "chatcoach-K1.key")) is None
+    assert sm.key_path_problem(os.path.join(os.environ["LOCALAPPDATA"], "ChatCoach-signing",
+                                            "chatcoach-K1.key")) is None

@@ -6,8 +6,8 @@ name: Release
 # Actions 탭의 "Run workflow"(수동 실행)는 build 잡만 돌아 artifact 를 만든다. Release 는 만들지 않는다.
 #
 # artifact(out/)에 들어가는 것 (tools/package_release.py):
-#   StreamLabeler-vX.Y.Z-win64.zip         전체
-#   StreamLabeler-vX.Y.Z-win64-update.zip  경량 (_internal\ffmpeg\ 와 _internal\libmpv-2.dll 제외)
+#   ChatCoach-vX.Y.Z-win64.zip         전체
+#   ChatCoach-vX.Y.Z-win64-update.zip  경량 (_internal\ffmpeg\ 와 _internal\libmpv-2.dll 제외)
 #   SHA256SUMS · latest.json(서명 없음) · notes.md(Release 본문)
 #
 # 신뢰할 수 없는 값(태그 이름 등)은 ${{ }} 로 스크립트에 바로 넣지 않고 env 로 넘긴다 (스크립트 주입 방지).
@@ -107,5 +107,5 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: >
           gh release create "$TAG" --draft --verify-tag
-          --title "StreamLabeler $TAG" --notes-file out/notes.md
+          --title "ChatCoach $TAG" --notes-file out/notes.md
           out/*.zip out/SHA256SUMS out/latest.json

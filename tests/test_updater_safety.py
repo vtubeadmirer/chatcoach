@@ -1,9 +1,9 @@
 """교체 스크립트(replace.ps1)를 실제 robocopy · PowerShell 로 돌리는 사고 재현 테스트 (local_only, Windows 전용).
 
 ClipSlicer tests/test_updater_safety.py · test_updater.py(_run_replacer) 기법을 옮겼다.
-- 가짜 앱: %SystemRoot%\\System32\\PING.EXE 를 StreamLabeler.exe 로 복사 (끝에 표식 바이트를 붙여 옛/새를 구분).
-  스크립트가 끝에 '<앱>\\StreamLabeler.exe --updated' 로 재실행하면 PING 이 모르는 옵션이라 바로 끝난다.
-- 앱 폴더는 tmp 아래 한글 폴더('테스트 문서'), 새 폴더는 <앱>\\_update\\upd-test\\new\\StreamLabeler\\ (실제 준비 위치).
+- 가짜 앱: %SystemRoot%\\System32\\PING.EXE 를 ChatCoach.exe 로 복사 (끝에 표식 바이트를 붙여 옛/새를 구분).
+  스크립트가 끝에 '<앱>\\ChatCoach.exe --updated' 로 재실행하면 PING 이 모르는 옵션이라 바로 끝난다.
+- 앱 폴더는 tmp 아래 한글 폴더('테스트 문서'), 새 폴더는 <앱>\\_update\\upd-test\\new\\ChatCoach\\ (실제 준비 위치).
 - 재실행·결과 확인은 data\\update\\last_result.json 의 result 로 한다. -AppPid 는 이미 끝난 프로세스의 pid.
 경우: ① 전체 교체 ② 경량 교체(-Lite) ③ 같은 폴더의 다른 창이 안 닫힘(blocked, 죽이지 않음)
      ④ 새 폴더에 필수 파일 없음 ⑤ 백업 실패(_backup 자리에 파일을 두어 robocopy rc 16) ⑥ -NoBackup
@@ -43,8 +43,8 @@ def _ping_with(tail: bytes) -> bytes:
 
 
 def make_app(tmp_path: Path) -> Path:
-    app = tmp_path / "테스트 문서" / "StreamLabeler"
-    _w(app / "StreamLabeler.exe", _ping_with(OLD_TAIL))
+    app = tmp_path / "테스트 문서" / "ChatCoach"
+    _w(app / "ChatCoach.exe", _ping_with(OLD_TAIL))
     _w(app / "_internal" / "python312.dll", b"OLD-PY")
     _w(app / "_internal" / "VERSION", b"0.0.1\n")
     _w(app / "_internal" / "libmpv-2.dll", b"mpv-old")
@@ -58,8 +58,8 @@ def make_app(tmp_path: Path) -> Path:
 
 
 def make_new(app: Path, lite: bool = False, drop: tuple[str, ...] = ()) -> Path:
-    new = app / "_update" / STAGE_ID / "new" / "StreamLabeler"
-    _w(new / "StreamLabeler.exe", _ping_with(NEW_TAIL))
+    new = app / "_update" / STAGE_ID / "new" / "ChatCoach"
+    _w(new / "ChatCoach.exe", _ping_with(NEW_TAIL))
     _w(new / "_internal" / "python312.dll", b"NEW-PY")
     _w(new / "_internal" / "VERSION", b"0.0.2\n")
     _w(new / "_internal" / "new_only.dll", b"new")
@@ -80,7 +80,7 @@ def run_replacer(app: Path, new: Path, lite: bool = False, wait_sec: int | None 
     updater.write_updating_lock(str(app / "data"), os.getpid(), "0.0.1", "0.0.2")
     dead = subprocess.Popen(["cmd", "/c", "exit 0"], creationflags=NO_WINDOW)   # 이미 끝난 '앱' pid
     dead.wait()
-    cmd = updater.replacer_command(str(script), str(app), str(new), STAGE_ID, "StreamLabeler.exe", dead.pid,
+    cmd = updater.replacer_command(str(script), str(app), str(new), STAGE_ID, "ChatCoach.exe", dead.pid,
                                    "0.0.1", "0.0.2", lite, no_backup)
     if wait_sec is not None:
         cmd += ["-WaitSec", str(wait_sec)]
@@ -96,7 +96,7 @@ def run_replacer(app: Path, new: Path, lite: bool = False, wait_sec: int | None 
 def _kill_from(app: Path) -> None:
     """스크립트가 재실행한 가짜 앱(PING)이 남아 있으면 정리한다 (tmp 폴더 삭제가 막히지 않게)."""
     subprocess.run(["powershell", "-NoProfile", "-Command",
-                    "Get-CimInstance Win32_Process -Filter \"Name='StreamLabeler.exe'\" | Where-Object { "
+                    "Get-CimInstance Win32_Process -Filter \"Name='ChatCoach.exe'\" | Where-Object { "
                     "$_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:SL_APP + '\\', "
                     "[System.StringComparison]::OrdinalIgnoreCase) } | "
                     "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"],
@@ -111,7 +111,7 @@ def app(tmp_path):
 
 
 def _unchanged(app: Path) -> None:
-    assert (app / "StreamLabeler.exe").read_bytes().endswith(OLD_TAIL)
+    assert (app / "ChatCoach.exe").read_bytes().endswith(OLD_TAIL)
     assert (app / "_internal" / "python312.dll").read_bytes() == b"OLD-PY"
     assert (app / "_internal" / "old_only.dll").exists()
     assert not (app / "_internal" / "new_only.dll").exists()
@@ -138,7 +138,7 @@ def test_full_replace(app):
     r = res.result
     assert 0 <= r["backup_rc"] < 8 and 0 <= r["copy_rc"] < 8 and r["restore_rc"] == -1
     # 새 파일로 바뀜
-    assert (app / "StreamLabeler.exe").read_bytes().endswith(NEW_TAIL)
+    assert (app / "ChatCoach.exe").read_bytes().endswith(NEW_TAIL)
     assert (app / "_internal" / "python312.dll").read_bytes() == b"NEW-PY"
     assert (app / "_internal" / "VERSION").read_bytes() == b"0.0.2\n"
     assert (app / "_internal" / "new_only.dll").exists() and not (app / "_internal" / "old_only.dll").exists()
@@ -150,7 +150,7 @@ def test_full_replace(app):
     assert not (app / "_internal" / "data" / "stale.txt").exists()
     # 백업: 옛 파일 전체(_internal\data 포함), 보존 폴더는 빠짐
     backup = app / "_backup"
-    assert (backup / "StreamLabeler.exe").read_bytes().endswith(OLD_TAIL)
+    assert (backup / "ChatCoach.exe").read_bytes().endswith(OLD_TAIL)
     assert (backup / "_internal" / "old_only.dll").read_bytes() == b"old"
     assert (backup / "_internal" / "data" / "inner.txt").read_bytes() == b"old-inner"
     assert not (backup / "data").exists() and not (backup / "_update").exists() and not (backup / "_backup").exists()
@@ -159,7 +159,7 @@ def test_full_replace(app):
     assert "성공" in res.log
     # 스크립트는 자기 폴더(_update\upd-test)를 지우지 않고, 원본 새 폴더도 그대로다
     assert (app / "_update" / STAGE_ID / "replace.ps1").exists()
-    assert (new / "StreamLabeler.exe").read_bytes().endswith(NEW_TAIL)
+    assert (new / "ChatCoach.exe").read_bytes().endswith(NEW_TAIL)
 
 
 # --------------------------------------------------------------------------- ② 경량 교체
@@ -170,12 +170,12 @@ def test_lite_replace_keeps_ffmpeg_and_libmpv(app):
     _common_after(app, res, "ok")
     assert (app / "_internal" / "ffmpeg" / "ffmpeg.exe").read_bytes() == b"ff-old"     # 유지
     assert (app / "_internal" / "libmpv-2.dll").read_bytes() == b"mpv-old"            # 유지
-    assert (app / "StreamLabeler.exe").read_bytes().endswith(NEW_TAIL)
+    assert (app / "ChatCoach.exe").read_bytes().endswith(NEW_TAIL)
     assert (app / "_internal" / "python312.dll").read_bytes() == b"NEW-PY"
     assert (app / "_internal" / "new_only.dll").exists() and not (app / "_internal" / "old_only.dll").exists()
     assert (app / "_internal" / "data" / "inner.txt").read_bytes() == b"new-inner"
     assert (app / "data" / "settings.ini").read_text(encoding="utf-8") == "[x]\n한글=값\n"
-    assert (app / "_backup" / "StreamLabeler.exe").read_bytes().endswith(OLD_TAIL)
+    assert (app / "_backup" / "ChatCoach.exe").read_bytes().endswith(OLD_TAIL)
     assert "경량" in res.log and "성공" in res.log
 
 
@@ -193,7 +193,7 @@ def test_lite_backup_is_complete_previous_version(app):
 # --------------------------------------------------------------------------- ③ 다른 창이 열려 있음
 def test_other_window_open_blocks_without_killing(app):
     new = make_new(app)
-    other = subprocess.Popen([str(app / "StreamLabeler.exe"), "-n", "60", "127.0.0.1"], stdout=subprocess.DEVNULL,
+    other = subprocess.Popen([str(app / "ChatCoach.exe"), "-n", "60", "127.0.0.1"], stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)   # 같은 폴더에서 60초 버티는 '다른 창'
     try:
         res = run_replacer(app, new, wait_sec=3)
@@ -253,4 +253,4 @@ def test_no_backup_switch(app):
     _common_after(app, res, "ok")
     assert res.result["backup_rc"] == -1
     assert not (app / "_backup").exists() and not (app / "data" / "update" / "backup_ok.json").exists()
-    assert (app / "StreamLabeler.exe").read_bytes().endswith(NEW_TAIL)
+    assert (app / "ChatCoach.exe").read_bytes().endswith(NEW_TAIL)

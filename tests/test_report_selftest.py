@@ -2,7 +2,7 @@
 
 - redact: ClipSlicer 의 비밀 값(토큰·서명 쿼리·Authorization·Cookie·Bearer·access/refresh_token)에 더해
   네이버 로그인 쿠키(NID_AUT·NID_SES), 40자 이상 16진수, 사용자 홈 경로를 가린다.
-- build_report: 'StreamLabeler ' 로 시작, 최근 로그 N줄, 폴더 경로를 넣지 않는다.
+- build_report: 'ChatCoach ' 로 시작, 최근 로그 N줄, 폴더 경로를 넣지 않는다.
 - --selftest: 결과 JSON 의 점검 항목 집합, 실패 허용은 ffmpeg·ffprobe·libmpv 뿐, --data-dir 존중,
   --expect-version 이 틀리면 version 실패와 exit 1.
 """
@@ -50,7 +50,7 @@ def test_redact_long_hex_ids():
 
 def test_redact_user_home_paths():
     cases = {
-        r"C:\Users\홍길동\AppData\Local\StreamLabeler\data\x.log": r"%USERPROFILE%\AppData\Local\StreamLabeler\data\x.log",
+        r"C:\Users\홍길동\AppData\Local\ChatCoach\data\x.log": r"%USERPROFILE%\AppData\Local\ChatCoach\data\x.log",
         "C:/Users/john doe/Documents/a.txt": "%USERPROFILE%/Documents/a.txt",
         "'C:\\\\Users\\\\bob\\\\x'": "'%USERPROFILE%\\\\x'",
         r"d:\users\Kim": "%USERPROFILE%",
@@ -60,21 +60,21 @@ def test_redact_user_home_paths():
         assert redact(raw) == want, (raw, redact(raw))
     for name in ("홍길동", "john doe", "bob", "alice"):
         assert name not in redact(" ".join(cases))
-    assert redact(r"C:\Program Files\StreamLabeler") == r"C:\Program Files\StreamLabeler"
+    assert redact(r"C:\Program Files\ChatCoach") == r"C:\Program Files\ChatCoach"
 
 
 # --------------------------------------------------------------------------- build_report
 def test_build_report(tmp_path):
-    log = tmp_path / "streamlabeler.log"
+    log = tmp_path / "chatcoach.log"
     log.write_text("\n".join(f"line {i}" for i in range(300)) +
                    "\nurl?token=SECRET\nNID_SES=COOKIEVAL\n" + r"open C:\Users\someone\Videos\a.mp4" + "\n",
                    encoding="utf-8")
     r = build_report(str(log), {"수집 상태": "대기 중"}, lines=50)
-    assert r.startswith("StreamLabeler ") and r.endswith("\n")
+    assert r.startswith("ChatCoach ") and r.endswith("\n")
     assert "수집 상태: 대기 중" in r and "채널: source" in r and "데이터: 지정(--data-dir)" in r
     assert "line 299" in r and "line 200" not in r
     assert "SECRET" not in r and "COOKIEVAL" not in r and "someone" not in r
-    assert "최근 로그 50줄 (streamlabeler.log)" in r
+    assert "최근 로그 50줄 (chatcoach.log)" in r
     # 폴더 경로를 넣지 않는다 (로그 파일 이름만)
     for folder in (str(tmp_path), paths.data_root(), paths.install_root(), os.path.basename(str(tmp_path))):
         assert folder not in r, folder
@@ -87,7 +87,7 @@ def _run_selftest(tmp_path, *extra):
     out = tmp_path / "st.json"
     data = tmp_path / "selftest-data"
     env = dict(os.environ, PYTHONIOENCODING="utf-8", QT_QPA_PLATFORM="offscreen")
-    env.pop("STREAMLABELER_TEST_PUBKEY", None)
+    env.pop("CHATCOACH_TEST_PUBKEY", None)
     r = subprocess.run([sys.executable, os.path.join(ROOT, "main.py"), "--selftest", str(out), "--data-dir", str(data),
                         *extra],
                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, env=env, cwd=ROOT)

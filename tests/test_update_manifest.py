@@ -120,7 +120,7 @@ def test_newer_chooses_lite_when_deps_and_heavy_match(signed_manifest, inst):
     assert r.release.download_size == os.path.getsize(rel.lite_zip)
     assert r.release.warnings == ()
     m = r.release.manifest
-    assert m.app == "StreamLabeler" and m.min_supported == "0.0.1" and m.mandatory is False
+    assert m.app == "ChatCoach" and m.min_supported == "0.0.1" and m.mandatory is False
     assert m.deps == rk.DEPS and m.guide_versions == ("0.1",)
     assert m.asset("full").size == os.path.getsize(rel.full_zip)
     assert m.published_at.tzinfo is not None
@@ -230,9 +230,9 @@ def test_asset_rules(signed_manifest, inst):
         return lambda m: _asset_of(m, which).update(**kv)
 
     cases = {
-        "lite name 규칙": set_asset("lite", name="StreamLabeler-v0.0.2-win64-lite.zip"),
+        "lite name 규칙": set_asset("lite", name="ChatCoach-v0.0.2-win64-lite.zip"),
         "full name 버전 다름": set_asset("full", name=SPEC.asset_name("0.0.3", "full")),
-        "url 다른 호스트": set_asset("full", url="https://example.com/StreamLabeler-v0.0.2-win64.zip"),
+        "url 다른 호스트": set_asset("full", url="https://example.com/ChatCoach-v0.0.2-win64.zip"),
         "url 다른 태그": set_asset("lite", url=SPEC.asset_url("0.0.3", SPEC.asset_name("0.0.2", "lite"))),
         "sha256 대문자": lambda m: _asset_of(m, "full").update(sha256=_asset_of(m, "full")["sha256"].upper()),
         "sha256 짧음": set_asset("full", sha256="ab" * 31),

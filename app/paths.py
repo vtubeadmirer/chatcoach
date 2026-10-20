@@ -84,7 +84,7 @@ def data_root() -> str:
     """사용자 데이터 폴더 data\\. 처음 부를 때 정하고 캐시한다. 폴더를 만든다.
 
     우선순위: ① set_data_root() 로 지정된 폴더 ② <앱>\\data (시험 파일로 쓰기 확인)
-    ③ %LOCALAPPDATA%\\StreamLabeler\\data (폴백). ① 에 쓸 수 없으면 OSError — 조용히 다른 곳에 쓰지 않는다.
+    ③ %LOCALAPPDATA%\\ChatCoach\\data (폴백). ① 에 쓸 수 없으면 OSError — 조용히 다른 곳에 쓰지 않는다.
     """
     global _data_root, _data_mode
     if _data_root is not None:
@@ -117,7 +117,7 @@ def reset_for_tests() -> None:
 
 
 def backup_root() -> str:
-    """백업 폴더. %LOCALAPPDATA%\\StreamLabeler\\backups, 쓸 수 없으면 data_root()\\backups (02 5-3)."""
+    """백업 폴더. %LOCALAPPDATA%\\ChatCoach\\backups, 쓸 수 없으면 data_root()\\backups (02 5-3)."""
     global _backup_root
     if _backup_root is not None:
         return _backup_root

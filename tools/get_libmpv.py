@@ -1,4 +1,4 @@
-# vendored from vtubeadmirer/clipslicer@07d13cc (tools/get_libmpv.py) — 변경: SHA256 고정값 비교(다르면 빌드 중단), User-Agent StreamLabeler-tools
+# vendored from vtubeadmirer/clipslicer@07d13cc (tools/get_libmpv.py) — 변경: SHA256 고정값 비교(다르면 빌드 중단), User-Agent ChatCoach-tools
 """libmpv-2.dll 을 shinchiro/mpv-winbuild-cmake 의 고정 릴리스에서 받아 bin/ 에 넣는다.
 
 사용: python tools/get_libmpv.py [--latest]
@@ -32,7 +32,7 @@ TAG = "20261013"
 ASSET = "mpv-dev-x86_64-20261013-git-9d144e57b6.7z"
 # 위 ASSET 의 SHA-256. 상류 릴리스에는 체크섬 파일이 없어 공개 값과 대조하지 못했다 — 받은 파일에서 직접 계산한 값이다.
 SHA256 = "10860837bc04491862c1e66a95dc1af1d7886d69757ce447a09e1e49ae993b52"
-USER_AGENT = "StreamLabeler-tools"
+USER_AGENT = "ChatCoach-tools"
 API = "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "bin")

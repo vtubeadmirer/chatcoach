@@ -5,10 +5,10 @@
   python tools/update_roundtrip.py --old dist_test --measure-startup        # 시작 → 창 표시 시간만 잰다
 
 하는 일:
-  1. 옛 빌드(A, -Channel test)를 <work>\\StreamLabeler 에 복사하고 data\\settings.ini 를 만든다 (보존 확인용).
+  1. 옛 빌드(A, -Channel test)를 <work>\\ChatCoach 에 복사하고 data\\settings.ini 를 만든다 (보존 확인용).
   2. 시험 키쌍을 만들고 새 빌드(B)로 가짜 릴리스(zip 두 개·latest.json·서명)를 준비한다.
   3. 가짜 서버를 127.0.0.1 에 띄운다.
-  4. A 를 STREAMLABELER_TEST_PUBKEY·STREAMLABELER_AUTO_UPDATE=1·--update-base-url 로 실행한다.
+  4. A 를 CHATCOACH_TEST_PUBKEY·CHATCOACH_AUTO_UPDATE=1·--update-base-url 로 실행한다.
      앱이 확인 → 준비(자체 점검 관문) → 교체 스크립트 시작 표식 확인 → 종료 → robocopy 교체 → --updated 로 재실행.
   5. data\\update\\last_result.json 이 ok 이고 _internal\\VERSION 이 B 버전이며 settings.ini 가 그대로이고 _backup 이 있는지 본다.
   6. 재실행된 창을 닫고(WM_CLOSE) 다시 한 번 실행해 _backup 이 지워지는지 본다.
@@ -90,7 +90,7 @@ def read_json(path: str):
 def measure_startup(app_dir: str, env: dict, hold=None, hold_timeout: float = 30.0) -> float:
     """exe 실행 → 로그의 '창 표시' 줄까지. hold() 가 True 가 될 때까지(최대 hold_timeout) 창을 둔 뒤 닫고 초 단위로 돌려준다."""
     exe = os.path.join(app_dir, SPEC.exe_name)
-    log_file = os.path.join(app_dir, "data", "logs", "streamlabeler.log")
+    log_file = os.path.join(app_dir, "data", "logs", "chatcoach.log")
     before = os.path.getsize(log_file) if os.path.isfile(log_file) else 0
     t0 = time.perf_counter()
     p = subprocess.Popen([exe], env=env, cwd=app_dir)
@@ -115,7 +115,7 @@ def measure_startup(app_dir: str, env: dict, hold=None, hold_timeout: float = 30
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--old", required=True, help="옛 빌드 dist 폴더 (안에 StreamLabeler\\)")
+    ap.add_argument("--old", required=True, help="옛 빌드 dist 폴더 (안에 ChatCoach\\)")
     ap.add_argument("--new", help="새 빌드 dist 폴더")
     ap.add_argument("--new-version")
     ap.add_argument("--work", default=os.path.join(os.environ.get("TEMP", "."), "테스트 문서"))
@@ -170,8 +170,8 @@ def main(argv=None) -> int:
     base = f"http://127.0.0.1:{srv.server_address[1]}/"
     log(f"가짜 서버 {base}")
     # 4. A 실행
-    env["STREAMLABELER_TEST_PUBKEY"] = kp.public_line()
-    env["STREAMLABELER_AUTO_UPDATE"] = "1"
+    env["CHATCOACH_TEST_PUBKEY"] = kp.public_line()
+    env["CHATCOACH_AUTO_UPDATE"] = "1"
     exe = os.path.join(app_dir, SPEC.exe_name)
     t0 = time.perf_counter()
     p = subprocess.Popen([exe, "--update-base-url", base], env=env, cwd=app_dir)
@@ -219,11 +219,11 @@ def main(argv=None) -> int:
         wait_for(lambda: not procs_under(app_dir), 60, "창 닫힘")
     log_tail = ""
     try:
-        with open(os.path.join(app_dir, "data", "logs", "streamlabeler.log"), encoding="utf-8", errors="replace") as f:
+        with open(os.path.join(app_dir, "data", "logs", "chatcoach.log"), encoding="utf-8", errors="replace") as f:
             log_tail = "".join(f.readlines()[-12:])
     except OSError:
         pass
-    print("--- streamlabeler.log (끝) ---\n" + log_tail)
+    print("--- chatcoach.log (끝) ---\n" + log_tail)
     # 6. 다음 정상 시작에서 _backup 삭제 (창이 뜨고 3초 뒤 백그라운드에서 지운다 — 그때까지 창을 둔다)
     backup_dir = os.path.join(app_dir, "_backup")
     still_there = os.path.isdir(backup_dir)

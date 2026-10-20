@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/label-event.schema.json",
+  "$id": "https://github.com/vtubeadmirer/chatcoach/blob/main/schemas/label-event.schema.json",
   "title": "라벨 기록 한 줄 (labels/<session_id>.<machine4>.jsonl)",
   "description": "세션 기록 파일의 한 줄. 파일은 추가만 하는 JSON Lines(UTF-8, BOM 없음, LF)이고, 한 줄 = 기록 1건이다. 수정은 새 줄(supersedes 로 이전 판을 가리킴), 삭제는 retract 줄로 하며 기존 줄은 절대 고치거나 지우지 않는다. kind 로 종류를 나누고 body 의 모양이 kind 마다 다르다. 라벨 종류(segment·utterance·reaction·continuation·video_check·missed_candidate·origin·adjudication·retract)는 공통 라벨 메타(entity_id·supersedes·guide_version·guide_sha12·thresholds_sha12·media_rev·calibration_rev)가 필수다. 시각은 모두 VOD 시각(치지직 playerMessageTime 축) ms 정수. 줄 사이 관계(판 연결·참조·잠금)는 스키마로 표현할 수 없어 tools/verify_project.py 가 검사한다. 설계 문서: docs/design/03-data-model.md 6장, 10~13장.",
   "type": "object",

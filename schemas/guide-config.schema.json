@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/guide-config.schema.json",
+  "$id": "https://github.com/vtubeadmirer/chatcoach/blob/main/schemas/guide-config.schema.json",
   "title": "기준서 시작값 설정 (guide-config)",
   "description": "라벨링 안내서의 숫자(시작값)와 증거 강도 표를 담는 파일 형식. 기본값 파일은 assets/guide-config.v0.1.json 이고, 프로젝트에 기준서 버전을 붙일 때 values 를 project.json 의 guides[].thresholds 로 그대로 복사한다(스냅샷). 시간은 사람이 고치기 쉽게 초 단위로 적고 프로그램 안에서 ms 로 바꾼다. null 은 '안내서에 숫자가 없음(미정)' 이며, 프로그램은 null 인 값에 기대는 자동 제안을 하지 않는다. 설계 문서: docs/design/03-data-model.md 9장.",
   "type": "object",
@@ -8,7 +8,7 @@
   "additionalProperties": false,
   "properties": {
     "schema": {
-      "const": "streamlabeler/guide-config",
+      "const": "chatcoach/guide-config",
       "description": "파일 종류 표시. 다른 JSON 과 섞였을 때 구분하는 용도."
     },
     "schema_version": {

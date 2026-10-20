@@ -8,7 +8,7 @@ from PySide6.QtCore import QThread, Signal
 from . import updater
 from .appspec import AppSpec
 
-LOG = logging.getLogger("streamlabeler")
+LOG = logging.getLogger("chatcoach")
 
 
 class UpdateCheckWorker(QThread):

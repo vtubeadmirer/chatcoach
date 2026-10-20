@@ -12,7 +12,7 @@ if ROOT not in sys.path:
 
 @pytest.fixture(autouse=True, scope="session")
 def _isolated_appdata(tmp_path_factory):
-    """백업·데이터 폴백은 %LOCALAPPDATA%\\StreamLabeler 에 쌓인다 → 테스트는 임시 폴더로 (사용자 데이터와 섞이지 않게)."""
+    """백업·데이터 폴백은 %LOCALAPPDATA%\\ChatCoach 에 쌓인다 → 테스트는 임시 폴더로 (사용자 데이터와 섞이지 않게)."""
     old = os.environ.get("LOCALAPPDATA")
     os.environ["LOCALAPPDATA"] = str(tmp_path_factory.mktemp("localappdata"))
     yield

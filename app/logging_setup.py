@@ -1,7 +1,7 @@
-# vendored from vtubeadmirer/clipslicer@07d13cc (app/logging_setup.py) — 변경: 로거 이름 streamlabeler, 로그 폴더 data_root()\logs(후보 목록 제거), 파일 로그 INFO 기본, 가림 패턴·redact 를 report.py 에서 옮겨 와 모든 레코드에 적용, 시작 줄에 경로 대신 데이터 모드
+# vendored from vtubeadmirer/clipslicer@07d13cc (app/logging_setup.py) — 변경: 로거 이름 chatcoach, 로그 폴더 data_root()\logs(후보 목록 제거), 파일 로그 INFO 기본, 가림 패턴·redact 를 report.py 에서 옮겨 와 모든 레코드에 적용, 시작 줄에 경로 대신 데이터 모드
 """회전 로그 + 처리되지 않은 예외 대화상자 + 개인정보 가림 필터.
 
-로그 위치: paths.data_root()\\logs\\streamlabeler.log (1MB × 3개 회전). 폴백은 paths 가 이미 처리한다.
+로그 위치: paths.data_root()\\logs\\chatcoach.log (1MB × 3개 회전). 폴백은 paths 가 이미 처리한다.
 가림(redact): 토큰·쿠키·인증 값, 네이버 로그인 쿠키(NID_AUT·NID_SES), 40자 이상 16진수(userIdHash 류),
 사용자 홈 경로(C:\\Users\\<이름>\\ → %USERPROFILE%\\). 파일·콘솔로 나가는 모든 레코드에 적용된다 (S-20).
 문제 보고(report.py)도 같은 redact 를 쓴다.
@@ -20,8 +20,8 @@ from logging.handlers import RotatingFileHandler
 from . import paths
 from .i18n import tr
 
-LOG = logging.getLogger("streamlabeler")
-LOG_FILE_NAME = "streamlabeler.log"
+LOG = logging.getLogger("chatcoach")
+LOG_FILE_NAME = "chatcoach.log"
 DATA_MODE_KO = {"portable": "포터블", "fallback": "폴백", "override": "지정(--data-dir)"}
 _SEEN: set[str] = set()
 
@@ -34,7 +34,7 @@ SECRET_PATTERNS = [
     (re.compile(r"(?i)([?&](?:token|sig|signature|key|auth|session|policy|expires|hdnts|_lsu_sa_)=)[^&\s\"']+"), r"\1***"),
     (re.compile(r"(?i)(bearer\s+)[\w\-.~+/]+=*"), r"\1***"),
     (re.compile(r"(?i)(\"?(?:access_token|refresh_token|client_secret)\"?\s*[:=]\s*\"?)[^\"\s,}]+"), r"\1***"),
-    # --- StreamLabeler 추가 ---
+    # --- ChatCoach 추가 ---
     # 네이버 로그인 쿠키 값. 'cookie:' 머리 없이 따로 찍힌 경우 (NID_AUT=…, "NID_SES": "…")
     (re.compile(r"(?i)(\bNID_(?:AUT|SES)\b[\"']?\s*[=:]\s*[\"']?)[^;\s\"',&}]+"), r"\1***"),
     # 40자 이상 16진수 (userIdHash 류 식별자)
@@ -115,7 +115,7 @@ def setup(version: str, file_level: int = logging.INFO) -> str:
         mode = DATA_MODE_KO.get(paths.data_mode(), paths.data_mode())
     except OSError:
         mode = "알 수 없음"
-    LOG.info("=== StreamLabeler %s 시작 | Python %s | %s %s | 데이터 폴더 %s",
+    LOG.info("=== ChatCoach %s 시작 | Python %s | %s %s | 데이터 폴더 %s",
              version, platform.python_version(), platform.system(), platform.release(), mode)
 
     def _hook(exc_type, exc, tb):

@@ -1,4 +1,4 @@
-"""VERSION → app/__init__.py · assets/StreamLabeler.manifest 생성 (docs/design/04-update-and-release.md 2-1).
+"""VERSION → app/__init__.py · assets/ChatCoach.manifest 생성 (docs/design/04-update-and-release.md 2-1).
 
 사람이 고치는 버전은 저장소 루트의 VERSION 한 곳뿐이다. 두 생성 파일은 커밋하되 손으로 고치지 않는다.
 

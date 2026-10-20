@@ -1,6 +1,6 @@
 # vendored from vtubeadmirer/clipslicer@07d13cc (app/selftest.py) — 변경: 틀은 유지, 점검 항목 교체(02 11-3),
 #   --expect-version · --expect-channel · --data-dir 추가, PATH 를 비운 상태의 번들 ffmpeg 검증, 공개키 점검.
-"""StreamLabeler.exe --selftest <결과.json> [--expect-version X.Y.Z] [--expect-channel release|test] [--data-dir D]
+"""ChatCoach.exe --selftest <결과.json> [--expect-version X.Y.Z] [--expect-channel release|test] [--data-dir D]
 
 창 없이 핵심 기능을 점검하고 결과 JSON 과 종료 코드(0 = 모두 통과)로 끝낸다. 두 곳에서 쓴다.
 ① release.yml 이 빌드 직후 한글 폴더('테스트 문서') 사본에서 (tools/ci_selftest.py).

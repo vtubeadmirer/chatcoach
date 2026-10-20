@@ -73,7 +73,7 @@ def test_full_and_lite_pass_with_asset(rel, manifest):
     assert lite.file_count == manifest.asset("lite").file_count
     assert TOP + "_internal/ffmpeg/ffmpeg.exe" in full.names and TOP + "_internal/libmpv-2.dll" in full.names
     assert not any("ffmpeg" in n or "libmpv" in n for n in lite.names)
-    assert TOP + "StreamLabeler.exe" in lite.names and TOP + "_internal/VERSION" in lite.names
+    assert TOP + "ChatCoach.exe" in lite.names and TOP + "_internal/VERSION" in lite.names
     # asset 없이도 통과 (릴리스 쪽 tools/check_release_zip.py 의 쓰임)
     assert updater.validate_zip(rel.full_zip, "0.0.2", False).file_count == full.file_count
 
@@ -89,7 +89,7 @@ def test_asset_count_and_size_must_match(rel, manifest):
 # --------------------------------------------------------------------------- 보존 폴더 · 경로
 @pytest.mark.parametrize("name", [
     TOP + "data/settings.ini", TOP + "DATA/settings.ini", TOP + "Data/x/y.txt",
-    TOP + "_backup/StreamLabeler.exe", TOP + "_BackUp/x", TOP + "_update/upd-1/replace.ps1", TOP + "_Update/x",
+    TOP + "_backup/ChatCoach.exe", TOP + "_BackUp/x", TOP + "_update/upd-1/replace.ps1", TOP + "_Update/x",
     TOP + "data/",                     # 폴더 항목만 있어도
     TOP + "data",                      # 같은 이름의 파일
 ])
@@ -118,7 +118,7 @@ def test_same_name_inside_internal_is_allowed(rel, tmp_path):
     (TOP + "a\nb.txt", "제어 문자"),
     ("Other/x.txt", "최상위 폴더"),
     ("x.txt", "최상위 폴더"),
-    ("streamlabeler/x.txt", "최상위 폴더"),      # 최상위 이름은 대소문자까지 같아야 한다
+    ("chatcoach/x.txt", "최상위 폴더"),      # 최상위 이름은 대소문자까지 같아야 한다
 ])
 def test_unsafe_paths_rejected(rel, tmp_path, name, why):
     p = rebuild(rel.full_zip, str(tmp_path / "p.zip"), add={name: b"x"})
@@ -126,12 +126,12 @@ def test_unsafe_paths_rejected(rel, tmp_path, name, why):
 
 
 def test_other_top_folder_rejected(rel, tmp_path):
-    p = rebuild(rel.full_zip, str(tmp_path / "t.zip"), rename=lambda n: "StreamLabeler2/" + n[len(TOP):])
+    p = rebuild(rel.full_zip, str(tmp_path / "t.zip"), rename=lambda n: "ChatCoach2/" + n[len(TOP):])
     _rejects(p, match="최상위 폴더")
 
 
 # --------------------------------------------------------------------------- 필수 파일 · 버전 · 중복
-@pytest.mark.parametrize("missing", ["StreamLabeler.exe", "_internal/python312.dll", "_internal/VERSION"])
+@pytest.mark.parametrize("missing", ["ChatCoach.exe", "_internal/python312.dll", "_internal/VERSION"])
 def test_required_file_missing(rel, tmp_path, missing):
     p = rebuild(rel.full_zip, str(tmp_path / "m.zip"), drop={TOP + missing})
     msg = _rejects(p)
@@ -147,7 +147,7 @@ def test_version_inside_must_match(rel, tmp_path):
     assert updater.validate_zip(p, "0.0.2", False).file_count > 0
 
 
-@pytest.mark.parametrize("dup", ["_internal/version", "STREAMLABELER.EXE", "_internal/Python312.dll"])
+@pytest.mark.parametrize("dup", ["_internal/version", "CHATCOACH.EXE", "_internal/Python312.dll"])
 def test_casefold_duplicate_rejected(rel, tmp_path, dup):
     p = rebuild(rel.full_zip, str(tmp_path / "d.zip"), add={TOP + dup: b"x"})
     msg = _rejects(p)
@@ -230,7 +230,7 @@ def test_extract_zip_same_content(rel, tmp_path):
                        for d, _, fs in os.walk(str(dest)) for f in fs)
     assert extracted == sorted(names)
     # 원본 빌드 폴더와도 같다 (data\ 는 빠짐)
-    for rel_name in ("StreamLabeler.exe", "_internal/python312.dll", "_internal/ffmpeg/ffmpeg.exe"):
+    for rel_name in ("ChatCoach.exe", "_internal/python312.dll", "_internal/ffmpeg/ffmpeg.exe"):
         with open(os.path.join(rel.dist_app, *rel_name.split("/")), "rb") as a, \
                 open(os.path.join(out, *rel_name.split("/")), "rb") as b:
             assert a.read() == b.read()
@@ -246,9 +246,9 @@ def test_extract_zip_refuses_unsafe_names(rel, tmp_path):
 
 # --------------------------------------------------------------------------- 릴리스 쪽 zip
 def test_make_zip_layout(tmp_path):
-    app = rk.fake_app(str(tmp_path / "dist" / "StreamLabeler"), "0.0.2")
+    app = rk.fake_app(str(tmp_path / "dist" / "ChatCoach"), "0.0.2")
     # 보존 폴더가 빌드 폴더에 있어도 넣지 않는다. _internal 안의 같은 이름은 넣는다
-    rk._w(os.path.join(app, "_backup", "StreamLabeler.exe"), b"old")
+    rk._w(os.path.join(app, "_backup", "ChatCoach.exe"), b"old")
     rk._w(os.path.join(app, "_update", "upd-1", "replace.ps1"), b"x")
     rk._w(os.path.join(app, "data", "logs", "a.log"), b"log")
     rk._w(os.path.join(app, "_internal", "data", "inner.txt"), b"inner")

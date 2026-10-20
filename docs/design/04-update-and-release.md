@@ -2,7 +2,7 @@
 
 상태: 설계 초안 (2026-10-19) · 아직 구현되지 않음
 
-> 이 문서는 StreamLabeler 를 빌드해 GitHub 에 올리는 절차와, 프로그램 안에서 새 버전을 받아 바꾸는 방법을 정한다.
+> 이 문서는 ChatCoach 를 빌드해 GitHub 에 올리는 절차와, 프로그램 안에서 새 버전을 받아 바꾸는 방법을 정한다.
 > 스택·폴더 구조·`paths` 함수는 [02-architecture.md](./02-architecture.md), 라벨 파일 형식과 버전 축은 [03-data-model.md](./03-data-model.md), 위협 모델과 `S-` 번호 항목은 [05-security.md](./05-security.md), 마일스톤(M0~M4)과 일정은 [07-roadmap.md](./07-roadmap.md) 를 본다.
 > 이 문서의 숫자(초, 개수, MB)는 모두 시작값이다. 첫 빌드와 시범 운영에서 재고 조정한다.
 
@@ -44,7 +44,7 @@
 |---|---|---|
 | `VERSION` (저장소 루트, `0.1.3` 한 줄, BOM 없음, LF) | 유일한 버전 출처 | 사람 또는 `tools/release.ps1` |
 | `app/__init__.py` 의 `__version__` | `tools/sync_version.py` 가 `VERSION` 에서 생성 | 손으로 고치지 않음 |
-| `assets/StreamLabeler.manifest` 의 `version="X.Y.Z.0"` | 같은 스크립트가 생성 | 손으로 고치지 않음 |
+| `assets/ChatCoach.manifest` 의 `version="X.Y.Z.0"` | 같은 스크립트가 생성 | 손으로 고치지 않음 |
 | `_internal\VERSION`, `_internal\build_info.json` | 빌드가 복사·생성. `build_info.json` = `{version, commit, built_at, channel}` | 빌드 |
 | `_internal\deps.txt` | 번들 ffmpeg·libmpv 의 태그와 해시 (6-4 경량 판정) | 빌드 |
 
@@ -68,8 +68,8 @@
 
 | 파일 | 내용 | 크기 (추정, 첫 빌드에서 측정) | 누가 쓰나 |
 |---|---|---|---|
-| `StreamLabeler-vX.Y.Z-win64.zip` | 전체. 최상위 폴더 `StreamLabeler\` 하나 | 165~185MB | 첫 설치, 의존성(ffmpeg·libmpv)이 바뀐 업데이트 |
-| `StreamLabeler-vX.Y.Z-win64-update.zip` | 경량. 전체에서 `_internal\ffmpeg\` 와 `_internal\libmpv-2.dll` 만 뺀 것 | 35~45MB | 의존성이 같은 업데이트 |
+| `ChatCoach-vX.Y.Z-win64.zip` | 전체. 최상위 폴더 `ChatCoach\` 하나 | 165~185MB | 첫 설치, 의존성(ffmpeg·libmpv)이 바뀐 업데이트 |
+| `ChatCoach-vX.Y.Z-win64-update.zip` | 경량. 전체에서 `_internal\ffmpeg\` 와 `_internal\libmpv-2.dll` 만 뺀 것 | 35~45MB | 의존성이 같은 업데이트 |
 | `SHA256SUMS` | 두 zip 의 `<hash> *<name>` 줄 (ASCII, LF) | 1KB 미만 | 사람 (수동 확인) |
 | `latest.json` | 업데이트 매니페스트 (5장) | 수 KB | 앱 |
 | `latest.json.minisig` | `latest.json` 의 minisign 분리 서명 | 1KB 미만 | 앱 |
@@ -111,7 +111,7 @@ flowchart LR
 | 3 | build 잡 | 의존성 설치 | `pip` 버전 고정, `pip install --require-hashes -r requirements.lock`, `tools/get_ffmpeg.py`·`get_libmpv.py` 가 받은 파일을 내장 SHA-256 과 비교 | 상류 계정이 털려 같은 이름의 파일이 바뀌어도 빌드가 멈춘다 (S-04) | M0 |
 | 4 | build 잡 | 단위 테스트 | `pytest -m "not local_only"` | 태그를 release.ps1 밖에서 push 했을 때의 안전망 | M0 |
 | 5 | build 잡 | 빌드 | `build.ps1 -Channel release`: PyInstaller onedir, `--noupx`, `build_info.json`·`deps.txt` 생성, PATH 를 비운 상태에서 번들 ffmpeg 검증 | UPX 는 빌드 환경에 따라 결과가 달라지고 백신 오탐을 늘린다 (S-17) | M0 |
-| 6 | build 잡 | 한글 경로 자체 점검 | `$RUNNER_TEMP\테스트 문서\StreamLabeler` 사본에서 `--selftest out.json --expect-version X.Y.Z` | 0.9.5~0.9.7 의 한글 경로 오류를 릴리스 전에 잡던 장치를 그대로 쓴다. 버전을 한 번 더 확인한다 | M0 |
+| 6 | build 잡 | 한글 경로 자체 점검 | `$RUNNER_TEMP\테스트 문서\ChatCoach` 사본에서 `--selftest out.json --expect-version X.Y.Z` | 0.9.5~0.9.7 의 한글 경로 오류를 릴리스 전에 잡던 장치를 그대로 쓴다. 버전을 한 번 더 확인한다 | M0 |
 | 7 | build 잡 | zip 과 해시 | 전체·경량 zip 을 만들고 `SHA256SUMS` 를 Python 으로 쓴다(BOM·CRLF 없음). 앱과 같은 zip 검사(6-5)를 `tools/check_release_zip.py` 로 돌린다 | 잘못 묶인 zip 을 게시 전에 걸러낸다 (S-43) | M0 |
 | 8 | build 잡 | 매니페스트 생성 | `tools/make_manifest.py`: `VERSION`, 릴리스 노트, zip 의 크기·해시·압축 해제 크기·파일 수, `deps` → `latest.json` (서명 없음) | 해시를 사람이 옮겨 적지 않는다 | M0 |
 | 9 | build 잡 | artifact 업로드 | `actions/upload-artifact` (커밋 SHA 고정) | 잡 사이 전달 | M0 |
@@ -199,7 +199,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: >
           gh release create "${{ github.ref_name }}" --draft --verify-tag
-          --title "StreamLabeler ${{ github.ref_name }}" --notes-file out/notes.md
+          --title "ChatCoach ${{ github.ref_name }}" --notes-file out/notes.md
           out/*.zip out/SHA256SUMS out/latest.json
 ```
 
@@ -232,7 +232,7 @@ jobs:
 | 키 | 타입 | 뜻 | 앱의 검사 |
 |---|---|---|---|
 | `manifest_version` | int | 이 형식의 버전. 지금은 1 | 앱이 아는 값보다 크면 자동 업데이트 대신 '수동 업데이트 필요' 안내 |
-| `app` | string | `"StreamLabeler"` | 다르면 거부 |
+| `app` | string | `"ChatCoach"` | 다르면 거부 |
 | `version` | string `X.Y.Z` | 새 버전 | 설치본보다 커야 한다. 같거나 작으면 무시 (다운그레이드 방지) |
 | `published_at` | string, ISO 8601 UTC | 매니페스트를 만든 시각 | 설치본 `build_info.built_at` 보다 이르면 거부. 표시에도 쓴다 |
 | `min_supported` | string `X.Y.Z` | 이보다 낮은 앱은 지원 종료 | 설치본이 이보다 낮으면 '업데이트 필요' 모드 (5-5) |
@@ -243,10 +243,10 @@ jobs:
 | `deps` | object | `{"ffmpeg": {"tag", "sha256"}, "libmpv": {"tag", "sha256"}}` (상류 아카이브의 태그와 해시) | 경량 zip 선택 조건 (6-4) |
 | `assets[]` | object[] | 내려받을 파일 | 아래 하위 키 |
 | `assets[].kind` | `"full"` 또는 `"lite"` | 전체·경량 | 각각 정확히 하나 |
-| `assets[].name` | string | 파일 이름 | `StreamLabeler-v{version}-win64.zip` 또는 `...-win64-update.zip` 과 같아야 한다 |
+| `assets[].name` | string | 파일 이름 | `ChatCoach-v{version}-win64.zip` 또는 `...-win64-update.zip` 과 같아야 한다 |
 | `assets[].size` | int | 바이트 수 | 받은 크기와 정확히 같아야 한다. 2GiB 미만 |
 | `assets[].sha256` | string (소문자 hex 64자) | 해시 | 받은 파일과 같아야 한다 |
-| `assets[].url` | string | 다운로드 주소 | `https://github.com/vtubeadmirer/streamlabeler/releases/download/v{version}/{name}` 과 글자 그대로 같아야 한다 (호스트 화이트리스트) |
+| `assets[].url` | string | 다운로드 주소 | `https://github.com/vtubeadmirer/chatcoach/releases/download/v{version}/{name}` 과 글자 그대로 같아야 한다 (호스트 화이트리스트) |
 | `assets[].unpacked_size` | int | 압축을 풀었을 때 크기 합 | zip 항목 크기 합과 같아야 한다 (zip 폭탄 방지) |
 | `assets[].file_count` | int | 파일 수 | zip 항목 수와 같아야 한다. 3,000 이하 |
 
@@ -259,7 +259,7 @@ jobs:
 ```json
 {
   "manifest_version": 1,
-  "app": "StreamLabeler",
+  "app": "ChatCoach",
   "version": "0.1.3",
   "published_at": "2026-11-02T05:05:00Z",
   "min_supported": "0.1.0",
@@ -274,19 +274,19 @@ jobs:
   "assets": [
     {
       "kind": "full",
-      "name": "StreamLabeler-v0.1.3-win64.zip",
+      "name": "ChatCoach-v0.1.3-win64.zip",
       "size": 178123456,
       "sha256": "<64자>",
-      "url": "https://github.com/vtubeadmirer/streamlabeler/releases/download/v0.1.3/StreamLabeler-v0.1.3-win64.zip",
+      "url": "https://github.com/vtubeadmirer/chatcoach/releases/download/v0.1.3/ChatCoach-v0.1.3-win64.zip",
       "unpacked_size": 421000000,
       "file_count": 338
     },
     {
       "kind": "lite",
-      "name": "StreamLabeler-v0.1.3-win64-update.zip",
+      "name": "ChatCoach-v0.1.3-win64-update.zip",
       "size": 41234567,
       "sha256": "<64자>",
-      "url": "https://github.com/vtubeadmirer/streamlabeler/releases/download/v0.1.3/StreamLabeler-v0.1.3-win64-update.zip",
+      "url": "https://github.com/vtubeadmirer/chatcoach/releases/download/v0.1.3/ChatCoach-v0.1.3-win64-update.zip",
       "unpacked_size": 112000000,
       "file_count": 301
     }
@@ -294,7 +294,7 @@ jobs:
 }
 ```
 
-`latest.json.minisig` 의 trusted comment: `StreamLabeler latest.json v0.1.3`
+`latest.json.minisig` 의 trusted comment: `ChatCoach latest.json v0.1.3`
 
 ### 5-4. 검증 순서
 
@@ -359,11 +359,11 @@ flowchart TD
 
 - 시점: 앱 시작 30초 뒤(창이 뜨고 프로젝트를 연 뒤) 백그라운드 스레드에서. 마지막 성공 뒤 24시간이 지났거나 마지막 실패 뒤 1시간이 지났을 때만 확인한다. '지금 확인' 은 주기와 상관없이 바로 한다.
 - 경로:
-  1. `GET https://github.com/vtubeadmirer/streamlabeler/releases/latest/download/latest.json` 과 같은 경로의 `.minisig`. GitHub 문서에 있는 '최신 릴리스 자산 직접 링크' 형식이다. `api.github.com` 이 아니어서 미인증 시간당 60회 한도와 무관하다고 본다(실제 한도 동작은 확인 필요). 사무실 하나에 라벨러 여럿이 같은 공인 IP 를 써도 문제가 덜하다.
-  2. 1이 실패(404·네트워크 오류)하면 `GET https://api.github.com/repos/vtubeadmirer/streamlabeler/releases/latest` 에서 `latest.json`·`.minisig` 자산을 찾아 받는다.
+  1. `GET https://github.com/vtubeadmirer/chatcoach/releases/latest/download/latest.json` 과 같은 경로의 `.minisig`. GitHub 문서에 있는 '최신 릴리스 자산 직접 링크' 형식이다. `api.github.com` 이 아니어서 미인증 시간당 60회 한도와 무관하다고 본다(실제 한도 동작은 확인 필요). 사무실 하나에 라벨러 여럿이 같은 공인 IP 를 써도 문제가 덜하다.
+  2. 1이 실패(404·네트워크 오류)하면 `GET https://api.github.com/repos/vtubeadmirer/chatcoach/releases/latest` 에서 `latest.json`·`.minisig` 자산을 찾아 받는다.
   3. 둘 다 실패하면 '확인 실패'.
-  - 숨은 설정 `update_channel=beta`(개발자·내부 확인용)는 `GET /repos/vtubeadmirer/streamlabeler/releases?per_page=10` 에서 초안을 뺀 가장 높은 버전(prerelease 포함)의 `latest.json` 을 쓴다.
-- 요청 공통: `User-Agent: StreamLabeler-updater/<버전>`, 연결·읽기 제한 10초, 리다이렉트는 https 로만 최대 5번. 앱에 토큰(PAT)을 넣지 않는다 — 공개 바이너리 속 토큰은 저장소 쓰기 권한을 공개하는 것과 같다.
+  - 숨은 설정 `update_channel=beta`(개발자·내부 확인용)는 `GET /repos/vtubeadmirer/chatcoach/releases?per_page=10` 에서 초안을 뺀 가장 높은 버전(prerelease 포함)의 `latest.json` 을 쓴다.
+- 요청 공통: `User-Agent: ChatCoach-updater/<버전>`, 연결·읽기 제한 10초, 리다이렉트는 https 로만 최대 5번. 앱에 토큰(PAT)을 넣지 않는다 — 공개 바이너리 속 토큰은 저장소 쓰기 권한을 공개하는 것과 같다.
 - 상태 표시: 상태바에 '새 버전 vX.Y.Z' / '최신 (마지막 확인 hh:mm)' / '업데이트 확인 실패 — 사유'. ClipSlicer 처럼 '최신입니다 (또는 확인에 실패했습니다)' 로 섞지 않는다.
 - 기록: `data\update\state.json` = `{last_ok_at, last_fail_at, last_fail_reason, last_seen_version, skip_version}`. 확인 시각은 결과가 나온 뒤에 쓴다. ClipSlicer 는 결과 전에 써서 실패 한 번이 주기 전체를 막았다(S-41).
 - 라벨링 세션 메타에 `app_version`, `update_check_state`, `checked_at` 를 남긴다. 구버전으로 매긴 세션을 나중에 걸러내기 위해서다 ([03-data-model.md](./03-data-model.md)).
@@ -372,7 +372,7 @@ flowchart TD
 
 - 알림은 상태바 버튼 '새 버전 vX.Y.Z' 로만 한다. 모달 창으로 작업을 끊지 않는다.
 - 대화상자: 버전, 내려받을 크기(전체·경량 중 선택된 것), 노트(일반 텍스트), 라벨 형식·기준서 변화 경고, 버튼 [지금 업데이트] [나중에] [이 버전 건너뛰기](mandatory 면 없음) [릴리스 페이지 열기].
-- 릴리스 페이지 주소는 매니페스트 문자열이 아니라 앱이 만든다: `https://github.com/vtubeadmirer/streamlabeler/releases/tag/v{version}` (`version` 은 정규식 검사 뒤). 외부 문자열을 `os.startfile` 에 넘기지 않는다 (S-18).
+- 릴리스 페이지 주소는 매니페스트 문자열이 아니라 앱이 만든다: `https://github.com/vtubeadmirer/chatcoach/releases/tag/v{version}` (`version` 은 정규식 검사 뒤). 외부 문자열을 `os.startfile` 에 넘기지 않는다 (S-18).
 - 진행 중인 작업(채팅 수집, 분석, 외부 도구 실행)이 있으면 [지금 업데이트] 를 비활성으로 두고 사유를 보인다.
 
 ### 6-4. 다운로드
@@ -394,9 +394,9 @@ flowchart TD
 |---|---|---|
 | 항목 수 | `file_count` 와 같고 3,000 이하 | 비정상 패키지 |
 | 압축 해제 크기 합 | `unpacked_size` 와 같고 2GiB 이하 | zip 폭탄, 디스크 채우기 |
-| 경로 | 모두 `StreamLabeler/` 로 시작. `..`, 절대경로, 드라이브 문자, `:` 없음 | zip-slip. Python 3.12 `extractall` 도 정리하지만 명시적으로 거부한다 |
-| 필수 파일 | `StreamLabeler/StreamLabeler.exe`, `StreamLabeler/_internal/VERSION` (내용 = `version`) | 엉뚱한 레이아웃·버전 |
-| 금지 항목 | `StreamLabeler/data/`, `StreamLabeler/_backup/`, `StreamLabeler/_update/` | 보존 폴더를 zip 이 덮는 사고 |
+| 경로 | 모두 `ChatCoach/` 로 시작. `..`, 절대경로, 드라이브 문자, `:` 없음 | zip-slip. Python 3.12 `extractall` 도 정리하지만 명시적으로 거부한다 |
+| 필수 파일 | `ChatCoach/ChatCoach.exe`, `ChatCoach/_internal/VERSION` (내용 = `version`) | 엉뚱한 레이아웃·버전 |
+| 금지 항목 | `ChatCoach/data/`, `ChatCoach/_backup/`, `ChatCoach/_update/` | 보존 폴더를 zip 이 덮는 사고 |
 | 이름 중복 | 대소문자를 무시하고(casefold) 같은 이름이 없음 | Windows 에서 서로 덮어씀 |
 | 경량 zip | `_internal/ffmpeg/`, `_internal/libmpv-2.dll` 이 없어야 함 | 경량·전체가 뒤바뀐 릴리스 |
 
@@ -413,9 +413,9 @@ ClipSlicer `find_app_dir` 의 'os.walk 로 처음 찾은 exe' 방식은 쓰지 �
 | 진행 중 작업 없음 | 워커 목록(수집·분석·도구) | 사유 표시 |
 | 같은 폴더의 다른 창 없음 | 단일 인스턴스(`QLockFile`, `data\instance.lock`)라 원래 없다. 스크립트가 한 번 더 기다린다 | — |
 | 디스크 여유 | 앱 볼륨: 압축 해제 크기 + 현재 설치 크기(`_backup` 몫) × 1.2. 백업 폴더 볼륨: 예상 백업 크기 × 1.2 | 어느 드라이브가 얼마나 모자란지 표시 |
-| OneDrive 아래인가 | 앱 경로가 `%OneDrive%`·`%OneDriveCommercial%`·`%OneDriveConsumer%` 로 시작(대소문자 무시) | 경고: '동기화를 잠시 멈추거나 `%LOCALAPPDATA%\Programs\StreamLabeler` 로 옮기세요'. 진행은 허용하고 선택을 로그에 남긴다 |
+| OneDrive 아래인가 | 앱 경로가 `%OneDrive%`·`%OneDriveCommercial%`·`%OneDriveConsumer%` 로 시작(대소문자 무시) | 경고: '동기화를 잠시 멈추거나 `%LOCALAPPDATA%\Programs\ChatCoach` 로 옮기세요'. 진행은 허용하고 선택을 로그에 남긴다 |
 | 이동식 드라이브 | `GetDriveTypeW` 가 `DRIVE_REMOVABLE` 이거나 파일 시스템이 FAT 계열 | 경고: '1~3분 동안 뽑지 마세요' (v1) |
-| 새 exe 자체 점검 통과 | `_update\<id>\new\StreamLabeler\StreamLabeler.exe --selftest <json> --expect-version X.Y.Z --data-dir _update\<id>\selftest-data`, 창 없음, 90초 제한 | 거부. 준비 폴더는 원인 분석용으로 1개만 남긴다 (더 오래된 것은 지움) |
+| 새 exe 자체 점검 통과 | `_update\<id>\new\ChatCoach\ChatCoach.exe --selftest <json> --expect-version X.Y.Z --data-dir _update\<id>\selftest-data`, 창 없음, 90초 제한 | 거부. 준비 폴더는 원인 분석용으로 1개만 남긴다 (더 오래된 것은 지움) |
 | 교체 직전 data 백업 성공 | 6-7 | 거부 |
 
 - 자체 점검의 `--data-dir` 은 사용자의 `data\` 를 건드리지 않게 하려는 것이다. 점검 항목은 [02-architecture.md](./02-architecture.md) 의 selftest 표(버전, libmpv 로드, ffmpeg 실행, thresholds·기준서 해시, 한글 임시 폴더에서 프로젝트 쓰기·읽기)에 두 가지를 더한다: `channel == "release"`, 내장 공개키에 시험용 키가 없음.
@@ -425,7 +425,7 @@ ClipSlicer `find_app_dir` 의 'os.walk 로 처음 찾은 exe' 방식은 쓰지 �
 
 - 대상: `data\settings.ini`, `data\labelers.json`, 그리고 최근 목록에 있는 모든 프로젝트(앱 폴더 밖 프로젝트 포함)의 `labels\`·`project.json`·`samples\`·`locks\`·`relabel\`.
 - 제외: `chat\`(수집 뒤 바뀌지 않아 앱이 고치지 않는다), `derived\`(다시 만들 수 있다), `identities.jsonl`(보호 파일. 사본을 늘리지 않는다, S-06).
-- 위치: `paths.backup_root()\pre-update\` (기본 `%LOCALAPPDATA%\StreamLabeler\backups\pre-update\`). 이름 `pre-update-<이전>-to-<새>-<yyyymmddHHMMSS>.zip`. 최근 5개만 남긴다(시작값).
+- 위치: `paths.backup_root()\pre-update\` (기본 `%LOCALAPPDATA%\ChatCoach\backups\pre-update\`). 이름 `pre-update-<이전>-to-<새>-<yyyymmddHHMMSS>.zip`. 최근 5개만 남긴다(시작값).
 - 앱 폴더 밖에 두는 이유: 라벨러가 옛 앱 폴더를 지워도 백업은 남아야 한다 (S-39).
 - 업데이터가 하는 이유: 업데이트 코드는 `data\` 를 고치지 않지만, **새 버전**이 첫 실행에서 라벨 파일을 잘못 읽거나 마이그레이션 버그를 낼 수 있다. 새 버전 안에서 백업하면 그 코드가 죽었을 때 사본이 없다.
 - 실패하면 업데이트를 멈춘다. 일 1회 백업·보존·파기 규칙은 [03-data-model.md](./03-data-model.md)·[05-security.md](./05-security.md) 와 같아야 한다.
@@ -447,7 +447,7 @@ ClipSlicer `find_app_dir` 의 'os.walk 로 처음 찾은 exe' 방식은 쓰지 �
 | 1 | 매개변수를 확인하고 `started` 표식을 쓴다 | 앱이 10초 뒤 실패로 처리 |
 | 2 | 앱 프로세스 종료를 기다린다 (최대 60초) | 3단계에서 판단 |
 | 3 | 같은 폴더(`$App` 끝에 `\` 를 붙인 접두사로 비교)에서 실행 중인 프로세스가 없어질 때까지 최대 120초 기다린다. 죽이지 않는다. 기다리는 동안 30초마다 잠금 파일의 시각을 갱신한다 | 아무것도 바꾸지 않고 `--update-blocked` 로 재실행 |
-| 4 | 새 폴더에 필수 파일이 있는지 본다: `StreamLabeler.exe`, `_internal\python312.dll`, `_internal\VERSION`, 전체 zip 이면 `_internal\libmpv-2.dll` | 백신이 그 사이 격리했을 수 있다. 아무것도 바꾸지 않고 `--update-failed` |
+| 4 | 새 폴더에 필수 파일이 있는지 본다: `ChatCoach.exe`, `_internal\python312.dll`, `_internal\VERSION`, 전체 zip 이면 `_internal\libmpv-2.dll` | 백신이 그 사이 격리했을 수 있다. 아무것도 바꾸지 않고 `--update-failed` |
 | 5 | 백업: `robocopy $App $App\_backup /MIR /XD $App\data $App\_backup $App\_update /R:2 /W:1` | rc ≥ 8 이면 아무것도 바꾸지 않고 `--update-failed`. ClipSlicer 는 이 rc 를 보지 않았다 |
 | 6 | `data\update\backup_ok.json` = `{version: 이전 버전, at}` | — |
 | 7 | 교체: `robocopy $New $App /MIR /XD $App\data $App\_backup $App\_update [경량이면 $App\_internal\ffmpeg] [경량이면 /XF libmpv-2.dll] /R:2 /W:1` | rc ≥ 8 이면 8단계 |
@@ -464,7 +464,7 @@ ClipSlicer `find_app_dir` 의 'os.walk 로 처음 찾은 exe' 방식은 쓰지 �
 
 실행 중인 인스턴스: 앱은 폴더당 하나만 뜬다. 다른 폴더의 사본은 이 폴더의 파일을 잠그지 않는다. 120초 대기는 창을 닫는 중인 짧은 겹침을 위한 것이다.
 
-OneDrive: 6-6 에서 경고한다. 동기화 엔진이 파일을 잠그면 robocopy 가 재시도한 뒤 rc ≥ 8 로 끝나고 복구로 간다. 설치 권장 위치는 `%LOCALAPPDATA%\Programs\StreamLabeler` 다. 사용자 전용 권한이 상속되고, OneDrive 밖이며, 관리자 권한이 필요 없다 (S-08, [02-architecture.md](./02-architecture.md)). `C:\Tools` 처럼 드라이브 바로 아래 새 폴더는 '인증된 사용자 수정' 권한을 물려받아 권하지 않는다.
+OneDrive: 6-6 에서 경고한다. 동기화 엔진이 파일을 잠그면 robocopy 가 재시도한 뒤 rc ≥ 8 로 끝나고 복구로 간다. 설치 권장 위치는 `%LOCALAPPDATA%\Programs\ChatCoach` 다. 사용자 전용 권한이 상속되고, OneDrive 밖이며, 관리자 권한이 필요 없다 (S-08, [02-architecture.md](./02-architecture.md)). `C:\Tools` 처럼 드라이브 바로 아래 새 폴더는 '인증된 사용자 수정' 권한을 물려받아 권하지 않는다.
 
 USB: 교체 중에 뽑으면 반쯤 바뀐 폴더가 남을 수 있다. in-place 방식의 구조적 한계다(6-11).
 
@@ -475,7 +475,7 @@ USB: 교체 중에 뽑으면 반쯤 바뀐 폴더가 남을 수 있다. in-place
 | `--updated` | 'vX.Y.Z 로 업데이트했습니다' 와 노트를 보인다. `data\run\<pid>.running` 표식을 만들고 정상 종료 때 지운다. `_backup\` 은 **아직 지우지 않는다** |
 | 다음 정상 시작 | 남은 `.running` 표식이 없고 `last_result.to` 가 현재 버전이면 `_backup\` 을 백그라운드에서 지우고 `backup_ok.json` 을 지운다. `_update\` 를 정리한다 |
 | `--update-failed` | `last_result.json` 의 사유와 `update.log` 위치를 보이고 [다시 시도] [수동 업데이트] 를 준다. `_backup\` 은 남긴다 |
-| `--update-blocked` | '다른 StreamLabeler 창이 열려 있어 업데이트를 보류했습니다' |
+| `--update-blocked` | '다른 ChatCoach 창이 열려 있어 업데이트를 보류했습니다' |
 | `.running` 표식이 남아 있음 | '이전 실행이 비정상 종료되었습니다'. 업데이트 직후 연속 2회면 [이전 버전으로 되돌리기] 를 제안한다 |
 | `updating.lock` 이 2분 넘게 갱신되지 않았고 `last_result` 가 없음 | '지난 업데이트가 중간에 멈췄습니다'. `backup_ok.json` 이 있으면 [되돌리기] 를 제안한다 |
 | `updating.lock` 이 2분 안에 갱신됨 | '업데이트가 진행 중입니다' 를 보이고 종료한다 |
@@ -530,7 +530,7 @@ class PointerApplier: ...     # v1 후보: current.txt 한 파일을 os.replace 
 - 반쯤 바뀐 폴더로 인한 수동 복구가 생겼다.
 - 라벨러 10명 이상이거나 외부 업체가 들어온다.
 
-v1 배치는 [02-architecture.md](./02-architecture.md) 5-6 에 있다(런처 `StreamLabeler.exe` + `current.txt`·`previous.txt` + `app\<버전>\` + `data\`). 그때 지킬 것:
+v1 배치는 [02-architecture.md](./02-architecture.md) 5-6 에 있다(런처 `ChatCoach.exe` + `current.txt`·`previous.txt` + `app\<버전>\` + `data\`). 그때 지킬 것:
 
 - 런처와 앱은 같은 `paths.data_root()` 판정을 쓴다. 건강 신호 자체는 파일 경로에 기대지 않고 종료 코드나 이름 있는 파이프로 받는다. 앱이 `data\` 를 `%LOCALAPPDATA%` 로 폴백하면 런처가 엉뚱한 곳을 보고 정상 실행을 실패로 오판해 되돌리기를 반복할 수 있기 때문이다.
 - 건강 기준은 시간이 아니라 두 지점이다: 창 생성 성공, 데이터 계층 열기 성공. 제한은 60초로 넉넉히 두고 '응답 없음' 과 '비정상 종료' 를 나눈다.
@@ -547,21 +547,21 @@ v1 배치는 [02-architecture.md](./02-architecture.md) 5-6 에 있다(런처 `S
 | `data\labelers.json` | 라벨러 명부 | 보존 | 보존 |
 | `data\projects\` | 기본 프로젝트 위치 | 보존 | 보존 |
 | 앱 밖 프로젝트 폴더 | 사용자가 지정한 위치 | 건드리지 않음 (교체 직전 백업만) | 건드리지 않음 |
-| `data\logs\` | `streamlabeler.log`, `update.log`, `crash.log` | 보존 (`update.log` 에 줄 추가) | 보존 |
+| `data\logs\` | `chatcoach.log`, `update.log`, `crash.log` | 보존 (`update.log` 에 줄 추가) | 보존 |
 | `data\update\` | `state.json`, `last_result.json`, `backup_ok.json`, `updating.lock` | 업데이터만 쓴다 | 업데이터만 쓴다 |
 | `data\run\` | `<pid>.running` 표식 | 보존 | 보존 |
 | `data\instance.lock` | 단일 인스턴스 잠금 | 보존 | 보존 |
 | `data\models\`, `data\cache\` (v1) | 선택 모델, 버릴 수 있는 색인 | 보존 | 보존 |
-| `paths.backup_root()` (기본 `%LOCALAPPDATA%\StreamLabeler\backups\`) | 교체 직전·일 1회 백업 zip | 새로 추가 | 그대로 |
+| `paths.backup_root()` (기본 `%LOCALAPPDATA%\ChatCoach\backups\`) | 교체 직전·일 1회 백업 zip | 새로 추가 | 그대로 |
 | `_backup\` | 이전 버전 프로그램 사본 (사용자 데이터 아님) | 만들어짐 | 원본으로 쓰임 |
 | `_update\` | 준비 폴더 | 만들어짐 | 만들어짐 |
-| `StreamLabeler.exe`, `_internal\` | 프로그램 | 교체 | 교체 |
+| `ChatCoach.exe`, `_internal\` | 프로그램 | 교체 | 교체 |
 
 규칙:
 
 1. 프로그램 루트에 새 사용자 파일을 두지 않는다. 새 데이터는 반드시 `data\` 아래에 둔다. 테스트로 강제한다: 앱을 한 번 돌린 뒤 루트에 `appspec.keep_dirs`(`data`·`_backup`·`_update`)와 배포물 말고 다른 항목이 생기면 실패. 이것이 ClipSlicer 의 '제외 목록 두 곳(Python `USER_FILES`, 스크립트 `$keepFiles`) 관리' 를 끝내는 방법이다.
 2. 보존 목록은 `app/appspec.py` 한 곳에 있고, `replace.ps1` 은 그 값으로 생성된다.
-3. 프로그램 폴더에 쓸 수 없으면(Program Files, 읽기 전용 USB) `data` 는 `%LOCALAPPDATA%\StreamLabeler\data` 로 폴백하고 자동 업데이트는 끈다. 첫 실행에 '이 위치에서는 폴더째 복사가 되지 않습니다' 를 알린다 ([02-architecture.md](./02-architecture.md)).
+3. 프로그램 폴더에 쓸 수 없으면(Program Files, 읽기 전용 USB) `data` 는 `%LOCALAPPDATA%\ChatCoach\data` 로 폴백하고 자동 업데이트는 끈다. 첫 실행에 '이 위치에서는 폴더째 복사가 되지 않습니다' 를 알린다 ([02-architecture.md](./02-architecture.md)).
 
 ## 8. 수동 업데이트
 
@@ -570,18 +570,18 @@ v1 배치는 [02-architecture.md](./02-architecture.md) 5-6 에 있다(런처 `S
 권장 방법 — 새 폴더에 풀고 `data\` 만 옮긴다:
 
 1. 앱을 끈다.
-2. 릴리스 페이지(앱의 [릴리스 페이지 열기], 또는 `https://github.com/vtubeadmirer/streamlabeler/releases/latest`)에서 `StreamLabeler-vX.Y.Z-win64.zip` 과 `SHA256SUMS` 를 받는다.
+2. 릴리스 페이지(앱의 [릴리스 페이지 열기], 또는 `https://github.com/vtubeadmirer/chatcoach/releases/latest`)에서 `ChatCoach-vX.Y.Z-win64.zip` 과 `SHA256SUMS` 를 받는다.
 3. 해시를 확인한다.
    ```powershell
-   (Get-FileHash .\StreamLabeler-vX.Y.Z-win64.zip -Algorithm SHA256).Hash.ToLower()
+   (Get-FileHash .\ChatCoach-vX.Y.Z-win64.zip -Algorithm SHA256).Hash.ToLower()
    ```
    `SHA256SUMS` 의 같은 이름 줄과 같아야 한다. 이 파일은 같은 릴리스에서 오므로 전송 오류 확인용이다. 출처까지 확인하려면 아래 '고급' 을 본다.
-4. zip 파일 속성에서 '차단 해제' 를 체크하거나 `Unblock-File .\StreamLabeler-vX.Y.Z-win64.zip` 을 실행한다. 풀기 **전에** 해야 안의 exe 에 인터넷 다운로드 표시가 옮겨 붙지 않는다.
-5. 새 폴더에 푼다. 예: `%LOCALAPPDATA%\Programs\StreamLabeler-new\`.
-6. 옛 폴더의 `data\` 를 새 폴더의 `StreamLabeler\` 안으로 복사한다.
-7. 새 `StreamLabeler.exe` 를 실행해 버전과 프로젝트 목록을 확인한다. 문제가 없으면 옛 폴더를 지우고 새 폴더 이름을 원래대로 바꾼다.
+4. zip 파일 속성에서 '차단 해제' 를 체크하거나 `Unblock-File .\ChatCoach-vX.Y.Z-win64.zip` 을 실행한다. 풀기 **전에** 해야 안의 exe 에 인터넷 다운로드 표시가 옮겨 붙지 않는다.
+5. 새 폴더에 푼다. 예: `%LOCALAPPDATA%\Programs\ChatCoach-new\`.
+6. 옛 폴더의 `data\` 를 새 폴더의 `ChatCoach\` 안으로 복사한다.
+7. 새 `ChatCoach.exe` 를 실행해 버전과 프로젝트 목록을 확인한다. 문제가 없으면 옛 폴더를 지우고 새 폴더 이름을 원래대로 바꾼다.
 
-덮어쓰기도 되지만 권하지 않는다. 옛 폴더 위에 그대로 풀면 `data\` 는 남지만, 새 버전에서 없어진 파일이 `_internal\` 에 남아 섞일 수 있다(오래된 모듈이 로드되는 문제 가능 — 확인 필요). 덮어써야 한다면 옛 폴더의 `StreamLabeler.exe` 와 `_internal\` 을 먼저 지우고 푼다. `data\` 는 지우지 않는다.
+덮어쓰기도 되지만 권하지 않는다. 옛 폴더 위에 그대로 풀면 `data\` 는 남지만, 새 버전에서 없어진 파일이 `_internal\` 에 남아 섞일 수 있다(오래된 모듈이 로드되는 문제 가능 — 확인 필요). 덮어써야 한다면 옛 폴더의 `ChatCoach.exe` 와 `_internal\` 을 먼저 지우고 푼다. `data\` 는 지우지 않는다.
 
 고급 — 출처 확인: `latest.json` 과 `latest.json.minisig` 를 받아 `minisign -Vm latest.json -P <공개키>` 로 서명을 확인한 뒤, `latest.json` 의 `sha256` 과 zip 해시를 비교한다. 공개키는 README 와 `docs/install.md` 에 적는다. 이 과정을 앱의 '파일에서 업데이트' 메뉴(v1 후보: 브라우저로 받은 zip 을 서명된 매니페스트와 대조해 같은 교체 경로로 적용)로 대신할 수 있다.
 
@@ -600,20 +600,20 @@ SmartScreen: 코드 서명이 없어 첫 실행 때 'Windows의 PC 보호' 가 �
 | 단계 | 내용 |
 |---|---|
 | 1 | 키쌍 두 개를 같은 날 만든다: K1(현재), K2(예비). 둘 다 암호로 보호한다 |
-| 2 | 위치는 저장소 밖, OneDrive 밖. K1 비밀키는 개발 PC 의 `%LOCALAPPDATA%\StreamLabeler-signing\` 또는 USB 1 에 둔다. K2 비밀키는 개발 PC 에 두지 않고 오프라인 백업에만 둔다 (두 키가 함께 털리지 않게) |
+| 2 | 위치는 저장소 밖, OneDrive 밖. K1 비밀키는 개발 PC 의 `%LOCALAPPDATA%\ChatCoach-signing\` 또는 USB 1 에 둔다. K2 비밀키는 개발 PC 에 두지 않고 오프라인 백업에만 둔다 (두 키가 함께 털리지 않게) |
 | 3 | 오프라인 백업 두 곳: USB 1, USB 2 (다른 장소에 보관). 각각 K1·K2 비밀키. 암호는 비밀번호 관리자에 둔다. 평문 파일로 OneDrive 에 두지 않는다 |
 | 4 | 공개키 K1·K2 를 키 ID 와 함께 `app/appspec.py` 의 공개키 자리에 넣는다. README 와 `docs/install.md` 에도 적는다 |
 | 5 | 백업이 실제로 읽히는지 시험한다: 각 USB 의 키로 시험 파일에 서명하고 검증한다 |
 
 - 예비키는 첫 공개 빌드 **전에** 넣어야 한다. 이미 설치된 사본에는 나중에 공개키를 더할 수 없다.
-- `sign_manifest.py` 는 키 경로에 `OneDrive` 가 들어 있거나 저장소 안이면 거부한다. 저장소가 `OneDrive\문서\streamlabeler` 아래에 있어 `.gitignore` 로 git 에서 빠져도 클라우드에는 올라가기 때문이다 (S-16).
-- 저장소 `.gitignore` 에 `*.key`·`minisign.key` 가 이미 있다. 비밀키 파일 이름을 이 규칙에 맞춘다(예: `streamlabeler-k1.key`).
+- `sign_manifest.py` 는 키 경로에 `OneDrive` 가 들어 있거나 저장소 안이면 거부한다. 저장소가 `OneDrive\문서\chatcoach` 아래에 있어 `.gitignore` 로 git 에서 빠져도 클라우드에는 올라가기 때문이다 (S-16).
+- 저장소 `.gitignore` 에 `*.key`·`minisign.key` 가 이미 있다. 비밀키 파일 이름을 이 규칙에 맞춘다(예: `chatcoach-k1.key`).
 
 ### 9-3. 서명 — 릴리스마다
 
 - 4-2 의 12~13단계. 암호는 그때 입력하고 저장하지 않는다.
-- trusted comment 는 `StreamLabeler latest.json v{version}` 으로 한다.
-- 같은 버전 번호로 내용이 다른 매니페스트에 다시 서명하지 않는다. `sign_manifest.py` 가 `%LOCALAPPDATA%\StreamLabeler-signing\signed.log` 에 `(version, sha256)` 을 남기고 겹치면 거부한다. 고칠 것이 있으면 다음 번호로 낸다.
+- trusted comment 는 `ChatCoach latest.json v{version}` 으로 한다.
+- 같은 버전 번호로 내용이 다른 매니페스트에 다시 서명하지 않는다. `sign_manifest.py` 가 `%LOCALAPPDATA%\ChatCoach-signing\signed.log` 에 `(version, sha256)` 을 남기고 겹치면 거부한다. 고칠 것이 있으면 다음 번호로 낸다.
 
 ### 9-4. 사고 대응
 
@@ -669,19 +669,19 @@ PyInstaller spec 은 `upx=False` 로 둔다. ClipSlicer.spec 은 `upx=True` 인�
 
 ### 12-1. 빌드 위치
 
-- 시험 빌드는 `.\build.ps1 -DistPath dist_test`. 실제 설치본(`%LOCALAPPDATA%\Programs\StreamLabeler`)에 빌드하지 않는다. ClipSlicer 에서 저장소 안 `dist\` 가 실제 설치본이라 빌드가 덮어쓰거나 잠금에 막히던 일을 반복하지 않는다.
+- 시험 빌드는 `.\build.ps1 -DistPath dist_test`. 실제 설치본(`%LOCALAPPDATA%\Programs\ChatCoach`)에 빌드하지 않는다. ClipSlicer 에서 저장소 안 `dist\` 가 실제 설치본이라 빌드가 덮어쓰거나 잠금에 막히던 일을 반복하지 않는다.
 
 ### 12-2. 시험 빌드 채널
 
 - `build.ps1 -Channel test` 로 만든 빌드만 다음을 한다:
-  - 공개키를 환경 변수 `STREAMLABELER_TEST_PUBKEY` 에서 읽는다(내장 K1·K2 대신).
+  - 공개키를 환경 변수 `CHATCOACH_TEST_PUBKEY` 에서 읽는다(내장 K1·K2 대신).
   - `--update-base-url http://127.0.0.1:<port>/` 를 받아들인다. http 는 `127.0.0.1` 일 때만 허용한다.
 - `release` 채널은 둘 다 무시한다. CI 의 자체 점검이 `channel == "release"` 를 확인한다.
 - 시험 키는 저장소에 두지 않는다. 가짜 서버가 실행할 때마다 임시 키쌍을 만들고 공개키를 환경 변수로 넘긴다.
 
 ### 12-3. 가짜 릴리스 서버
 
-`tools/fake_release_server.py` — `127.0.0.1` 에만 묶이는 작은 HTTP 서버. 폴더 하나(`latest.json`, `.minisig`, zip)를 GitHub 경로 모양(`/vtubeadmirer/streamlabeler/releases/latest/download/...`)으로 내준다. 모드로 실패를 흉내 낸다.
+`tools/fake_release_server.py` — `127.0.0.1` 에만 묶이는 작은 HTTP 서버. 폴더 하나(`latest.json`, `.minisig`, zip)를 GitHub 경로 모양(`/vtubeadmirer/chatcoach/releases/latest/download/...`)으로 내준다. 모드로 실패를 흉내 낸다.
 
 | 모드 | 흉내 내는 것 | 기대 결과 |
 |---|---|---|
@@ -709,7 +709,7 @@ PyInstaller spec 은 `upx=False` 로 둔다. ClipSlicer.spec 은 `upx=True` 인�
 ### 12-5. 손으로 하는 끝까지 시험 — 업데이터를 바꾼 릴리스마다
 
 1. 같은 코드에서 버전만 다른 A(예: 0.0.90)와 B(0.0.91)를 `-Channel test` 로 `dist_test` 에 빌드한다.
-2. A 를 `%TEMP%\테스트 문서\StreamLabeler\` 에 복사하고 시험 프로젝트와 라벨 몇 건을 만든다.
+2. A 를 `%TEMP%\테스트 문서\ChatCoach\` 에 복사하고 시험 프로젝트와 라벨 몇 건을 만든다.
 3. 가짜 서버에 B 를 올리고 A 에서 업데이트한다 → 버전, `data\` 그대로, `_backup` 유지를 확인 → 정상 종료 후 다시 시작 → `_backup` 삭제를 확인한다.
 4. 다시 A 로 시작해 [이전 버전으로 되돌리기] 를 확인한다.
 5. 실패 모드 몇 개(`selftest_fail`, `size_mismatch`, 다른 창 열어 두기)를 돌린다.
@@ -748,8 +748,8 @@ PyInstaller spec 은 `upx=False` 로 둔다. ClipSlicer.spec 은 `upx=True` 인�
 
 ### 게시 후
 
-- [ ] `https://github.com/vtubeadmirer/streamlabeler/releases/latest/download/latest.json` 이 새 버전을 주고 `.minisig` 검증이 통과한다(`python tools/sign_manifest.py verify --url ...`).
-- [ ] `gh attestation verify StreamLabeler-vX.Y.Z-win64.zip -R vtubeadmirer/streamlabeler` 가 통과한다. (v1 부터)
+- [ ] `https://github.com/vtubeadmirer/chatcoach/releases/latest/download/latest.json` 이 새 버전을 주고 `.minisig` 검증이 통과한다(`python tools/sign_manifest.py verify --url ...`).
+- [ ] `gh attestation verify ChatCoach-vX.Y.Z-win64.zip -R vtubeadmirer/chatcoach` 가 통과한다. (v1 부터)
 - [ ] 전체 zip 의 exe 를 VirusTotal 에서 확인했다(Defender 0).
 - [ ] 라벨러에게 알렸다. `mandatory`·`min_supported` 를 올렸다면 사유도.
 
@@ -823,7 +823,7 @@ PyInstaller spec 은 `upx=False` 로 둔다. ClipSlicer.spec 은 `upx=True` 인�
 
 | # | 질문 | 왜 필요한가 | 제안 |
 |---|---|---|---|
-| 1 | StreamLabeler 를 회사(법인·사업자) 명의로 배포할 수 있나? | Azure Artifact Signing 은 한국에서 조직만 가능하다. 가장 싼 진짜 코드 서명 | 지금은 보류, 외부 확대 때 결정 |
+| 1 | ChatCoach 를 회사(법인·사업자) 명의로 배포할 수 있나? | Azure Artifact Signing 은 한국에서 조직만 가능하다. 가장 싼 진짜 코드 서명 | 지금은 보류, 외부 확대 때 결정 |
 | 2 | 개발 PC 에 `gh` CLI 를 설치해도 되나? | 초안 확인·서명 업로드·게시에 인증이 필요하다 | 설치 |
 | 3 | 서명 키 백업용 USB 두 개를 서로 다른 장소에 둘 수 있나? | 키 분실은 전 사본의 자동 업데이트 중단이다 | 예 |
 | 4 | v0.0.1 부터 모든 릴리스에 서명하는 데 동의하나? (릴리스마다 수동 약 10분) | 선정안('v1 에 서명')보다 이르다. [07-roadmap.md](./07-roadmap.md) 질문 11 과 같은 질문이다 | 동의 |

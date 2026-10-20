@@ -40,7 +40,7 @@ class PublicKey:
 
 # ---------------------------------------------------------------------------
 # 업데이트 공개키. K1 = 운용, K2 = 예비 (04 9-2). 둘 다 첫 공개 빌드 **전에** 들어가야 한다.
-# 비밀키는 저장소·OneDrive 밖(%LOCALAPPDATA%\StreamLabeler-signing)에서 tools/sign_manifest.py keygen 으로 만든다.
+# 비밀키는 저장소·OneDrive 밖(%LOCALAPPDATA%\ChatCoach-signing)에서 tools/sign_manifest.py keygen 으로 만든다.
 # 비어 있으면: 업데이트 확인은 '공개키 없음' 으로 실패하고, release 채널 자체 점검(pubkeys)이 실패한다.
 # 그래서 공개키 없는 빌드는 CI 를 통과하지 못한다 (fail-closed).
 #
@@ -54,18 +54,18 @@ UPDATE_PUBKEYS: tuple[PublicKey, ...] = (
 
 @dataclass(frozen=True)
 class AppSpec:
-    name: str = "StreamLabeler"
-    repo: str = "vtubeadmirer/streamlabeler"
-    exe_name: str = "StreamLabeler.exe"
+    name: str = "ChatCoach"
+    repo: str = "vtubeadmirer/chatcoach"
+    exe_name: str = "ChatCoach.exe"
     # 포터블 폴더 안에서 업데이트가 건드리지 않는 것. 교체 스크립트의 /XD 는 이 세 이름의 전체 경로로 생성된다 (04 6-8).
     keep_dirs: tuple[str, ...] = ("data", "_backup", "_update")
     # 경량 zip 에서 빠지는 것 (전체 zip 과의 차이). 경로는 <앱> 기준, 구분자는 '/'.
     heavy_dirs: tuple[str, ...] = ("_internal/ffmpeg",)
     heavy_files: tuple[str, ...] = ("_internal/libmpv-2.dll",)
     # 교체 스크립트가 새 폴더에서 확인하는 필수 파일 (04 6-8 4단계). 경량이면 heavy_files 는 보지 않는다.
-    required_files: tuple[str, ...] = ("StreamLabeler.exe", "_internal/python312.dll", "_internal/VERSION")
+    required_files: tuple[str, ...] = ("ChatCoach.exe", "_internal/python312.dll", "_internal/VERSION")
     # zip 레이아웃: 최상위 폴더 하나
-    zip_top: str = "StreamLabeler"
+    zip_top: str = "ChatCoach"
     manifest_version: int = 1
     # 이 앱이 읽고 쓰는 라벨 형식 버전 (03). 매니페스트의 label_schema_version 과 비교해 경고만 한다.
     label_schema_version: int = 1

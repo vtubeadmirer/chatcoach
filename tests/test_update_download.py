@@ -69,7 +69,7 @@ def server(rel):
 @pytest.fixture()
 def app_dir(tmp_path):
     """설치본 0.0.1 (ffmpeg·libmpv·deps.txt 있음 → 경량 대상). 한글 폴더 아래."""
-    return rk.fake_app(str(tmp_path / "설치 폴더" / "StreamLabeler"), "0.0.1")
+    return rk.fake_app(str(tmp_path / "설치 폴더" / "ChatCoach"), "0.0.1")
 
 
 @pytest.fixture()
@@ -102,8 +102,8 @@ def test_normal_check_and_stage_lite(server, app_dir, state_path):
     root = os.path.join(app_dir, "_update")
     assert os.path.dirname(st.stage_dir) == root and st.stage_id.startswith("upd-")
     assert st.stage_id == os.path.basename(st.stage_dir) and _stage_dirs(app_dir) == [st.stage_id]
-    assert st.new_dir == os.path.join(st.stage_dir, "new", "StreamLabeler")
-    assert os.path.isfile(os.path.join(st.new_dir, "StreamLabeler.exe"))
+    assert st.new_dir == os.path.join(st.stage_dir, "new", "ChatCoach")
+    assert os.path.isfile(os.path.join(st.new_dir, "ChatCoach.exe"))
     with open(os.path.join(st.new_dir, "_internal", "VERSION"), encoding="utf-8") as f:
         assert f.read().strip() == "0.0.2"
     # 경량: 설치본의 ffmpeg·libmpv 가 붙어 있다 (자체 점검이 돌 수 있게)
@@ -125,7 +125,7 @@ def test_normal_check_and_stage_lite(server, app_dir, state_path):
 
 def test_normal_stage_full_when_no_heavy(server, tmp_path, state_path):
     server.mode("normal")
-    app = rk.fake_app(str(tmp_path / "app" / "StreamLabeler"), "0.0.1", heavy=False)
+    app = rk.fake_app(str(tmp_path / "app" / "ChatCoach"), "0.0.1", heavy=False)
     inst = rk.installed(app, has_heavy=False)
     r = _check(server, inst, state_path)
     assert r.state == "newer" and r.release.chosen == "full"
@@ -196,7 +196,7 @@ def test_primary_404_uses_rest_api(server, app_dir, state_path):
     assert any(p.endswith("/releases/download/v0.0.2/latest.json.minisig") for p in reqs)
     # 자산 주소는 매니페스트의 고정 경로라 1차 장애와 상관없이 받힌다
     st = updater.stage(r.release, SPEC, inst, server.url, selftest=False)
-    assert os.path.isfile(os.path.join(st.new_dir, "StreamLabeler.exe"))
+    assert os.path.isfile(os.path.join(st.new_dir, "ChatCoach.exe"))
 
 
 def test_check_without_base_url_on_test_channel_never_hits_fake_server(server, app_dir, state_path, monkeypatch):
@@ -279,7 +279,7 @@ def test_download_more_than_size_without_content_length(app_dir, tmp_path, monke
 
 
 def test_download_refuses_non_https_external(app_dir, tmp_path):
-    for url, channel in (("http://example.com/StreamLabeler.zip", "test"),
+    for url, channel in (("http://example.com/ChatCoach.zip", "test"),
                          ("http://127.0.0.1:9/x.zip", "release"),        # release 채널은 루프백 http 도 안 됨
                          ("ftp://example.com/x.zip", "test")):
         with pytest.raises(UpdateError) as ei:
@@ -340,9 +340,9 @@ def test_selftest_failure_keeps_one_failed_stage(server, app_dir, state_path, mo
     assert len(first) == 1
     first_dir = os.path.join(app_dir, "_update", first[0])
     assert os.path.isfile(os.path.join(first_dir, "FAILED"))
-    assert os.path.isdir(os.path.join(first_dir, "new", "StreamLabeler"))      # 원인 분석용으로 남김
+    assert os.path.isdir(os.path.join(first_dir, "new", "ChatCoach"))      # 원인 분석용으로 남김
     nd, ver, ch, sd = gate_calls[0]
-    assert ver == "0.0.2" and ch == "test" and sd == first_dir and nd == os.path.join(first_dir, "new", "StreamLabeler")
+    assert ver == "0.0.2" and ch == "test" and sd == first_dir and nd == os.path.join(first_dir, "new", "ChatCoach")
 
     with pytest.raises(UpdateError):
         updater.stage(r.release, SPEC, inst, server.url)
@@ -416,9 +416,9 @@ def test_selftest_gate_cannot_run_missing_exe(tmp_path):
 @pytest.mark.skipif(not os.path.isfile(PING), reason="Windows PING.EXE 필요")
 def test_selftest_gate_nonzero_exit(tmp_path):
     """--selftest 를 모르는 exe(PING 사본)는 exit ≠ 0 → 관문 실패. 사용자 data 대신 준비 폴더 아래 --data-dir 를 준다."""
-    new = tmp_path / "new" / "StreamLabeler"
+    new = tmp_path / "new" / "ChatCoach"
     new.mkdir(parents=True)
-    shutil.copy(PING, new / "StreamLabeler.exe")
+    shutil.copy(PING, new / "ChatCoach.exe")
     with pytest.raises(UpdateError) as ei:
         updater.run_selftest_gate(str(new), "0.0.2", "test", str(tmp_path))
     assert ei.value.kind == "selftest" and "exit" in ei.value.message

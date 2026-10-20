@@ -6,7 +6,7 @@
 
 ## 0. 이 문서가 하는 일
 
-- StreamLabeler 가 지켜야 할 것, 누가 무엇을 할 수 있는지, 어디서 믿음이 끊기는지를 정리한다.
+- ChatCoach 가 지켜야 할 것, 누가 무엇을 할 수 있는지, 어디서 믿음이 끊기는지를 정리한다.
 - 검토를 거쳐 남은 발견 항목 45개(S-xx)를 모두 적고, 각 항목의 완화책과 실행 시점을 정한다.
 - 개인정보 처리 원칙, 치지직 API 사용 주의, 보안 코딩 규칙, 의존성 고정 규칙, 사고 대응 절차를 둔다.
 - 모듈 이름과 폴더 구조는 [02](02-architecture.md), 저장 형식은 [03](03-data-model.md), 업데이트 흐름은 [04](04-update-and-release.md) 가 정한다. 여기서는 '왜 그렇게 해야 하는가' 와 '무엇을 막는가' 만 적는다.
@@ -128,9 +128,9 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 
 | 주소 | 언제 | 보내는 것 |
 |---|---|---|
-| `github.com/vtubeadmirer/streamlabeler/releases/latest/download/latest.json` (+ `.minisig`) | 업데이트 확인 1차 경로. 자동(성공 뒤 24시간, 실패 뒤 1시간) + '지금 확인' | User-Agent `StreamLabeler-updater/<버전>`. 발신 IP |
-| `api.github.com/repos/vtubeadmirer/streamlabeler/releases/latest` | 1차 경로가 실패할 때 2차 경로 | 위와 같음 |
-| `api.github.com/repos/vtubeadmirer/streamlabeler/releases?per_page=10` | 숨은 설정 `update_channel=beta` 일 때만(개발자·내부 확인용) | 위와 같음 |
+| `github.com/vtubeadmirer/chatcoach/releases/latest/download/latest.json` (+ `.minisig`) | 업데이트 확인 1차 경로. 자동(성공 뒤 24시간, 실패 뒤 1시간) + '지금 확인' | User-Agent `ChatCoach-updater/<버전>`. 발신 IP |
+| `api.github.com/repos/vtubeadmirer/chatcoach/releases/latest` | 1차 경로가 실패할 때 2차 경로 | 위와 같음 |
+| `api.github.com/repos/vtubeadmirer/chatcoach/releases?per_page=10` | 숨은 설정 `update_channel=beta` 일 때만(개발자·내부 확인용) | 위와 같음 |
 | `github.com/…/releases/download/…` → `release-assets.githubusercontent.com` | 업데이트를 받을 때 (리다이렉트 호스트를 코드에 고정하지 않음) | 위와 같음 |
 | `api.chzzk.naver.com/service/v1/videos/{no}/chats`, `/service/v2/videos/{no}` | 사용자가 채팅 수집을 누를 때 | 브라우저형 User-Agent, video_no. 쿠키 없음 |
 | (v1, 선택) 자기 저장소의 `models-*` 릴리스 | 모델 팩을 받을 때 | 위 GitHub 와 같음 |
@@ -172,7 +172,7 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 | 채팅을 `(t, text, user)` 로 중복 제거하고 20만 건에서 솎아낸다. 닉네임은 `profile` JSON 에서 꺼낸다 | `app/chat.py:37, 68, 265-272, 313-328` | S-05, S-14 |
 | 이 PC 의 `C:\` 는 `Authenticated Users:(OI)(CI)(IO)(M)` 를 상속시킨다 | `icacls C:\` | S-08 |
 | Python 3.12 `json.loads('{"a": NaN}')` 가 예외 없이 `nan` 을 돌려준다 | 실행 | S-29 |
-| streamlabeler `.gitignore` 는 `*.jsonl` 을 막지만 `*.jsonl.gz`·`*.zip`·`*.json` 은 막지 않고, `*.jsonl` 이 테스트 픽스처까지 막는다 | `.gitignore` | S-10, S-21, A-2 |
+| chatcoach `.gitignore` 는 `*.jsonl` 을 막지만 `*.jsonl.gz`·`*.zip`·`*.json` 은 막지 않고, `*.jsonl` 이 테스트 픽스처까지 막는다 | `.gitignore` | S-10, S-21, A-2 |
 | 안내서 v0.1 머리말이 '수정하지 않고 보존한다' 고 적고 있다 | `docs/labeling-guide/v0.1.md:5` | S-36 |
 
 ### 6-1. 요약표
@@ -262,7 +262,7 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 
 | 항목 | 내용 |
 |---|---|
-| 구성요소 | `tools/get_ffmpeg.py`·`tools/get_libmpv.py`, `requirements.txt`(ClipSlicer. StreamLabeler 는 `requirements.in` + `requirements.lock`, [02](02-architecture.md)), `release.yml` 49·60행, `build.ps1` |
+| 구성요소 | `tools/get_ffmpeg.py`·`tools/get_libmpv.py`, `requirements.txt`(ClipSlicer. ChatCoach 는 `requirements.in` + `requirements.lock`, [02](02-architecture.md)), `release.yml` 49·60행, `build.ps1` |
 | 위협 | TAG·ASSET 이름만 고정하고 받은 바이트의 해시를 비교하지 않는다. 상류 Release 자산은 소유자가 바꿀 수 있다(상류의 immutable 설정 여부는 확인 필요). libmpv 는 모든 라벨러 프로세스에 로드되고 ffmpeg 는 분석마다 실행된다. 이 경로로 들어온 변조는 이후의 `.sha256` 과 매니페스트 서명까지 '정품' 으로 보증받는다 |
 | 시나리오 | 상류 계정 탈취자가 같은 이름의 트로이 7z·zip 으로 교체 → 평소처럼 태그 push → CI 가 번들·해시·게시 → 전체 zip 을 받는 라벨러(신규, ffmpeg·libmpv 태그가 바뀐 경우)가 실행 |
 | 완화 (채택) | 지금(M0, [04](04-update-and-release.md) 4-4·15장): ① 두 스크립트에 SHA256 상수를 두고 다운로드 직후 다르면 빌드를 끊는다. 첫 값은 상류가 공개한 체크섬이 있으면 그것과 맞춘 뒤 기록한다(상류 체크섬 유무 확인 필요) ② `deps.txt` 에 `ffmpeg_sha256`·`libmpv_sha256` 을 적고 경량/전체 판정을 태그가 아니라 해시로 한다 ③ `requirements.in` → `requirements.lock` 으로 전이 의존성까지 버전을 고정하고(pip-compile 이 해시까지 문제없이 만들면 해시도 넣는다) 비고정 pip·pillow 줄을 지운다. MVP(M4): `pip install --require-hashes -r requirements.lock`. 선택: CI 에서 py7zr 를 빼고 러너의 7z 만 쓴다[^o04] |
@@ -299,8 +299,8 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 |---|---|
 | 구성요소 | `app/paths.py` 의 `_candidate_dirs()`·`find_tool()`·`prepare_libmpv()`, python-mpv 의 DLL 이름 검색, 설치 안내 |
 | 위협 | `C:\` 바로 아래 새 폴더는 '인증된 사용자 수정' 을 상속한다. 탐색 순서가 앱 루트·`bin\` 을 번들 폴더보다 먼저 보고 PATH 로 폴백해서, 같은 PC 의 다른 계정이 심은 `ffmpeg.exe`·`libmpv-2.dll` 이 라벨러 권한으로 실행된다. 보안과 별개로 PATH 에 다른 `mpv-2.dll` 이 있으면 PC 마다 재생·프레임 이동 동작이 달라질 수 있다(python-mpv 의 이름 우선 검색은 검토자 실측 — 확인 필요) |
-| 시나리오 | 공용 PC 의 다른 계정이 `C:\Tools\StreamLabeler\ffmpeg.exe` 를 넣음 → 파형·썸네일·probe 때마다 실행 |
-| 완화 (채택) | ① frozen 이면 `_internal\ffmpeg`·`_internal` 만 보고 `shutil.which` 폴백을 없앤다(소스 실행일 때만 `bin\` 허용) ② `import mpv` 동안 PATH 를 번들 폴더 하나로 바꿨다가 되돌린다 ③ 권장 위치를 `%LOCALAPPDATA%\Programs\StreamLabeler` 로 한다(사용자 전용 ACL 상속, OneDrive 밖, 관리자 불필요). 폴백 안내도 같은 위치 ④ selftest 에서 `mpv.backend._name` 이 `_internal\libmpv-2.dll` 절대경로인지 확인. icacls 출력 문자열로 경고하는 원안은 출력이 현지화돼 오탐·누락이 생겨 뺀다[^o08] |
+| 시나리오 | 공용 PC 의 다른 계정이 `C:\Tools\ChatCoach\ffmpeg.exe` 를 넣음 → 파형·썸네일·probe 때마다 실행 |
+| 완화 (채택) | ① frozen 이면 `_internal\ffmpeg`·`_internal` 만 보고 `shutil.which` 폴백을 없앤다(소스 실행일 때만 `bin\` 허용) ② `import mpv` 동안 PATH 를 번들 폴더 하나로 바꿨다가 되돌린다 ③ 권장 위치를 `%LOCALAPPDATA%\Programs\ChatCoach` 로 한다(사용자 전용 ACL 상속, OneDrive 밖, 관리자 불필요). 폴백 안내도 같은 위치 ④ selftest 에서 `mpv.backend._name` 이 `_internal\libmpv-2.dll` 절대경로인지 확인. icacls 출력 문자열로 경고하는 원안은 출력이 현지화돼 오탐·누락이 생겨 뺀다[^o08] |
 | 수고 | 약 2시간 |
 | 단계 | 지금(권장 위치, README·02 반영됨) · MVP |
 | 확인 | `icacls C:\`, `paths.py` 탐색 순서 확인함 |
@@ -397,13 +397,13 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 | 완화 (채택) | ① 픽스처는 `tools/make_fixture.py` 로 합성만 한다([§10-6](#10-6-샘플-데이터-규칙)) ② release.ps1 은 `git status --porcelain` 에 `??` 가 있으면 멈추고 `git add -u` 만 쓴다 ③ 테스트 하나가 `tests/fixtures` 안의 32자 이상 hex 와 0 이 아닌 video_no 를 검사, CI 에서 실행 ④ `.gitignore` 에 `*.real.json`, `*.raw.json`, `project.json`, `derived/`, `selftest*.json`, `.env` 추가. 이 문서가 더한다: `*.jsonl.gz`, `*.gz`, `*.zip`([§6-3](#6-3-추가-관찰-검토-단계를-거치지-않음) A-2) ⑤ secret scanning·push protection 켜기. 픽스처 해시 허용 목록을 쓰는 pre-commit 훅은 1인 개발에서 유지비가 커서 뺀다[^o21] |
 | 수고 | 약 1시간 |
 | 단계 | 지금 · MVP |
-| 확인 | `release.ps1:37`, streamlabeler `.gitignore` 확인함 |
+| 확인 | `release.ps1:37`, chatcoach `.gitignore` 확인함 |
 
 #### S-16 · low · 서명 키 운영의 단일 장애점
 
 | 항목 | 내용 |
 |---|---|
-| 구성요소 | `tools/sign_manifest.py`, `appspec` 의 공개키 2개, 개발 PC 저장소 위치(`…\OneDrive\문서\streamlabeler`) |
+| 구성요소 | `tools/sign_manifest.py`, `appspec` 의 공개키 2개, 개발 PC 저장소 위치(`…\OneDrive\문서\chatcoach`) |
 | 위협 | 서명을 넣으면 보안이 개인키 하나로 옮겨 간다. 저장소가 OneDrive 아래라 저장소 안에서 만든 키는 `.gitignore` 와 상관없이 클라우드로 동기화된다. 예비 키를 첫 공개 릴리스 뒤에 넣으면 기존 설치본은 그 키를 모른다 |
 | 시나리오 | 키 USB 분실이나 OneDrive 계정 피싱 → 새 키로 복구 업데이트를 낼 수 없어 전원 수동 재설치 |
 | 완화 (채택) | ① 키는 저장소 밖·OneDrive 밖(`%LOCALAPPDATA%` 아래 또는 USB)에서 암호를 걸어 만든다. `sign_manifest.py` 는 키 경로에 `OneDrive` 가 있으면 거부한다. 오프라인 백업 2곳 ② key1·key2 를 같은 날 만들어, 첫 릴리스 전에 두 공개키를 모두 `appspec` 에 내장 ③ 재생 하한은 설치본 자신의 version·빌드 시각([04](04-update-and-release.md) 5-4, 데이터 초기화와 무관하게 남는다) ④ 태그 룰셋 `v*`, 2FA, 분실·유출 절차는 [§14](#14-사고-대응). beta/stable 채널, `next_pubkey`, revoked 목록은 이 규모에 과해 뺀다[^o16] |
@@ -633,7 +633,7 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 | 구성요소 | `backup`, `paths`, `docs/install.md`, 첫 실행 안내 |
 | 위협 | 백업이 `<앱>\data\backups` 에 있으면 옛 앱 폴더를 지울 때 원본과 함께 사라진다. 열린 프로젝트만 백업하면 다른 프로젝트가 빠진다 |
 | 시나리오 | 새 zip 을 다른 폴더에 풀고 옛 폴더를 휴지통에서 비움 → 2주치 라벨과 백업이 함께 사라진다 |
-| 완화 (채택) | ① 백업 기본 위치 `%LOCALAPPDATA%\StreamLabeler\backups`(OneDrive 리디렉션 회피, `settings.ini` 로 변경 가능). `data\backups` 는 쓸 수 없을 때만 ② 일 1회·업데이트 직전 백업 대상은 `data\projects\*` 전부의 `labels\`·`project.json`·`samples\`·`locks\`, 보존 개수 14 ③ 세션 종료 때 자기 세션 jsonl 하나를 백업 폴더에 복사 ④ `install.md`·시작 화면: '새 버전은 앱 안 업데이트로, 옛 폴더를 지우기 전에 `data\` 를 확인'. 다른 기기로의 백업은 패키지 내보내기(v1)와 운영 절차에 맡긴다. 이 위치는 '폴더째 복사' 원칙의 유일한 예외다[^o39] |
+| 완화 (채택) | ① 백업 기본 위치 `%LOCALAPPDATA%\ChatCoach\backups`(OneDrive 리디렉션 회피, `settings.ini` 로 변경 가능). `data\backups` 는 쓸 수 없을 때만 ② 일 1회·업데이트 직전 백업 대상은 `data\projects\*` 전부의 `labels\`·`project.json`·`samples\`·`locks\`, 보존 개수 14 ③ 세션 종료 때 자기 세션 jsonl 하나를 백업 폴더에 복사 ④ `install.md`·시작 화면: '새 버전은 앱 안 업데이트로, 옛 폴더를 지우기 전에 `data\` 를 확인'. 다른 기기로의 백업은 패키지 내보내기(v1)와 운영 절차에 맡긴다. 이 위치는 '폴더째 복사' 원칙의 유일한 예외다[^o39] |
 | 수고 | 약 1.5시간 |
 | 단계 | MVP |
 
@@ -666,7 +666,7 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 | 구성요소 | 다운로드 워커(zip 검증 → 압축 해제 → zip 삭제), `replace.ps1`, 교체 전 조건 |
 | 위협 | 고정 경로와 동시 업데이트 레이스는 설계(임의 이름 폴더, 단일 인스턴스)가 이미 막는다. 남는 것 둘: 검증 시점과 robocopy 시점 사이에 백신이 `python312.dll` 같은 파일을 격리하면 반쪽 설치가 된다. 임시 폴더와 앱이 다른 볼륨이면 용량 검사가 한쪽만 본다. 같은 사용자 권한의 바꿔치기는 실질 위협이 아니다 |
 | 시나리오 | 백신이 풀린 폴더에서 DLL 을 격리 → '지금 업데이트' → 그 파일 없는 폴더로 덮어씀 → robocopy 는 성공으로 끝나 복구도 안 돌고 창 생성 실패 |
-| 완화 (채택) | ① 다운로드 워커는 zip 을 받아 검증만 하고 지우지 않는다. 압축 해제는 적용 시점에 ② 두 볼륨 용량 검사 ③ 준비 폴더는 앱과 같은 볼륨([02](02-architecture.md) 의 `<앱>\_update\<임의 이름>`, 개선안의 `data\update` 와 보안상 차이 없음), 앱 폴더에 쓸 수 없을 때만 `%LOCALAPPDATA%` ④ `replace.ps1` 은 robocopy 직전에 `StreamLabeler.exe`·`_internal\python312.dll`·`libmpv-2.dll` 을 `Test-Path` 로 확인하고, 없으면 바꾸지 않고 `--update-failed`. 파일별 해시는 v1 매니페스트[^o42] |
+| 완화 (채택) | ① 다운로드 워커는 zip 을 받아 검증만 하고 지우지 않는다. 압축 해제는 적용 시점에 ② 두 볼륨 용량 검사 ③ 준비 폴더는 앱과 같은 볼륨([02](02-architecture.md) 의 `<앱>\_update\<임의 이름>`, 개선안의 `data\update` 와 보안상 차이 없음), 앱 폴더에 쓸 수 없을 때만 `%LOCALAPPDATA%` ④ `replace.ps1` 은 robocopy 직전에 `ChatCoach.exe`·`_internal\python312.dll`·`libmpv-2.dll` 을 `Test-Path` 로 확인하고, 없으면 바꾸지 않고 `--update-failed`. 파일별 해시는 v1 매니페스트[^o42] |
 | 수고 | 약 1.5시간 |
 | 단계 | MVP |
 | 확인 | `updater.py:275-277, 299` 확인함 |
@@ -678,7 +678,7 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 | 구성요소 | `extractall`, `find_app_dir`, `.sha256` 파싱, `release.yml` 의 sha256 형식 |
 | 위협 | 경로 탈출은 Python 3.12 zipfile 이 막는다(검토자 실측). 압축 해제 총량·exe 존재·`.sha256` 이름 일치는 설계에 있다. 남는 것은 `find_app_dir` 이 아무 깊이의 첫 exe 를 고르는 점, 릴리스 실수(이중 레이아웃, `data/` 포함)가 그대로 복사되는 점이다 |
 | 시나리오 | 경량 사본을 잘못 묶은 릴리스가 '체크섬 일치' 로 통과한 뒤 엉뚱한 레이아웃으로 덮어쓴다 |
-| 완화 (채택) | `validate_zip()` 하나: 해제 크기 합 ≤ 설치 크기 ×1.5, 항목 ≤ 3000, 최상위 폴더 하나, `<top>/StreamLabeler.exe` 가 정해진 깊이에(os.walk 제거), 대소문자 무시 중복 없음, `<top>/data/` 없음. `.sha256` 은 `hash *name` 의 name 이 받은 zip 이름과 다르면 거부. 테스트 4종(폭탄, 이중 exe, 대소문자 중복, data 포함). 같은 검사를 release.yml 자체 점검에서도 돌려 잘못 묶인 릴리스는 게시 전에 막는다. 심링크 검사는 뺀다(extractall 은 심링크를 만들지 않는다)[^o43] |
+| 완화 (채택) | `validate_zip()` 하나: 해제 크기 합 ≤ 설치 크기 ×1.5, 항목 ≤ 3000, 최상위 폴더 하나, `<top>/ChatCoach.exe` 가 정해진 깊이에(os.walk 제거), 대소문자 무시 중복 없음, `<top>/data/` 없음. `.sha256` 은 `hash *name` 의 name 이 받은 zip 이름과 다르면 거부. 테스트 4종(폭탄, 이중 exe, 대소문자 중복, data 포함). 같은 검사를 release.yml 자체 점검에서도 돌려 잘못 묶인 릴리스는 게시 전에 막는다. 심링크 검사는 뺀다(extractall 은 심링크를 만들지 않는다)[^o43] |
 | 수고 | 약 1시간 |
 | 단계 | MVP |
 
@@ -774,7 +774,7 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 | medium | S-04 | `requirements.in` → `requirements.lock`(전이 의존성 버전 고정, 해시가 되면 해시까지), `deps.txt` 해시 | 1시간 |
 | medium | S-10, S-21 | `.gitignore` 보강: `!tests/fixtures/*.jsonl`, `*.jsonl.gz`, `*.gz`, `*.zip`, `*.real.json`, `*.raw.json`, `project.json`, `derived/`, `selftest*.json`, `.env` (예시 파일은 `project.example.json` 처럼 다른 이름으로) | 15분 |
 | medium | S-21 | secret scanning·push protection 켜기, 기본 브랜치 force-push 금지. 픽스처는 `tools/make_fixture.py` 로 합성만 | 30분 |
-| medium | S-08 | 권장 설치 위치 `%LOCALAPPDATA%\Programs\StreamLabeler` (README·02 반영됨, `install.md` 도 같은 문장) | 문서 |
+| medium | S-08 | 권장 설치 위치 `%LOCALAPPDATA%\Programs\ChatCoach` (README·02 반영됨, `install.md` 도 같은 문장) | 문서 |
 | low | S-44 | immutable releases, 태그 룰셋 `v*` | 10분 |
 | low | S-16 | 서명 키 2개를 OneDrive 밖에서 만들고 백업 2곳에 둔 뒤, 두 공개키를 `appspec` 에 내장 | 반나절 |
 | low | S-17 | spec `upx=False` | 5분 |
@@ -889,7 +889,7 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 | 3 | 패키지의 라벨러 명부 | S-37: display_name 포함 / S-24: 수집 PC 에만 | id·role·assigned_kind 만 | 이름 없이도 id 혼동은 막히고 노출이 준다 |
 | 4 | JSONL 중간 줄 손상 | 깨진 줄을 따로 옮기고 계속 / 읽기 전용 | 읽기 전용 + 경고 | 계속 쓰면 손상 원인(동기화, 디스크)을 덮고 이후 append 가 꼬일 수 있다. 원본은 남아 복구할 수 있다 |
 | 5 | 업데이트 준비 폴더 | `data\update` / `%LOCALAPPDATA%` / 02 의 `_update` | 앱과 같은 볼륨(02 의 `<앱>\_update\<임의 이름>`), 쓸 수 없을 때만 `%LOCALAPPDATA%` | 같은 볼륨이면 용량 검사가 단순하다. 권장 설치 위치가 사용자 전용 권한이라 S-08 우려가 줄었다 |
-| 6 | 백업 위치 시점 | S-09 개선안: 이동은 v1 / S-39: MVP 부터 `%LOCALAPPDATA%` | MVP 부터 `%LOCALAPPDATA%\StreamLabeler\backups` | 옛 폴더 삭제로 원본·백업이 함께 사라지는 길을 싸게 막는다. '폴더째 복사' 원칙의 유일한 예외로 문서화한다. 프로젝트는 여전히 `data\` 에 있어 복사하면 따라간다 |
+| 6 | 백업 위치 시점 | S-09 개선안: 이동은 v1 / S-39: MVP 부터 `%LOCALAPPDATA%` | MVP 부터 `%LOCALAPPDATA%\ChatCoach\backups` | 옛 폴더 삭제로 원본·백업이 함께 사라지는 길을 싸게 막는다. '폴더째 복사' 원칙의 유일한 예외로 문서화한다. 프로젝트는 여전히 `data\` 에 있어 복사하면 따라간다 |
 | 7 | 백업 보존 개수 | 7 / 14 | 프로젝트당 14개 (시작값) | 시범 2~3주와 재라벨 3일 규칙을 덮을 여유. 파기 명령이 백업도 지운다 |
 | 8 | 서명 키 위치 | `C:\Tools\keys` 또는 USB / `%LOCALAPPDATA%` 또는 USB | `%LOCALAPPDATA%` 아래 또는 USB. 저장소·OneDrive·`C:\` 바로 아래 금지 | `C:\` 직속 새 폴더는 다른 계정도 수정할 수 있다(S-08 실측) |
 | 9 | ffmpeg 프로토콜 허용 목록 | `file,crypto,data` / `file,pipe` / `file` | 입력 옵션으로 `file`. 출력 pipe 동작은 첫 구현 때 확인 | 로컬 파일만 열면 된다 |
@@ -947,7 +947,7 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 | `chat/messages.jsonl`, `chat/protected/*` | 프로젝트 | `retention_until` 또는 목적 달성 | '프로젝트 파기' 명령 |
 | `labels/`, `samples/`, `locks/` | 프로젝트 | 정답 데이터. 파기 때 '라벨만 남기기' 를 고르면 채팅 본문·identities 없이 남긴다(A-1 이 지켜져야 의미가 있다) | 파기 명령 |
 | `derived/` | 프로젝트 | 프로젝트와 같이. ASR·OCR 결과(보호 구역, S-19)는 몇 시간 걸리는 비싼 파생이라 프로젝트와 함께 보관한다([03](03-data-model.md) D15) | 파기 명령이 함께 삭제 |
-| 백업 zip | `%LOCALAPPDATA%\StreamLabeler\backups\<project_id>\` | 프로젝트당 최근 14개 | 순환 삭제, 파기 명령이 함께 삭제 |
+| 백업 zip | `%LOCALAPPDATA%\ChatCoach\backups\<project_id>\` | 프로젝트당 최근 14개 | 순환 삭제, 파기 명령이 함께 삭제 |
 | `data\cache\` 의 이 프로젝트 몫(채팅 색인, 영상 지문별 파형·썸네일 — [03](03-data-model.md) 2-2), `data\ai\<project_id>\` | 앱 `data` | 프로젝트와 같이 | 파기 명령 |
 | `_backup\` (업데이트 직후 이전 버전) | 앱 폴더 | 새 버전의 첫 정상 종료까지 | 자동 |
 | 로그 | `data\logs` | 회전(용량 기준, ClipSlicer 설정을 따름 — 확인 필요) | 개인정보를 쓰지 않으므로 별도 파기 없음 |
@@ -1024,7 +1024,7 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 | 보관 | 원문은 로컬 보호 구역에만. 외부 서버로 보내지 않는다 |
 | 가명화 | 수집 시점 |
 | 기록 | 수집 시각, 엔드포인트, 앱 버전을 수집 기록(`fetch-<fetch_id>.json`, [03](03-data-model.md) 6-2)에 |
-| User-Agent | ClipSlicer 처럼 브라우저형 UA 가 필요하다. 도구 이름을 함께 밝힌 UA(예: `Mozilla/5.0 (compatible; StreamLabeler/0.1)`)로도 응답하는지 확인해 가능하면 그쪽을 쓴다(확인 필요) |
+| User-Agent | ClipSlicer 처럼 브라우저형 UA 가 필요하다. 도구 이름을 함께 밝힌 UA(예: `Mozilla/5.0 (compatible; ChatCoach/0.1)`)로도 응답하는지 확인해 가능하면 그쪽을 쓴다(확인 필요) |
 
 ### 11-3. 사용자(운영자) 책임 범위
 
@@ -1149,7 +1149,7 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 | [04 업데이트·릴리스](04-update-and-release.md) | 이미 반영된 것: S-01(첫 릴리스부터 서명 필수 검증, 공개키 2개, 초안 → 개발 PC 서명 → 게시), release.yml 잡 분리·SHA 고정·`gh release create --draft`, immutable releases·태그 룰셋 첫날, 시작 표식 10초 대기와 결과 파일, `_backup` 은 첫 정상 종료 뒤, 두 볼륨 용량 검사, 교체 직전 필수 파일 확인, zip 검사, 앱이 만든 릴리스 주소, 확인 실패 처리(성공 때만 시각 기록)와 두 확인 경로, `upx=False`, 바이너리 해시 고정, attestation 은 v1. 이 문서의 S-01·S-04·S-17·S-18·S-41, §4-3·§13 은 04 를 따른다. 더할 것: 없음 |
 | [06 평가·일치도](06-evaluation-and-agreement.md) | 표본은 06 2장의 τ 방식(`sha256-tau-v1`: 완충은 적격에서 제외, 출처는 뽑기 조건 아님, τ 불감소와 `sample_rev` — [07](07-roadmap.md) ADR-09), 첫 표본 파일 고정, 재라벨은 빈 마커 + 10분 블록, 보고서에 session_id·labeler_id·machine_id 표기와 intra/inter 관리자 확인, `grade_vs_conditions`·`aids_used` 별 층화, 공유 전처리 경고, `threshold_mismatch`·숨김 해제 세션 분리 |
 | [07 로드맵](07-roadmap.md) | §7 실행 목록(지금 6~7시간 + 서명 경로 약 1.5 작업일, MVP 전 약 46시간 중 순수 추가 약 3 작업일, v1 전 약 39시간), 열린 질문. 맞춘 것: 07 의 ADR-13·M0 묶음은 04 와 같이 '서명 없으면 거부' 를 첫 릴리스(v0.0.1)부터 적는다(사용자 동의는 04 16장 질문 4·07 질문 11) |
-| README · `docs/install.md` | 설치 위치(`%LOCALAPPDATA%\Programs\StreamLabeler`), zip 차단 해제와 SmartScreen '자세히 → 실행', OneDrive 밖에 풀기, 옛 폴더를 지우기 전 `data\` 확인, '관리자 권한 불필요', AppLocker 환경은 IT 예외, 앱이 접속하는 곳(§4-3), `gh attestation verify`(v1) |
+| README · `docs/install.md` | 설치 위치(`%LOCALAPPDATA%\Programs\ChatCoach`), zip 차단 해제와 SmartScreen '자세히 → 실행', OneDrive 밖에 풀기, 옛 폴더를 지우기 전 `data\` 확인, '관리자 권한 불필요', AppLocker 환경은 IT 예외, 앱이 접속하는 곳(§4-3), `gh attestation verify`(v1) |
 | [안내서 v0.2 초안](../labeling-guide/v0.2-draft.md) | 근거 한 줄에는 원 닉네임 대신 저장 가명 `vw_…` 를 쓴다(A-1. v0.2 초안 7-1 에 반영됨) |
 
 ---
@@ -1188,10 +1188,10 @@ TB-8(같은 PC 의 환경 → 앱 프로세스)과 TB-9(세션 ↔ 세션)는 �
 [^o36]: 원안: 공통 메타 해시, 세션 해시가 다르면 append 거부 + 프로젝트 개정 흐름, CI 해시·불변 검사, 시작값은 스냅샷만 쓰고 설정 편집은 새 프로젝트에만. 약 2시간.
 [^o37]: 원안: `project.json` 의 `labelers[]{id, display_name, role, assigned_kind}` 를 패키지에 동봉, 세션에 machine_id·OS 사용자 해시·app_version, 가져오기에서 발급 기록과 다른 세션 거부, 보고서 표기와 관리자 확인. 약 2시간.
 [^o38]: 원안: 모든 내보내기를 zip + manifest, 가져오기에서 파일명=session_id·잠금 해시·줄 파싱·충돌 사본 거부, 잠금 때 `.sha256` 사이드카, `verify_project` 를 MVP 에. 약 3시간.
-[^o39]: 원안: 첫 실행 마법사로 백업 위치(`Documents\StreamLabeler-backups` 또는 두 번째 드라이브), 라벨 50건마다 세션 파일 복사, 전체 프로젝트 백업, 백업 위치에 쓸 수 없으면 경고·세션 잠금 조건, install.md. 약 3시간. 이 PC 의 '문서' 는 OneDrive 아래라 S-09 와 충돌한다.
+[^o39]: 원안: 첫 실행 마법사로 백업 위치(`Documents\ChatCoach-backups` 또는 두 번째 드라이브), 라벨 50건마다 세션 파일 복사, 전체 프로젝트 백업, 백업 위치에 쓸 수 없으면 경고·세션 잠금 조건, install.md. 약 3시간. 이 PC 의 '문서' 는 OneDrive 아래라 S-09 와 충돌한다.
 [^o40]: 원안: MODELS 표와 `.partial`, 확장자 허용 목록(`model.bin`, `config.json`, `tokenizer.json`, `vocabulary.*`, `preprocessor_config.json`, `*.onnx`), torch 미번들, HF 오프라인 환경변수, `model_sha256`, Windows OCR 이 기기 안에서 동작함을 문서화. 약 2시간.
 [^o41]: 원안: `UpdateCheckResult` 3상태와 실패 시 1시간 재시도, 1차 raw.githubusercontent `channels/stable.json` · 2차 API · 3차 302 Location, 채널 파일의 `min_app_version`·`guide_version` 으로 '업데이트 필요' 차단 모드, 세션 메타 기록, PAT 금지. 약 1.5시간.
-[^o42]: 원안: 준비 위치 두 의견(`<앱>\data\update\<임의>` 또는 `%LOCALAPPDATA%\StreamLabeler\update\<임의>`), 적용 때 재검증 뒤 압축 해제, zip 안 `_internal\files.sha256` 과 robocopy 직전 `Get-FileHash` 3개 비교, 두 볼륨 검사, 단일 인스턴스, 썸네일 image2pipe, 백신 제외 안내. 2~3시간.
+[^o42]: 원안: 준비 위치 두 의견(`<앱>\data\update\<임의>` 또는 `%LOCALAPPDATA%\ChatCoach\update\<임의>`), 적용 때 재검증 뒤 압축 해제, zip 안 `_internal\files.sha256` 과 robocopy 직전 `Get-FileHash` 3개 비교, 두 볼륨 검사, 단일 인스턴스, 썸네일 image2pipe, 백신 제외 안내. 2~3시간.
 [^o43]: 원안: 채택안 검사 + 심링크 비트(0o120000) 거부, 테스트 5종(심링크 포함). 1시간.
 [^o44]: 원안: release 잡에 `actions/attest-build-provenance`(커밋 SHA 고정)와 권한, immutable releases·태그 룰셋, install.md 검증 명령, 재현 가능 빌드는 당장 목표로 두지 않음, `upx=False`. 1.5시간.
 [^o45]: 원안: 금액은 구간 버킷만 파생, 내보내기 본문 마스킹 기본 켬(전화번호·이메일·주민번호·계좌번호 형태 정규식, 건수를 manifest 에), 일반 채팅 아닌 메시지 기본 제외. 2시간.

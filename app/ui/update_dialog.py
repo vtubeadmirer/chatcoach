@@ -14,7 +14,7 @@ from ..appspec import SPEC, AppSpec
 from ..i18n import tr
 from ..updater import Release
 
-LOG = logging.getLogger("streamlabeler")
+LOG = logging.getLogger("chatcoach")
 _TRUSTED_URL = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/(tag/v\d+\.\d+\.\d+|latest)$")
 
 
@@ -43,7 +43,7 @@ class UpdateDialog(QDialog):
         self.setMinimumWidth(520)
         lay = QVBoxLayout(self)
         kind = tr("경량") if release.chosen == "lite" else tr("전체")
-        head = tr("StreamLabeler {0} 을(를) 받을 수 있습니다. ({1} {2:.0f} MB, 서명 키 {3})").format(
+        head = tr("ChatCoach {0} 을(를) 받을 수 있습니다. ({1} {2:.0f} MB, 서명 키 {3})").format(
             m.version, kind, release.download_size / 1e6, release.signed_by)
         lay.addWidget(QLabel(head))
         if needs_update:

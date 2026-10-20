@@ -6,7 +6,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "streamlabeler"
+name = "chatcoach"
 description = "치지직 방송 라벨링 도구 (Windows 데스크톱)"
 requires-python = ">=3.12"
 license = "MIT"

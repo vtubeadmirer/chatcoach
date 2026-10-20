@@ -1,6 +1,6 @@
-﻿# vendored from vtubeadmirer/clipslicer@07d13cc (build.ps1) — 변경: StreamLabeler.spec 로 빌드, WebEngine·yt-dlp·확장 단계 삭제, Qt 화이트리스트 Core/Gui/Widgets/Svg, -Channel, build_info·deps 는 tools\write_build_info.py
-# PyInstaller 로 <DistPath>\StreamLabeler\ 폴더 빌드.
-#   .\build.ps1                                     → dist\StreamLabeler (release 채널)
+﻿# vendored from vtubeadmirer/clipslicer@07d13cc (build.ps1) — 변경: ChatCoach.spec 로 빌드, WebEngine·yt-dlp·확장 단계 삭제, Qt 화이트리스트 Core/Gui/Widgets/Svg, -Channel, build_info·deps 는 tools\write_build_info.py
+# PyInstaller 로 <DistPath>\ChatCoach\ 폴더 빌드.
+#   .\build.ps1                                     → dist\ChatCoach (release 채널)
 #   .\build.ps1 -DistPath dist_test -Channel test   → 시험 빌드 (실제 설치본 dist\ 를 건드리지 않는다)
 # 실행 전: pip install --require-hashes -r requirements.lock (bin\ 의 ffmpeg·libmpv 가 없으면 여기서 받는다)
 param(
@@ -30,9 +30,9 @@ if (-not (Test-Path "bin\ffmpeg\ffmpeg.exe")) {
 if (-not (Test-Path "assets\icon.ico")) { throw "assets\icon.ico 가 없습니다: python tools\make_icon.py" }
 
 # pyinstaller 는 진행 로그를 stderr 로 찍으므로 PowerShell 이 오류로 오해하지 않게 한다
-# (upx 는 StreamLabeler.spec 의 upx=False 로 끈다. --noupx 는 spec 빌드에 줄 수 없는 옵션이다)
+# (upx 는 ChatCoach.spec 의 upx=False 로 끈다. --noupx 는 spec 빌드에 줄 수 없는 옵션이다)
 $ErrorActionPreference = "Continue"
-& pyinstaller --noconfirm --clean --distpath $DistPath StreamLabeler.spec 2>&1 | ForEach-Object { "$_" }
+& pyinstaller --noconfirm --clean --distpath $DistPath ChatCoach.spec 2>&1 | ForEach-Object { "$_" }
 if ($LASTEXITCODE -ne 0) { throw "pyinstaller 실패 (exit $LASTEXITCODE)" }
 $ErrorActionPreference = "Stop"
 
@@ -59,7 +59,7 @@ foreach ($pat in @("avcodec-*.dll", "avformat-*.dll", "avfilter-*.dll", "avdevic
   Get-ChildItem $internal -Filter $pat -ErrorAction SilentlyContinue | Remove-Item -Force
 }
 # WebEngine 이 다시 딸려 오면(약 200MB) 빌드를 멈춘다 — spec 의 excludes 를 확인할 것
-if (Test-Path (Join-Path $qt "QtWebEngineProcess.exe")) { throw "QtWebEngine 이 번들됐습니다 (StreamLabeler.spec excludes 확인)" }
+if (Test-Path (Join-Path $qt "QtWebEngineProcess.exe")) { throw "QtWebEngine 이 번들됐습니다 (ChatCoach.spec excludes 확인)" }
 
 # _internal\VERSION · build_info.json · deps.txt (PATH 를 비우기 전에 실행)
 python tools\write_build_info.py --app $app --channel $Channel

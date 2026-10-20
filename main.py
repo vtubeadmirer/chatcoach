@@ -1,7 +1,7 @@
 # vendored from vtubeadmirer/clipslicer@07d13cc (main.py) — 변경: 02 6-5 의 시작 순서(crashguard, Qt 플러그인 환경변수 정리,
 #   업데이트 잠금·단일 인스턴스, 설치 위치 검사, 비정상 종료 표식), --selftest 인자 확장, WebEngine·--site 삭제,
 #   _backup 삭제는 창 표시 뒤 (ClipSlicer 는 창을 만들기 전에 지웠다).
-"""StreamLabeler 실행 진입점."""
+"""ChatCoach 실행 진입점."""
 from __future__ import annotations
 
 import os
@@ -121,16 +121,16 @@ def main() -> int:
     instance_lock.setStaleLockTime(0)
     if not instance_lock.tryLock(200):
         LOG.warning("다른 창이 이미 열려 있음")
-        QMessageBox.information(None, SPEC.name, tr("StreamLabeler 가 이미 열려 있습니다. (같은 폴더에서는 한 창만 뜹니다)"))
+        QMessageBox.information(None, SPEC.name, tr("ChatCoach 가 이미 열려 있습니다. (같은 폴더에서는 한 창만 뜹니다)"))
         return 0
 
     # 6. 설치 위치 검사, 7. 비정상 종료 표식
     notes: list[str] = []
     install_root = paths.install_root()
     if paths.data_mode() == "fallback":
-        notes.append(tr("프로그램 폴더에 쓸 수 없어 데이터를 %LOCALAPPDATA%\\StreamLabeler\\data 에 둡니다 (폴백 모드). 이 위치에서는 폴더째 복사와 자동 업데이트가 되지 않습니다."))
+        notes.append(tr("프로그램 폴더에 쓸 수 없어 데이터를 %LOCALAPPDATA%\\ChatCoach\\data 에 둡니다 (폴백 모드). 이 위치에서는 폴더째 복사와 자동 업데이트가 되지 않습니다."))
     if paths.is_under_onedrive(install_root):
-        notes.append(tr("OneDrive 아래에서 실행 중입니다. %LOCALAPPDATA%\\Programs\\StreamLabeler 로 옮기는 것을 권장합니다."))
+        notes.append(tr("OneDrive 아래에서 실행 중입니다. %LOCALAPPDATA%\\Programs\\ChatCoach 로 옮기는 것을 권장합니다."))
     if paths.is_network_path(install_root):
         notes.append(tr("네트워크 드라이브에서 실행 중입니다. 자동 업데이트를 지원하지 않습니다."))
     if updater.stale_update_lock(data_root):

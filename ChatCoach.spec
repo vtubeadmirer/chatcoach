@@ -1,6 +1,6 @@
-# vendored from vtubeadmirer/clipslicer@07d13cc (ClipSlicer.spec) — 변경: 이름 StreamLabeler, hiddenimports 없음(WebEngine·yt_dlp 제거), 안내서 v0.1·VERSION 번들, excludes 확대, upx=False 두 곳(S-17)
+# vendored from vtubeadmirer/clipslicer@07d13cc (ClipSlicer.spec) — 변경: 이름 ChatCoach, hiddenimports 없음(WebEngine·yt_dlp 제거), 안내서 v0.1·VERSION 번들, excludes 확대, upx=False 두 곳(S-17)
 # -*- mode: python ; coding: utf-8 -*-
-# build.ps1 이 `pyinstaller --noconfirm --clean --distpath <DistPath> StreamLabeler.spec` 로 부른다.
+# build.ps1 이 `pyinstaller --noconfirm --clean --distpath <DistPath> ChatCoach.spec` 로 부른다.
 # 경로는 이 파일이 있는 저장소 루트 기준이다.
 
 a = Analysis(
@@ -35,7 +35,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='StreamLabeler',
+    name='ChatCoach',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -47,7 +47,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['assets\\icon.ico'],
-    manifest='assets\\StreamLabeler.manifest',
+    manifest='assets\\ChatCoach.manifest',
 )
 coll = COLLECT(
     exe,
@@ -56,5 +56,5 @@ coll = COLLECT(
     strip=False,
     upx=False,  # 위와 같은 이유
     upx_exclude=[],
-    name='StreamLabeler',
+    name='ChatCoach',
 )

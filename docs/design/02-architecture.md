@@ -1,4 +1,4 @@
-# StreamLabeler 아키텍처 (02)
+# ChatCoach 아키텍처 (02)
 
 상태: 설계 초안 (2026-10-19) · 아직 구현되지 않음
 
@@ -18,7 +18,7 @@
 
 표기:
 
-- `<앱>` = 포터블 폴더. `StreamLabeler.exe` 가 있는 폴더다.
+- `<앱>` = 포터블 폴더. `ChatCoach.exe` 가 있는 폴더다.
 - `<프로젝트>` = 방송 한 편의 프로젝트 폴더.
 - 'MVP' = 시범 라벨링을 돌릴 수 있는 첫 묶음(W0~W3 + 내보내기 + 업데이트). 'v1' = 그 뒤 현업 전체 흐름. 범위 정의는 [07-roadmap.md](07-roadmap.md).
 - 숫자 목표는 모두 시작값이다. 첫 빌드와 시범 라벨링에서 재고 고친다.
@@ -39,7 +39,7 @@
 | 보이는 것 | `core/visibility.py` 의 정책 함수 하나가 결정 | 블라인드가 화면 곳곳에 흩어지면 새는 곳이 생긴다 |
 | 시각 | 라벨은 채팅 시계(ms) 하나로 저장, 영상과의 차는 보정 기록으로 분리 | 오프셋을 다시 재도 라벨을 고치지 않는다 |
 | 업데이트 | ClipSlicer 업데이터를 복사해 고친다(robocopy 교체). '준비'와 '적용'을 나눈다 | 사고로 다져진 코드를 쓰고, 나중에 버전 폴더 방식으로 바꿀 길을 열어 둔다 |
-| 설치 위치 권장 | `%LOCALAPPDATA%\Programs\StreamLabeler` | OneDrive 밖, 사용자 전용 권한, 관리자 불필요 (S-08, S-09) |
+| 설치 위치 권장 | `%LOCALAPPDATA%\Programs\ChatCoach` | OneDrive 밖, 사용자 전용 권한, 관리자 불필요 (S-08, S-09) |
 | 범위 | MVP 밖 모듈은 파일도 만들지 않는다 | 범위 팽창이 가장 큰 위험이다 |
 
 ---
@@ -265,7 +265,7 @@ class RobocopyApplier: ...   # MVP. v1 에 PointerApplier 를 같은 자리에 �
 `⟵` = ClipSlicer 에서 복사(vendored). `⟵*` = 복사 후 수정. 무엇을 바꾸는지는 [12장](#12-clipslicer-에서-가져오는-것). `(v1)` = 지금은 만들지 않는다.
 
 ```
-streamlabeler/                              공개 저장소 vtubeadmirer/streamlabeler
+chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 ├─ VERSION                                  유일한 버전 소스. tools/sync_version.py 가 아래 두 파일을 생성
 ├─ main.py                                  ⟵* 시작 순서 (6-5)
 ├─ app/
@@ -323,7 +323,7 @@ streamlabeler/                              공개 저장소 vtubeadmirer/stream
 │        ├─ continuation_editor.py
 │        └─ evidence_widget.py
 ├─ assets/
-│  ├─ StreamLabeler.manifest                ⟵* (version 은 sync_version.py 가 VERSION 에서 생성)
+│  ├─ ChatCoach.manifest                ⟵* (version 은 sync_version.py 가 VERSION 에서 생성)
 │  ├─ icon.ico · icon.png                   tools/make_icon.py 로 생성
 │  └─ guide-config.v0.1.json                안내서 v0.1 시작값 전부 (기준서 버전마다 파일 하나, 릴리스 뒤 불변)
 ├─ schemas/                                 JSON 스키마. 목록과 정의는 03 19장
@@ -365,7 +365,7 @@ streamlabeler/                              공개 저장소 vtubeadmirer/stream
 │  ├─ get_ffmpeg.py                         ⟵* (+ SHA256 고정)
 │  ├─ make_icon.py                          ⟵
 │  ├─ release.ps1                           ⟵* (VERSION 쓰기 → sync_version.py, 명시 경로 커밋, 역이식 점검)
-│  ├─ sync_version.py                       VERSION → app/__init__.py · assets/StreamLabeler.manifest 생성 (04 2-1)
+│  ├─ sync_version.py                       VERSION → app/__init__.py · assets/ChatCoach.manifest 생성 (04 2-1)
 │  ├─ lock_deps.ps1                         requirements.in → requirements.lock (pip-compile --generate-hashes)
 │  ├─ check_tag.py                          태그 형식·VERSION 일치·main 포함 검사 (release.yml)
 │  ├─ ci_selftest.py                        한글 폴더 사본에서 --selftest (release.yml)
@@ -382,7 +382,7 @@ streamlabeler/                              공개 저장소 vtubeadmirer/stream
 │  ├─ ci.yml                                ⟵*
 │  └─ release.yml                           ⟵* (빌드·게시 잡 분리)
 ├─ build.ps1                                ⟵* (WebEngine·yt-dlp·확장 제거, -Channel release|test)
-├─ StreamLabeler.spec                       upx=False
+├─ ChatCoach.spec                       upx=False
 ├─ requirements.in                          최상위 의존성만. yt-dlp 없음
 ├─ requirements.lock                        M0 는 전이 의존성까지 버전 고정, M4(MVP) 부터 해시 잠금 + --require-hashes 로 설치 (04 4-4. PySide6 해시 생성은 확인 필요)
 ├─ .gitignore · .gitattributes              (이미 있음)
@@ -390,7 +390,7 @@ streamlabeler/                              공개 저장소 vtubeadmirer/stream
 └─ README.md
 ```
 
-참고: ClipSlicer 저장소에는 LICENSE 파일과 별도 고지 파일이 없고 README 에 한 줄(MIT, 함께 배포되는 ffmpeg·libmpv·PySide6 는 각자의 라이선스)만 있다(확인함). StreamLabeler 는 처음부터 두 파일을 둔다.
+참고: ClipSlicer 저장소에는 LICENSE 파일과 별도 고지 파일이 없고 README 에 한 줄(MIT, 함께 배포되는 ffmpeg·libmpv·PySide6 는 각자의 라이선스)만 있다(확인함). ChatCoach 는 처음부터 두 파일을 둔다.
 
 ---
 
@@ -400,18 +400,18 @@ streamlabeler/                              공개 저장소 vtubeadmirer/stream
 
 | 위치 | 판정 | 이유 |
 |---|---|---|
-| `%LOCALAPPDATA%\Programs\StreamLabeler` | **권장** | 사용자 전용 권한이 상속된다. OneDrive 밖. 관리자 불필요. 경로가 짧다 |
-| `C:\Tools\StreamLabeler` | 비권장 | C:\ 바로 아래 새 폴더는 '인증된 사용자 수정' 권한을 상속한다. 같은 PC 의 다른 계정이 ffmpeg·DLL 을 심을 수 있다 (S-08) |
+| `%LOCALAPPDATA%\Programs\ChatCoach` | **권장** | 사용자 전용 권한이 상속된다. OneDrive 밖. 관리자 불필요. 경로가 짧다 |
+| `C:\Tools\ChatCoach` | 비권장 | C:\ 바로 아래 새 폴더는 '인증된 사용자 수정' 권한을 상속한다. 같은 PC 의 다른 계정이 ffmpeg·DLL 을 심을 수 있다 (S-08) |
 | OneDrive 아래 (예: `…\OneDrive\문서\…`) | 경고 후 허용 | 수백 파일 교체와 동기화가 잠금을 다투고, 라벨·채팅이 클라우드로 올라간다 (S-09) |
 | Program Files, 읽기 전용 USB | 실행만 | 쓸 수 없어 데이터는 `%LOCALAPPDATA%` 로 폴백, 자동 업데이트는 안 된다 |
 
-앞선 설계 초안의 `C:\Tools` 권장은 이 표로 바꾼다. 첫 실행 안내와 설치 안내 문서도 같은 문장(`%LOCALAPPDATA%\Programs\StreamLabeler`)을 쓴다.
+앞선 설계 초안의 `C:\Tools` 권장은 이 표로 바꾼다. 첫 실행 안내와 설치 안내 문서도 같은 문장(`%LOCALAPPDATA%\Programs\ChatCoach`)을 쓴다.
 
 설치 안내 문서 `docs/install.md` 는 아직 없다. M4 산출물이다([07](07-roadmap.md) 3-1). 04·05·07 이 그 문서에 넣으라고 적은 항목을 여기 한곳에 모은다. 내용의 근거는 오른쪽 문서에 있고, 여기서는 목록만 고정한다.
 
 | 항목 | 한 줄 | 근거 |
 |---|---|---|
-| 설치 위치 | `%LOCALAPPDATA%\Programs\StreamLabeler` 에 푼다. OneDrive 아래·`C:\` 바로 아래는 피한다 | 위 표, S-08, S-09 |
+| 설치 위치 | `%LOCALAPPDATA%\Programs\ChatCoach` 에 푼다. OneDrive 아래·`C:\` 바로 아래는 피한다 | 위 표, S-08, S-09 |
 | 관리자 권한 | 필요 없다 | 위 표, [05](05-security.md) 15장 |
 | zip 차단 해제 | 풀기 **전에** 파일 속성 '차단 해제' 또는 `Unblock-File` | [04](04-update-and-release.md) 8장 |
 | SmartScreen | 첫 실행 때 'Windows의 PC 보호' → [추가 정보] → [실행] | 04 8장·10장 |
@@ -429,8 +429,8 @@ streamlabeler/                              공개 저장소 vtubeadmirer/stream
 MVP 는 앱 코드가 루트에 바로 있다. `app\<버전>\` 하위 폴더는 v1 에 업데이트 방식을 바꿀 때만 생긴다(5-6). 로그는 `data\logs\` 에 둔다. 업데이트 때 보존할 폴더를 `data\` 하나로 줄이기 위해서다.
 
 ```
-StreamLabeler\                          = <앱>
-├─ StreamLabeler.exe
+ChatCoach\                          = <앱>
+├─ ChatCoach.exe
 ├─ _internal\                           python312.dll · PySide6(Core/Gui/Widgets/Svg) · libmpv-2.dll
 │  ├─ ffmpeg\                           ffmpeg.exe · ffprobe.exe · av*.dll
 │  ├─ VERSION · deps.txt · build_info.json   build_info = {version, commit, built_at, channel} (04 2-1)
@@ -447,7 +447,7 @@ StreamLabeler\                          = <앱>
 │  │  ├─ backup_ok.json                 _backup 사본이 온전할 때만 생긴다. 되돌리기 조건
 │  │  └─ updating.lock                  교체 중 표식. 앱이 먼저 쓰고 스크립트가 30초마다 갱신
 │  ├─ run\<pid>.running                 정상 종료 때 지움. 남아 있으면 비정상 종료
-│  ├─ logs\streamlabeler.log · crash.log · update.log
+│  ├─ logs\chatcoach.log · crash.log · update.log
 │  ├─ cache\<partial_fp 앞 16자>\       버려도 되는 것: waveform.json · silence.json · thumbs\ (영상 지문 기준)
 │  ├─ cache\<project_id>\               버려도 되는 것: chat_index.bin · index.sqlite(v1)
 │  ├─ models\                           (v1) 선택 모델
@@ -461,7 +461,7 @@ StreamLabeler\                          = <앱>
 ├─ _update\<임의 이름>\                 업데이트 준비 폴더 (같은 볼륨). 끝나면 지운다
 └─ _backup\                             교체 직후의 이전 버전 사본. 첫 정상 종료 뒤 지운다
 
-%LOCALAPPDATA%\StreamLabeler\           앱 폴더 밖 (5-3)
+%LOCALAPPDATA%\ChatCoach\           앱 폴더 밖 (5-3)
 ├─ backups\                             = paths.backup_root()
 │  ├─ <project_id>\                     일 1회 백업 zip (프로젝트당 14개)
 │  └─ pre-update\                       교체 직전 data 백업 zip (최근 5개, 04 6-7)
@@ -474,9 +474,9 @@ StreamLabeler\                          = <앱>
 
 | 무엇 | 어디 | 왜 밖에 두나 | 폴더째 복사에 따라가나 |
 |---|---|---|---|
-| 일 1회 백업 zip | `backup_root()\<project_id>\` (기본 `%LOCALAPPDATA%\StreamLabeler\backups\<project_id>\`) | 옛 앱 폴더를 지우면 라벨과 백업이 함께 사라진다 (S-39). OneDrive 로 리디렉션되는 '문서' 를 피한다 | 아니오 |
+| 일 1회 백업 zip | `backup_root()\<project_id>\` (기본 `%LOCALAPPDATA%\ChatCoach\backups\<project_id>\`) | 옛 앱 폴더를 지우면 라벨과 백업이 함께 사라진다 (S-39). OneDrive 로 리디렉션되는 '문서' 를 피한다 | 아니오 |
 | 교체 직전 data 백업 zip | `backup_root()\pre-update\` (이름 `pre-update-<이전>-to-<새>-<시각>.zip`, 최근 5개) | 같음. 새 버전이 첫 실행에서 라벨을 잘못 읽어도 사본이 남도록 옛 버전의 업데이터가 만든다 ([04](04-update-and-release.md) 6-7) | 아니오 |
-| 데이터 폴백 | `%LOCALAPPDATA%\StreamLabeler\data\` | 앱 폴더에 쓸 수 없을 때만. 첫 실행에 알리고 상태바에 '폴백 모드' 를 계속 표시 | 아니오 |
+| 데이터 폴백 | `%LOCALAPPDATA%\ChatCoach\data\` | 앱 폴더에 쓸 수 없을 때만. 첫 실행에 알리고 상태바에 '폴백 모드' 를 계속 표시 | 아니오 |
 
 일 1회 백업 보존 개수는 프로젝트당 14개(시작값). 오래된 것부터 지운다. '프로젝트 파기' 명령은 이 폴더도 지운다 (S-06). 백업 대상은 열린 프로젝트만이 아니라 `data\projects\*` 전부의 `labels\`·`project.json`·`samples\`·`locks\` 다. 채팅 원문은 주 1회.
 
@@ -532,8 +532,8 @@ StreamLabeler\                          = <앱>
 |---|---|---|
 | `install_root()` | `<앱>` | frozen 이면 exe 폴더. 소스 실행이면 저장소 루트 |
 | `code_dir()` | 코드·번들 폴더 | MVP 는 `install_root()\_internal`. v1 버전 폴더 방식이면 `install_root()\app\<ver>\_internal` |
-| `data_root()` | `data\` | `install_root()\data` 에 시험 파일을 쓰고 지워 본다. 실패하면 `%LOCALAPPDATA%\StreamLabeler\data` |
-| `backup_root()` | 백업 폴더 | `%LOCALAPPDATA%\StreamLabeler\backups`. 쓸 수 없으면 `data_root()\backups` |
+| `data_root()` | `data\` | `install_root()\data` 에 시험 파일을 쓰고 지워 본다. 실패하면 `%LOCALAPPDATA%\ChatCoach\data` |
+| `backup_root()` | 백업 폴더 | `%LOCALAPPDATA%\ChatCoach\backups`. 쓸 수 없으면 `data_root()\backups` |
 | `find_tool(name)` | ffmpeg·ffprobe | frozen 이면 `code_dir()\ffmpeg` 와 `code_dir()` 만. PATH 를 보지 않는다 (S-08) |
 | `prepare_libmpv()` | libmpv 폴더 | `code_dir()` 만. `import mpv` 동안 `PATH` 를 그 폴더 하나로 바꿨다가 되돌린다 (S-08) |
 
@@ -544,8 +544,8 @@ ClipSlicer 의 `settings_file()` 은 `open(path, "a")` 로 판정해 빈 `settin
 1-4 의 조건이 생기면 아래로 옮긴다. 경로가 5-5 의 함수 뒤에 숨어 있으므로 바뀌는 곳은 `paths.code_dir()` 와 `updater` 의 Applier 뿐이다.
 
 ```
-StreamLabeler\
-├─ StreamLabeler.exe          작은 런처: current.txt 를 읽고 app\<ver>\ 의 exe 실행
+ChatCoach\
+├─ ChatCoach.exe          작은 런처: current.txt 를 읽고 app\<ver>\ 의 exe 실행
 ├─ current.txt · previous.txt
 ├─ app\0.3.1\  app\0.3.2\     버전별 폴더 (이전 1개 보관)
 ├─ data\                      그대로
@@ -701,7 +701,7 @@ sequenceDiagram
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ StreamLabeler 0.1.0                       라벨러: L01 ▾      [설정]      │
+│ ChatCoach 0.1.0                       라벨러: L01 ▾      [설정]      │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ 최근 프로젝트                                                            │
 │  ▸ 여행 잡담 방송-15632692     ②반응 진행 · 마지막 2026-10-19 14:02     │
@@ -987,13 +987,13 @@ M0 첫 측정 표 (2026-10-20, 빈 창 v0.0.1 → v0.0.2, `-Channel test`, `tool
 
 ### 11-3. `--selftest` 항목
 
-`StreamLabeler.exe --selftest <결과.json> [--expect-version X.Y.Z] [--data-dir <폴더>]`. 창 없이 돌고 결과 JSON 과 종료 코드(0 = 모두 통과)로 끝난다. ClipSlicer 골격을 그대로 쓰고 항목만 바꾼다. `--data-dir` 을 주면 `paths.data_root()` 대신 그 폴더를 쓴다. 업데이터가 사용자의 `data\` 를 건드리지 않고 점검하기 위해서다 ([04](04-update-and-release.md) 6-6).
+`ChatCoach.exe --selftest <결과.json> [--expect-version X.Y.Z] [--data-dir <폴더>]`. 창 없이 돌고 결과 JSON 과 종료 코드(0 = 모두 통과)로 끝난다. ClipSlicer 골격을 그대로 쓰고 항목만 바꾼다. `--data-dir` 을 주면 `paths.data_root()` 대신 그 폴더를 쓴다. 업데이터가 사용자의 `data\` 를 건드리지 않고 점검하기 위해서다 ([04](04-update-and-release.md) 6-6).
 
 | 항목 | 확인하는 것 |
 |---|---|
 | `version` | `--expect-version` 과 `__version__`·번들 `VERSION` 이 같은가 |
 | `channel` | `_internal\build_info.json` 의 `channel` 이 `"release"` 인가. `-Channel test` 빌드는 여기서 실패한다 |
-| `pubkeys` | 내장 공개키가 `appspec` 의 K1·K2 뿐이고 시험용 키가 없는가. 환경 변수 `STREAMLABELER_TEST_PUBKEY` 를 읽지 않는가 |
+| `pubkeys` | 내장 공개키가 `appspec` 의 K1·K2 뿐이고 시험용 키가 없는가. 환경 변수 `CHATCOACH_TEST_PUBKEY` 를 읽지 않는가 |
 | `ffmpeg` · `ffprobe` | 번들 경로에서 `-version` 이 도는가 (PATH 를 비운 상태) |
 | `libmpv` | 로드된 DLL 이 번들 경로의 것인가 (`mpv` 백엔드 이름이 절대경로로 일치) |
 | `qt_plugins` | Qt 라이브러리 경로 첫 항목이 번들 아래인가 |
@@ -1022,7 +1022,7 @@ M0 첫 측정 표 (2026-10-20, 빈 창 v0.0.1 → v0.0.2, `-Channel test`, `tool
 
 ### 12-1. 복사해 쓰는 것 (앱 고유 값·작은 수정만)
 
-| ClipSlicer (줄 수) | StreamLabeler | 바꾸는 것 |
+| ClipSlicer (줄 수) | ChatCoach | 바꾸는 것 |
 |---|---|---|
 | `app/style.py` (76) | `app/style.py` | 없음 |
 | `app/i18n.py` (60) | `app/i18n.py` | 영어 사전 import 분기 삭제 |
@@ -1038,9 +1038,9 @@ M0 첫 측정 표 (2026-10-20, 빈 창 v0.0.1 → v0.0.2, `-Channel test`, `tool
 | `tools/make_icon.py` (57) | 같은 이름 | 글자·색 |
 | `tools/release.ps1` (46) | 같은 이름 | `VERSION` 에서 두 파일 생성, `git add -A` 대신 명시 경로와 추적 안 된 파일 검사(S-21), 역이식 점검 (12-4) |
 | `build.ps1` (84) | 같은 이름 | WebEngine·yt-dlp·확장 제거, Qt DLL 화이트리스트 축소(Core/Gui/Widgets/Svg), `--noupx`. `-DistPath dist_test` 유지 |
-| `ClipSlicer.spec` | `StreamLabeler.spec` | `upx=False` (S-17) |
+| `ClipSlicer.spec` | `ChatCoach.spec` | `upx=False` (S-17) |
 | `.github/workflows/ci.yml` (51) · `release.yml` (138) | 같은 이름 | 액션 커밋 SHA 고정, 빌드·게시 잡 분리 (S-03). 상세는 [04](04-update-and-release.md) |
-| `assets/ClipSlicer.manifest` | `assets/StreamLabeler.manifest` | 이름, 버전 생성. `activeCodePage=UTF-8` 이 cp949 불일치의 한 축이라는 주석 |
+| `assets/ClipSlicer.manifest` | `assets/ChatCoach.manifest` | 이름, 버전 생성. `activeCodePage=UTF-8` 이 cp949 불일치의 한 축이라는 주석 |
 | `tests/conftest.py` (16) | 같은 이름 | 없음 |
 | `tests/test_updater.py` (400) | 같은 이름 | 이름·보존 폴더, 서명·zip 검사 추가 |
 | `tests/test_updater_safety.py` (223) | 같은 이름 | '보조 프로세스 강제 종료' 테스트를 '기다리기' 테스트로 |
@@ -1049,7 +1049,7 @@ M0 첫 측정 표 (2026-10-20, 빈 창 v0.0.1 → v0.0.2, `-Channel test`, `tool
 
 ### 12-2. 참고해서 새로 쓰는 것
 
-| ClipSlicer (줄 수) | StreamLabeler | 가져오는 것 | 새로 쓰는 것 |
+| ClipSlicer (줄 수) | ChatCoach | 가져오는 것 | 새로 쓰는 것 |
 |---|---|---|---|
 | `app/segments.py` (486) | `core/segments.py`, `jsonl.py`, `store.py` | 마커 → 빈틈없는 구간, undo 200단계, `parse_time`·`parse_timestamps`·`fmt_time`, 임시 파일 + `os.replace` 패턴 | 구간 필드(분류·확신도·근거·경계 신호), 완충·병합 제안, 구간 ID(uuid4). 시작 시각 키로 속성을 붙이는 방식(409행)과 길이 밖 마커를 조용히 버리는 방식(407행)은 쓰지 않는다 (S-13) |
 | `app/timeline.py` (711) | `ui/timeline.py` | `x_to_t`·`t_to_x`·`px_tol_sec`·`_set_view`·`zoom`·`_draw_ruler`(프레임 단위 눈금)·`snapped`(자석)·`PreviewPopup`·휠 처리, 약 250줄 | 그리기 전체: 트랙 스택, 분류 색, 완충 음영, 정적 트랙 캐시. 고정 높이 `THUMB_H=64` 와 순번 색 `seg_color(i)` 는 버린다 |
@@ -1080,7 +1080,7 @@ M0 첫 측정 표 (2026-10-20, 빈 창 v0.0.1 → v0.0.2, `-Channel test`, `tool
 
 - 복사한 파일 첫 줄에 출처를 적는다: `# vendored from vtubeadmirer/clipslicer@07d13cc (app/updater.py) — 변경: …`
 - 공유 패키지는 만들지 않는다. 세 번째 사용처가 없고, 가장 큰 공유 후보(updater)가 가장 앱 종속적이다. 서명 검증처럼 두 앱이 똑같이 필요한 변경이 생기면 그때 다시 본다.
-- `tools/release.ps1` 이 릴리스마다 '이전 태그 이후 바뀐 복사 파일 목록'을 출력하고, 각각 ClipSlicer 에 반영할지 묻고 답을 기록한다. 업데이터 수정(위 1~7)은 StreamLabeler 에서 검증된 뒤 같은 릴리스 주기 안에 ClipSlicer 에 별도 커밋으로 옮긴다. 업데이터 버그는 다음 버전을 못 받게 만드는 가장 비싼 버그다.
+- `tools/release.ps1` 이 릴리스마다 '이전 태그 이후 바뀐 복사 파일 목록'을 출력하고, 각각 ClipSlicer 에 반영할지 묻고 답을 기록한다. 업데이터 수정(위 1~7)은 ChatCoach 에서 검증된 뒤 같은 릴리스 주기 안에 ClipSlicer 에 별도 커밋으로 옮긴다. 업데이터 버그는 다음 버전을 못 받게 만드는 가장 비싼 버그다.
 
 ### 12-5. 가져오지 않는 것
 
@@ -1182,7 +1182,7 @@ M0 첫 측정 표 (2026-10-20, 빈 창 v0.0.1 → v0.0.2, `-Channel test`, `tool
 | 라벨러 PC 의 최소 해상도는? | 작업대 배치와 큐 모드 필요성 | 1920×1080 목표, 1366×768 최소 |
 | 프로젝트 폴더를 공유 드라이브에 두고 여러 PC 가 동시에 열 일이 있는가? | 잠금·충돌 처리 범위 | 동시에 쓰는 것은 한 PC, 나머지는 읽기 전용. 교환은 패키지(v1) |
 | ffmpeg 번들을 유지할까? (설치 약 420MB vs 약 225MB) | 크기와 파형·무음·썸네일 기능 | 유지 |
-| 설치 권장 위치를 `C:\Tools` 에서 `%LOCALAPPDATA%\Programs\StreamLabeler` 로 바꾸는 데 동의하는가? | 권한 상속·OneDrive | 바꾼다 |
+| 설치 권장 위치를 `C:\Tools` 에서 `%LOCALAPPDATA%\Programs\ChatCoach` 로 바꾸는 데 동의하는가? | 권한 상속·OneDrive | 바꾼다 |
 | 등급 `Ctrl+숫자`, 확신도 `Alt+숫자` 방식이 괜찮은가? | 하루 수백 번 하는 입력 | 이 방식 |
 | '음량 고르게' 를 기본으로 켤까? | 피로 vs 판단 영향 | 켬, 라벨에 기록 |
 | 방송 중간에 채팅↔영상 오프셋이 바뀌는 VOD 가 실제로 있는가? | 보정 모델(오프셋 하나 vs 앵커 보간) | 오프셋 하나 |

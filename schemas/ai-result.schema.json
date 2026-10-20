@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/vtubeadmirer/streamlabeler/blob/main/schemas/ai-result.schema.json",
+  "$id": "https://github.com/vtubeadmirer/chatcoach/blob/main/schemas/ai-result.schema.json",
   "title": "AI 분석 결과 가져오기 형식 (ai-result)",
-  "description": "분석 엔진이 방송 1편에 대해 낸 결과. StreamLabeler 는 1차 세션이 잠긴 프로젝트에서, 검토자(reviewer) 세션으로만 이 파일을 가져온다(블라인드, 안내서 원칙 3). 가져온 파일은 프로젝트 폴더가 아니라 <앱>\\data\\ai\\<project_id>\\<run_id>.json 에 복사한다. 엔진이 내지 않는 종류는 배열을 빼면 된다. 채팅은 chat_id(sl-chat-id-v1 공개 규칙)로 맞춘다. 비교 지표는 docs/design/06-evaluation-and-agreement.md. 설계 문서: docs/design/03-data-model.md 17장.",
+  "description": "분석 엔진이 방송 1편에 대해 낸 결과. ChatCoach 는 1차 세션이 잠긴 프로젝트에서, 검토자(reviewer) 세션으로만 이 파일을 가져온다(블라인드, 안내서 원칙 3). 가져온 파일은 프로젝트 폴더가 아니라 <앱>\\data\\ai\\<project_id>\\<run_id>.json 에 복사한다. 엔진이 내지 않는 종류는 배열을 빼면 된다. 채팅은 chat_id(sl-chat-id-v1 공개 규칙)로 맞춘다. 비교 지표는 docs/design/06-evaluation-and-agreement.md. 설계 문서: docs/design/03-data-model.md 17장.",
   "type": "object",
   "required": ["schema", "schema_version", "run_id", "created_at", "engine", "target", "time_axis"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"const": "streamlabeler/ai-result"},
+    "schema": {"const": "chatcoach/ai-result"},
     "schema_version": {"const": 1},
     "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", "description": "엔진 실행 ID. 파일 이름에 쓰이므로 영문·숫자·_.- 만."},
     "created_at": {"type": "string", "format": "date-time"},

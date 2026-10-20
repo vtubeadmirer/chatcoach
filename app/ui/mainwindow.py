@@ -20,12 +20,12 @@ from ..i18n import tr
 from ..workers import UpdateCheckWorker, UpdateStageWorker
 from .update_dialog import UpdateDialog, open_trusted_url
 
-LOG = logging.getLogger("streamlabeler")
+LOG = logging.getLogger("chatcoach")
 # 시험 채널 전용: 환경 변수가 1 이면 새 버전을 찾았을 때 대화상자 없이 바로 준비·적용한다 (04 12-5 손 시험·자동 왕복 시험용).
 # release 채널은 읽지 않는다.
-AUTO_UPDATE_ENV = "STREAMLABELER_AUTO_UPDATE"
+AUTO_UPDATE_ENV = "CHATCOACH_AUTO_UPDATE"
 MANUAL_GUIDE = ("수동 업데이트: 앱을 끄고 릴리스 페이지에서 전체 zip 을 받아 새 폴더에 푼 뒤, 옛 폴더의 data\\ 를 "
-                "새 폴더의 StreamLabeler\\ 안으로 복사합니다 (docs/install.md, 04 8장).")
+                "새 폴더의 ChatCoach\\ 안으로 복사합니다 (docs/install.md, 04 8장).")
 
 
 class MainWindow(QMainWindow):
@@ -235,7 +235,7 @@ class MainWindow(QMainWindow):
                                 .format(last.get("result", "?"), last.get("backup_rc"), last.get("copy_rc"), last.get("restore_rc"), log, MANUAL_GUIDE))
         elif flag == "--update-blocked":
             QMessageBox.information(self, tr("업데이트 보류"),
-                                    tr("다른 StreamLabeler 창이 열려 있어 업데이트를 보류했습니다. 창을 모두 닫고 다시 시도하세요."))
+                                    tr("다른 ChatCoach 창이 열려 있어 업데이트를 보류했습니다. 창을 모두 닫고 다시 시도하세요."))
 
     # ---------------------------------------------------------------- 도움말
     def copy_report(self) -> None:

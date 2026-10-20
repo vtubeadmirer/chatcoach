@@ -1,4 +1,4 @@
-"""업데이터의 순수 함수와 교체 스크립트 텍스트 (ClipSlicer tests/test_updater.py 를 StreamLabeler 업데이터에 맞게 고쳐 씀).
+"""업데이터의 순수 함수와 교체 스크립트 텍스트 (ClipSlicer tests/test_updater.py 를 ChatCoach 업데이터에 맞게 고쳐 씀).
 
 - parse_deps · choose_asset(경량/전체 행렬) · decode_output(UTF-8 · cp949 · 대체 문자).
 - render_replacer: /XD 는 appspec 의 세 보존 폴더 전체 경로만, Stop-Process 없음, started 표식 먼저, /MIR · /R:2,
@@ -154,7 +154,7 @@ def test_replacer_lite_branch(script_text):
     assert _line(script_text, "$copyRc = Mirror") == "$copyRc = Mirror $New $App $Lite"
     assert _line(script_text, "$restoreRc = Mirror") == "$restoreRc = Mirror $backup $App $false"
     req = _line(script_text, "$required = @(")
-    assert req == '$required = @("StreamLabeler.exe", "_internal\\python312.dll", "_internal\\VERSION")'
+    assert req == '$required = @("ChatCoach.exe", "_internal\\python312.dll", "_internal\\VERSION")'
     assert _line(script_text, "if (-not $Lite) { $required +=") == \
         'if (-not $Lite) { $required += @("_internal\\libmpv-2.dll") }'
 
@@ -209,9 +209,9 @@ def test_replacer_powershell_syntax(tmp_path):
 # --------------------------------------------------------------------------- 실행 인자 · 잠금 · 결과
 def test_replacer_command_order():
     base = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "s.ps1",
-            "-AppPid", "123", "-App", r"C:\앱", "-New", r"C:\앱\_update\upd-1\new\StreamLabeler", "-Id", "upd-1",
-            "-Exe", "StreamLabeler.exe", "-FromVer", "0.0.1", "-ToVer", "0.0.2"]
-    args = ("s.ps1", r"C:\앱", r"C:\앱\_update\upd-1\new\StreamLabeler", "upd-1", "StreamLabeler.exe", 123, "0.0.1", "0.0.2")
+            "-AppPid", "123", "-App", r"C:\앱", "-New", r"C:\앱\_update\upd-1\new\ChatCoach", "-Id", "upd-1",
+            "-Exe", "ChatCoach.exe", "-FromVer", "0.0.1", "-ToVer", "0.0.2"]
+    args = ("s.ps1", r"C:\앱", r"C:\앱\_update\upd-1\new\ChatCoach", "upd-1", "ChatCoach.exe", 123, "0.0.1", "0.0.2")
     assert updater.replacer_command(*args, lite=False) == base
     assert updater.replacer_command(*args, lite=True) == base + ["-Lite"]
     assert updater.replacer_command(*args, lite=False, no_backup=True) == base + ["-NoBackup"]
@@ -257,7 +257,7 @@ def _backup_tree(app):
     os.makedirs(os.path.join(app, "_backup", "_internal"), exist_ok=True)
     with open(os.path.join(app, "_backup", "_internal", "core.dll"), "wb") as f:
         f.write(b"x" * 5000)
-    with open(os.path.join(app, "_backup", "StreamLabeler.exe"), "wb") as f:
+    with open(os.path.join(app, "_backup", "ChatCoach.exe"), "wb") as f:
         f.write(b"old")
 
 
@@ -332,7 +332,7 @@ def test_preflight_source_run(tmp_path, no_onedrive):
 
 def test_preflight_unc_path(tmp_path, no_onedrive, monkeypatch):
     """UNC 경로는 막는다. 네트워크에 닿지 않게 쓰기 시험 · 크기 계산 · 디스크 조회를 가로챈다."""
-    unc = r"\\server\share\StreamLabeler"
+    unc = r"\\server\share\ChatCoach"
     real_open = open
     touched = []
 
@@ -356,7 +356,7 @@ def test_preflight_unc_path(tmp_path, no_onedrive, monkeypatch):
 def test_preflight_onedrive_is_warning_only(tmp_path, no_onedrive, monkeypatch):
     od = tmp_path / "OneDrive - 개인"
     monkeypatch.setenv("OneDrive", str(od))
-    app = rk.fake_app(str(od / "프로그램" / "StreamLabeler"), "0.0.1")
+    app = rk.fake_app(str(od / "프로그램" / "ChatCoach"), "0.0.1")
     problems, warnings = updater.RobocopyApplier(SPEC, rk.installed(app), paths.data_root()).preflight(_staged(app))
     assert problems == [] and len(warnings) == 1 and "OneDrive" in warnings[0]
     # 대소문자만 다른 환경 변수 값도 같은 폴더로 본다

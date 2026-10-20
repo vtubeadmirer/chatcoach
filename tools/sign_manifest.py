@@ -1,7 +1,7 @@
 """latest.json 의 minisign 서명 — 키 생성 · 서명 · 검증 (개발 PC 전용, docs/design/04-update-and-release.md 9장).
 
 사용:
-  python tools/sign_manifest.py keygen [--dir %LOCALAPPDATA%\\StreamLabeler-signing] [--label K1] [--password-file <파일>]
+  python tools/sign_manifest.py keygen [--dir %LOCALAPPDATA%\\ChatCoach-signing] [--label K1] [--password-file <파일>]
   python tools/sign_manifest.py sign latest.json [--key <비밀키 파일>] [--out latest.json.minisig]
   python tools/sign_manifest.py verify latest.json [--sig latest.json.minisig] [--pubkey <파일 또는 base64 줄>]
   python tools/sign_manifest.py verify --url https://github.com/<repo>/releases/latest/download/latest.json
@@ -47,7 +47,7 @@ CKSUM_BLAKE2 = b"B2"
 # minisign 과 같은 값 (libsodium crypto_pwhash_scryptsalsa208sha256 의 SENSITIVE)
 SCRYPT_OPSLIMIT = 33554432
 SCRYPT_MEMLIMIT = 1073741824
-DEFAULT_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "StreamLabeler-signing")
+DEFAULT_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "ChatCoach-signing")
 
 
 @dataclass(frozen=True)
@@ -202,8 +202,8 @@ def cmd_keygen(a) -> int:
         print(f"거부: {problem}: {a.dir}")
         return 2
     os.makedirs(a.dir, exist_ok=True)
-    sk_path = os.path.join(a.dir, f"streamlabeler-{a.label}.key")
-    pk_path = os.path.join(a.dir, f"streamlabeler-{a.label}.pub")
+    sk_path = os.path.join(a.dir, f"chatcoach-{a.label}.key")
+    pk_path = os.path.join(a.dir, f"chatcoach-{a.label}.pub")
     if os.path.exists(sk_path) or os.path.exists(pk_path):
         print(f"이미 있습니다: {sk_path} / {pk_path}. 덮어쓰지 않습니다")
         return 2
@@ -228,7 +228,7 @@ def cmd_keygen(a) -> int:
     # 바로 되읽어 서명·검증 왕복을 확인한다
     with open(sk_path, encoding="utf-8") as f:
         back = load_secret_key(f.read(), pw)
-    probe = b"streamlabeler keygen probe"
+    probe = b"chatcoach keygen probe"
     sig = sign_bytes(probe, back, "probe")
     minisign.verify(probe, sig, [(a.label, kp.public_line())])
     print(f"완료: {a.label}  키 ID {kp.key_id_hex}")
@@ -255,7 +255,7 @@ def _check_signed_log(log_path: str, version: str, digest: str) -> str | None:
 
 
 def cmd_sign(a) -> int:
-    key_path = a.key or os.path.join(DEFAULT_DIR, "streamlabeler-K1.key")
+    key_path = a.key or os.path.join(DEFAULT_DIR, "chatcoach-K1.key")
     problem = key_path_problem(key_path)
     if problem:
         print(f"거부: {problem}: {key_path}")

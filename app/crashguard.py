@@ -12,7 +12,7 @@ import logging
 import os
 import sys
 
-LOG = logging.getLogger("streamlabeler")
+LOG = logging.getLogger("chatcoach")
 _crash_file = None
 _marker: str | None = None
 

@@ -1,4 +1,4 @@
-# vendored from vtubeadmirer/clipslicer@07d13cc (tools/get_ffmpeg.py) — 변경: SHA256 고정값 비교(다르면 빌드 중단), User-Agent StreamLabeler-tools
+# vendored from vtubeadmirer/clipslicer@07d13cc (tools/get_ffmpeg.py) — 변경: SHA256 고정값 비교(다르면 빌드 중단), User-Agent ChatCoach-tools
 """ffmpeg 공유(shared) 빌드를 받아 bin/ffmpeg/ 에 넣는다.
 
 정적 빌드(ffmpeg.exe 141MB + ffprobe.exe 141MB)와 달리 DLL 을 공유해서 전체 약 100MB.
@@ -31,7 +31,7 @@ TAG = "autobuild-2026-10-12-13-12"
 ASSET = "ffmpeg-n8.1.3-18-g46d899d7a0-win64-gpl-shared-8.1.zip"
 # 위 ASSET 의 SHA-256. 같은 릴리스의 상류 checksums.sha256 과 대조해 확인한 값이다 (2026-10-20).
 SHA256 = "7bad9c116b45fb7441c636d2dc8c15d40cd2933772c6920d60569bb184c8c524"
-USER_AGENT = "StreamLabeler-tools"
+USER_AGENT = "ChatCoach-tools"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEST = os.path.join(ROOT, "bin", "ffmpeg")
 

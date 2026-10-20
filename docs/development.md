@@ -4,13 +4,17 @@ README 는 처음 보는 사람을 위한 소개다. 빌드·테스트·릴리�
 
 ## 지금 상태
 
-M0 '빈 껍데기와 배포 경로' 까지 됐다 (2026-10-20). 빈 창, 앱 안 자동 업데이트(서명 필수), 빌드·릴리스 도구가 있다. 라벨링 기능은 M1 부터 만든다 ([07 로드맵](design/07-roadmap.md)).
+M0 '빈 껍데기와 배포 경로' 까지 됐다 (2026-10-20). 빈 창, 앱 안 자동 업데이트(서명 필수), 빌드·릴리스 도구가 있다.
+
+2026-10-20 에 제품의 정의와 이름이 바뀌었다 (StreamLabeler → ChatCoach). 제품은 사용자의 기획 초안(채팅·발화 분석과 스트리머·시청자 훈련)이고, 처음 설계한 라벨링 도구는 그 안의 정답지·채점기·화면 부품이 된다. 결정과 단계 순서는 [08 결정 기록](design/08-decisions-2026-10-20.md)이 정하고, 01~07 과 다르면 08 이 맞다. 다음 작업은 08 D-03 의 A단계(채팅 수집·시간 맞추기)다.
+
+로컬 개발 폴더는 `C:\Users\dlem9\dev\chatcoach` 다 (OneDrive 밖). 서명 키는 `%LOCALAPPDATA%\ChatCoach-signing\`.
 
 ## 기술 스택
 
 - Python 3.12 · PySide6 (Core·Gui·Widgets, QtWebEngine 없음) · libmpv(python-mpv) · ffmpeg · PyInstaller onedir.
 - 업데이터·플레이어 등 인프라 코드는 [ClipSlicer](https://github.com/vtubeadmirer/clipslicer)에서 복사해 시작했다. 복사한 파일 머리에 출처를 적었다 ([02](design/02-architecture.md) 12장).
-- 배포는 설치 없는 포터블 zip 을 GitHub Releases 로 낸다. 권장 설치 위치는 `%LOCALAPPDATA%\Programs\StreamLabeler` (OneDrive 밖). 이유는 [05](design/05-security.md).
+- 배포는 설치 없는 포터블 zip 을 GitHub Releases 로 낸다. 권장 설치 위치는 `%LOCALAPPDATA%\Programs\ChatCoach` (OneDrive 밖). 이유는 [05](design/05-security.md).
 - 코드 서명이 없어 첫 실행 때 Windows SmartScreen 경고가 뜬다.
 
 ## 개발 시작
@@ -64,7 +68,8 @@ python main.py
 | [design/04-update-and-release.md](design/04-update-and-release.md) | 릴리스 파이프라인, 업데이터, 서명 |
 | [design/05-security.md](design/05-security.md) | 위협 모델, 확정 항목과 완화, 개인정보 |
 | [design/06-evaluation-and-agreement.md](design/06-evaluation-and-agreement.md) | 일치도, AI 비교 지표, 표본 추출 |
-| [design/07-roadmap.md](design/07-roadmap.md) | 단계별 계획, 열린 질문 |
+| [design/07-roadmap.md](design/07-roadmap.md) | 단계별 계획, 열린 질문 (단계 순서는 08 이 고쳤다) |
+| [design/08-decisions-2026-10-20.md](design/08-decisions-2026-10-20.md) | **제품 정의·이름·STT·가상 채팅·외부 AI·태그 결정. 01~07 보다 우선** |
 
 ## 라이선스
 
