@@ -393,3 +393,29 @@ def test_real_mpv_loop_and_heard(qapp, tmp_path):
         r.detach()
     finally:
         p.close_player()
+
+
+def test_heard_min_coverage_from_thresholds(qapp):
+    """D-10 6: recheck.heard_min_coverage 가 있으면 그 값, 없으면 코드 기본값(앞 값이 남지 않음)."""
+    p = FakePlayer()
+    r = ReviewPlayer(p)
+    assert r.min_coverage == rp.HEARD_MIN_COVERAGE == 0.9
+    r.set_thresholds({"recheck": {"pre_roll_sec": 10, "post_roll_sec": 30, "heard_min_coverage": 0.95}})
+    assert r.min_coverage == 0.95
+    r.reset()
+    r.set_window(0, 10_000)
+    p.run(0, 9_200)                                      # 0~9.2초 = 92%
+    p.pause()
+    assert r.pass_summaries()[0]["coverage_ratio"] == 0.92
+    assert r.heard_count() == 0 and r.pass_summaries()[0]["audio_heard"] is False
+    r.set_thresholds({"recheck": {"pre_roll_sec": 10}})  # 값 없는 판 → 기본값
+    assert r.min_coverage == 0.9 and r.heard_count() == 1
+    r.set_thresholds({"recheck": {"heard_min_coverage": 0.3}})   # 범위 밖 → 기본값
+    assert r.min_coverage == 0.9
+    r2 = ReviewPlayer(FakePlayer(), min_coverage=0.97)  # 생성자 인자
+    assert r2.min_coverage == 0.97
+
+
+def test_summary_heard_at_exact_threshold():
+    ps = rp.ReviewPass(0, [(0, 9_000)])
+    assert ps.summary(0, 10_000, 0.9)["audio_heard"] is True     # 0.9 ≥ 0.9 (core.rules.check_heard 와 같은 비교)

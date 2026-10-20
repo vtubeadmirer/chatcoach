@@ -426,3 +426,30 @@ def append_rev(calib_obj: dict | None, rev_json: dict) -> dict:
         raise ValueError(f"보정 판 {rev_json['rev']} 이 이미 있다")
     revs.append(rev_json)
     return {"active_rev": rev_json["rev"], "revs": revs}
+
+
+# ---------------------------------------------------------------------------
+# 영상이 덮는 VOD 범위 (08 D-10 3)
+# ---------------------------------------------------------------------------
+def media_coverage(media: dict | None, calibration: dict | None) -> list[tuple[int, int]] | None:
+    """project.json 의 media·calibration → 영상 파일이 덮는 VOD(채팅 시각) 범위 [(start_ms, end_ms)].
+
+    - 연결된 영상(media.current)이 없으면 [] — '영상이 덮는 곳 없음'. 표본 적격·구간 폼·반응 편집기가 모두 막는다.
+    - 영상 길이(current.probe.duration_ms)를 모르면 None — '모름'. 부르는 쪽이 검사하지 않거나(편집기·폼) 막는다(표본).
+    - 변환은 활성 보정 판 하나(작업대 TimeMap 과 같다): 파일 0 → VOD, 파일 끝 → VOD. 보정 판을 읽지 못하면 오프셋 0.
+    - VOD 0 앞은 자른다(채팅 시각은 0 이상). 다 0 앞이면 [].
+    영상 파일이 지금 디스크에 있는지는 보지 않는다(project.json 만으로 정해져야 매니페스트를 재현할 수 있다).
+    """
+    cur = (media or {}).get("current") if isinstance(media, dict) else None
+    if not isinstance(cur, dict):
+        return []
+    dur = (cur.get("probe") or {}).get("duration_ms") if isinstance(cur.get("probe"), dict) else None
+    if isinstance(dur, bool) or not isinstance(dur, int) or dur <= 0:
+        return None
+    try:
+        cal = calibration_from_json(calibration) if calibration else Calibration()
+    except (KeyError, TypeError, ValueError):
+        cal = Calibration()
+    a, b = video_to_chat_ms(0, cal), video_to_chat_ms(dur, cal)
+    lo, hi = max(0, min(a, b)), max(a, b)
+    return [(lo, hi)] if hi > lo else []

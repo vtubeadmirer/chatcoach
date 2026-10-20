@@ -36,7 +36,8 @@ LOG = logging.getLogger(__name__)
 
 SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)     # 02 7-3
 HEARD_MAX_SPEED = 2.0                         # session.open.tool.heard_max_speed 기본값 (03 6-4)
-HEARD_MIN_COVERAGE = _rules.HEARD_MIN_COVERAGE  # '소리로 들었다' 로 인정하는 덮은 비율 (core.rules 시작값, 확인 필요)
+HEARD_MIN_COVERAGE = _rules.HEARD_MIN_COVERAGE  # '소리로 들었다' 로 인정하는 덮은 비율의 코드 기본값. 기준서 값은
+                                                # set_thresholds(recheck.heard_min_coverage) 또는 생성자 min_coverage 로(D-10 6)
 PRE_ROLL_MS = 10_000                          # guide-config recheck.pre_roll_sec
 POST_ROLL_MS = 30_000                         # guide-config recheck.post_roll_sec
 MIN_VIEWS = 2                                 # guide-config recheck.min_views_direct_likely
@@ -127,7 +128,7 @@ class ReviewPass:
             "window_start_ms": int(start), "window_end_ms": int(end),
             "watched_ranges": [[a, b] for a, b in rs],
             "coverage_ratio": cov,
-            "audio_heard": cov >= min_coverage,
+            "audio_heard": cov >= min_coverage - 1e-9,     # core.rules.check_heard 와 같은 비교
             "max_speed": self.max_speed,
         }
 
@@ -223,11 +224,14 @@ class ReviewPlayer(QObject):
             self.min_views = int(min_views)
 
     def set_thresholds(self, values: dict | None) -> None:
-        """guide-config values(또는 project.json guides[].thresholds) 의 recheck 블록을 반영한다."""
+        """guide-config values(또는 project.json guides[].thresholds) 의 recheck 블록을 반영한다.
+
+        heard_min_coverage(선택 항목, D-10 6)는 없으면 코드 기본값으로 되돌린다(앞 프로젝트 값이 남지 않게).
+        """
         rc = (values or {}).get("recheck") if isinstance(values, dict) else None
         if not isinstance(rc, dict):
             return
-        kw = {}
+        kw = {"min_coverage": _rules.heard_min_coverage(values)}
         if _num(rc.get("pre_roll_sec")):
             kw["pre_roll_ms"] = int(round(rc["pre_roll_sec"] * 1000))
         if _num(rc.get("post_roll_sec")):
@@ -303,7 +307,7 @@ class ReviewPlayer(QObject):
         return out
 
     def heard_count(self, window: tuple[int, int] | None = None) -> int:
-        """범위를 '들었다' 고 인정된 회차 수."""
+        """범위를 '들었다' 고 인정된 회차 수(min_coverage 기준, core.rules.heard_count 와 같은 규칙)."""
         return sum(1 for s in self.pass_summaries(window) if s["audio_heard"])
 
     def current_coverage(self) -> float:

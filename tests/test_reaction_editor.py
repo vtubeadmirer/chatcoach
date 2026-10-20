@@ -618,3 +618,124 @@ def test_find_segment():
     assert find_segment(segs, 100)["entity_id"] == "b"
     assert find_segment(segs, 99)["entity_id"] == "a"
     assert find_segment(segs, 200) is None and find_segment(segs, None) is None
+
+
+# ---------------------------------------------------------------------------- D-10 3·6·7
+
+def _values(**recheck):
+    import copy as _copy
+    v = _copy.deepcopy(VALUES)
+    v["recheck"].update(recheck)
+    return v
+
+
+def test_review_window_in_media_pure():
+    from app.ui.forms.reaction_editor import normalize_coverage, review_window_in_media
+    assert review_window_in_media(100_000, None) is True                       # 모름 = 검사 안 함
+    assert review_window_in_media(100_000, [(90_000, 130_000)]) is True        # 경계 딱 맞음
+    assert review_window_in_media(100_000, [(90_001, 130_000)]) is False
+    assert review_window_in_media(100_000, [(0, 120_000)]) is False             # 뒤 30초가 모자람
+    assert review_window_in_media(100_000, [(0, 110_000), (110_000, 200_000)]) is True   # 맞닿은 두 조각
+    assert review_window_in_media(100_000, []) is False                        # 영상이 덮는 곳 없음
+    assert review_window_in_media(5_000, [(0, 40_000)]) is True                # 시작은 0 아래로 내리지 않음
+    assert review_window_in_media(100_000, [(95_000, 200_000)], pre_roll_ms=5_000) is True
+    assert normalize_coverage([{"start_ms": 0, "end_ms": 5}, ("x", 1), None, [3, 9]]) == [(0, 9)]
+
+
+def test_out_of_media_target_blocks_save_with_reason(env):
+    ed = env.ed
+    ed.load_context(media_coverage=[(95_000, 500_000)])                         # 채팅 100초 → 범위 90~130초
+    ed.open_for(cid(1), 112_000)
+    ed.set_grade("unconfirmed")
+    ed.set_confidence("certain")
+    ed.rationale.setText("00:01:52 합성")
+    ed._recompute()
+    assert ed.target_in_media() is False
+    assert any("영상 밖" in e for e in ed.validate().errors)
+    assert not ed.save_btn.isEnabled() and "영상 밖" in ed.msg.text()
+    assert ed.save() is None and env.saved == []
+    # 영상이 덮으면 저장된다
+    ed.load_context(media_coverage=[(0, 600_000)])
+    ed._recompute()
+    assert ed.target_in_media() and ed.save_btn.isEnabled()
+    assert ed.save() is not None
+
+
+def test_media_coverage_none_keeps_old_behavior(env):
+    ed = env.ed
+    ed.load_context(media_coverage=[])                  # 영상이 덮는 곳 없음
+    ed.load_context(thresholds=VALUES)                  # 넘기지 않으면 그대로
+    assert ed.media_coverage() == []
+    ed.load_context(media_coverage=None)                # None 이면 검사 안 함(지금처럼)
+    assert ed.media_coverage() is None
+    ed.open_for(cid(1), 112_000)
+    ed.set_grade("unconfirmed")
+    ed.set_confidence("certain")
+    ed.rationale.setText("00:01:52 합성")
+    assert not any("영상 밖" in e for e in ed.validate().errors)
+    assert ed.save() is not None
+
+
+def test_direct_without_continuation_warns_but_saves(env):
+    from app.ui.forms.reaction_editor import CONTINUATION_MISSING
+    ed = env.ed
+    _prepare_direct(ed)
+    ed._recompute()
+    v = ed.validate()
+    assert CONTINUATION_MISSING in [c for c, _t in v.warnings] and not v.errors
+    assert "이어짐을 비웠습니다" in ed.msg.text() and ed.save_btn.isEnabled()
+    res = ed.save()
+    assert res is not None and CONTINUATION_MISSING in res["warnings"]
+    ops = [o["body"] for o in env.ops if o["body"].get("detail", "").startswith(CONTINUATION_MISSING)]
+    assert len(ops) == 1 and ops[0]["code"] == "other"          # 스키마 목록 밖 코드는 'other' 로
+
+
+def test_related_only_has_no_continuation_warning(env):
+    from app.ui.forms.reaction_editor import CONTINUATION_MISSING
+    ed = env.ed
+    ed.open_for(cid(1), 112_000)
+    fill_candidate(ed, 110_000, 113_000, "합성 발화", same_topic=True)
+    ed.set_grade("related_only")
+    ed.set_confidence("certain")
+    ed.rationale.setText("00:01:52 합성")
+    assert CONTINUATION_MISSING not in [c for c, _t in ed.validate().warnings]
+
+
+def test_filled_continuation_has_no_warning(env):
+    from app.ui.forms.reaction_editor import CONTINUATION_MISSING
+    ed = env.ed
+    _prepare_direct(ed)
+    ed.continuation.set_type("none")
+    assert CONTINUATION_MISSING not in [c for c, _t in ed.validate().warnings]
+
+
+def test_heard_min_coverage_from_guide_reaches_editor_and_review(env):
+    ed = env.ed
+    assert ed.heard_min_coverage() == rules.HEARD_MIN_COVERAGE == 0.9     # v0.1 시작값 파일에는 없음 → 기본값
+    ed.load_context(thresholds=_values(heard_min_coverage=0.95))
+    assert ed.heard_min_coverage() == 0.95 and env.review.min_coverage == 0.95
+    _prepare_direct(ed)
+    ed.listen_again()
+    a, b = env.review.window()
+    env.player.run(a, a + int((b - a) * 0.92))                         # 92% 만 들음
+    env.review.stop_loop()
+    assert ed._heard_count() == 0                                       # 0.95 기준이면 안 들은 것
+    ed.load_context(heard_min_coverage=0.9)                             # 직접 넘긴 값이 이긴다
+    assert env.review.min_coverage == 0.9 and ed._heard_count() == 1
+    ed.load_context(thresholds=VALUES)                                  # 값 없는 판으로 바꾸면 기본값으로 돌아감
+    assert ed.heard_min_coverage() == 0.9 and env.review.min_coverage == 0.9
+
+
+def test_prior_checks_use_same_heard_threshold(env):
+    """불러온 영상 확인 기록도 같은 비율로 센다(내보내기와 같은 규칙)."""
+    ed = env.ed
+    ed.load_context(thresholds=_values(heard_min_coverage=0.95))
+    rx = {"id": "r1", "entity_id": "e1", "kind": "reaction",
+          "body": {"chat_id": cid(1), "result": "graded", "grade": "direct", "candidates": [],
+                   "reaction_time_ms": 112_000, "confidence": "certain", "rationale": "00:01:52 합성"}}
+    checks = [{"body": {"check": "first", "audio_heard": True, "coverage_ratio": 0.92}},
+              {"body": {"check": "recheck", "audio_heard": True, "coverage_ratio": 0.97}}]
+    ed.open_existing(rx, video_checks=checks)
+    assert ed._heard_count() == 1
+    ed.load_context(thresholds=VALUES)
+    assert ed._heard_count() == 2

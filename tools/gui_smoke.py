@@ -12,14 +12,19 @@
       재생 1.5초 → 타임라인 확대 → 채팅 필터 → (--store-copy: project.json·guide 만 담은 임시 사본에서 라벨 저장·되돌리기,
       보호 구역·채팅은 복사하지 않음) → (--labeling-flow: 아래) → 스크린샷 → 닫기(잠금 해제·project.json 그대로).
 
---labeling-flow (08 D-09, 02 7-3·7-4): 한글 임시 폴더에 project.json · guide/ · chat/messages.jsonl 만 복사한 사본을
-  메인 창으로 연다 → 세션 선택 화면(SessionDialog)에서 새 1차 세션 → store(QLockFile) →
-  ① 구간: B 로 경계 하나, 구간 2개(저스트채팅 · 게임) 저장, 구간 완료 표시 →
+--labeling-flow (08 D-09·D-10, 02 7-3·7-4): 한글 임시 폴더에 project.json · guide/ · chat/messages.jsonl 만 복사한 사본을
+  메인 창으로 연다 → 세션 선택 화면(SessionDialog)에서 새 1차 세션 → store(QLockFile) → 상태 칩이 메인 창 상태 줄 하나로 →
+  영상 연결(사본의 project.json 에만 저장: 영상이 덮는 VOD 범위는 project.json 으로 정해진다, D-10 3) →
+  ① 구간: B 로 경계 하나(영상 끝 2분 전), 구간 2개(저스트채팅 · 게임) 저장(바쁨 표시 켜짐·꺼짐), 구간 완료 표시 →
   ② 반응: 영상 범위 안 채팅 1건에 M → 편집기: 강한 증거(닉네임 호명)·직접 반응, 7-2 범위를 2배속으로 두 번 들음(재확인) → 저장,
      반응 완료 표시 →
-  ③ 표본: 저스트채팅 구간 표본 뽑기(sha256-tau-v1) · 재현 검증 → 1건 판정(반응 미확인) →
-  내보내기 zip(사본 밖 임시 폴더) → 사본을 다시 열어(이어 하기 세션) 현재 유효 라벨(resolve)이 같은지 → 사본을 지운다.
-  영상(--video)이 없으면 재확인을 건너뛰어 반응은 '미완료' 로 남는다(그래도 PASS 기준은 같다: 저장·표시가 맞는지).
+  ③ 표본: 저스트채팅 구간 표본 뽑기(sha256-tau-v2, 모든 표본의 확인 범위가 영상 안인지) · 재현 검증 → 1건 판정(반응 미확인) →
+     대기 표본 하나에 ② 반응을 만들고 ③ 으로 돌아와: 판정함으로 세는지, 반응 미확인 단추가 막히는지, M 이 그 ② 라벨을
+     고치는 편집기를 여는지, 고친 것이 같은 대상인지(D-10 4) →
+  내보내기 zip(사본 밖 임시 폴더, 채팅마다 반응 라벨 1건) → 사본을 다시 열어(이어 하기 세션) 현재 유효 라벨이 같은지 → 지운다.
+  영상(--video)이 꼭 있어야 한다: 영상이 없으면 영상 밖 규칙(D-10 3) 때문에 구간도 저장되지 않아 flow_media 에서 멈춘다.
+  --window-size 1366x768 이면 흐름 동안 창 크기를 맞추고, 구간 폼·편집기·큐가 잘리는지 숫자(fit=…)로 찍는다.
+  스크린샷(--screenshot 이름 뒤 _flow_segments · _flow_edit · _flow)을 남긴다.
 
 지키는 것
 - 원본 프로젝트에는 쓰지 않는다: 영상 연결은 persist=False, 세션 없이(보기 전용) 열어 라벨 기록도 열지 않는다.
@@ -56,6 +61,7 @@ def parse_args(argv=None):
     ap.add_argument("--store-copy", action="store_true", help="프로젝트를 임시 폴더로 복사해 라벨 저장·되돌리기도 시험")
     ap.add_argument("--labeling-flow", action="store_true",
                     help="사본(project.json·guide·messages.jsonl)에서 세션→구간→반응→표본→내보내기→다시 열기")
+    ap.add_argument("--window-size", help="--labeling-flow 동안 메인 창 크기 (예: 1366x768, 테두리 포함)")
     ap.add_argument("--data-dir", help="임시 데이터 폴더 (기본 %%TEMP%%\\chatcoach_smoke)")
     ap.add_argument("--timeout", type=float, default=60.0, help="단계 하나의 대기 상한(초)")
     return ap.parse_args(argv)
@@ -508,36 +514,60 @@ class Smoke:
                                  f"store_ro={wb.store.read_only if wb and wb.store else '-'} chats={wb.chat_data.count}")
             if not ok:
                 return False
-            if self.args.video and os.path.isfile(self.args.video) and wb.media_path is None:
-                wb.connect_media(self.args.video, persist=False)
-            if self.args.video:
-                self.wait(lambda: wb._file_duration > 0, 30)
+            # 상태 줄 하나(11 4-2 의 9): 작업대 칩이 메인 창 상태 줄로 옮겨졌는가
+            one_bar = (not wb.status_row.isVisible() and all(c.parent() is self.win.statusBar() for c in wb.status_chips))
+            busy_log: list = []
+            wb.busyChanged.connect(busy_log.append)
+            # ---- 1-2. 영상 연결: 사본의 project.json 에 저장한다(영상이 덮는 범위 D-10 3 은 project.json 으로 정해진다).
+            #      원본에는 쓰지 않는다(사본만). 영상이 없으면 영상 밖 규칙 때문에 구간도 저장되지 않는다 → 흐름을 멈춘다.
+            t1 = time.perf_counter()
+            cov_before = wb.media_coverage()
+            if self.args.video and os.path.isfile(self.args.video):
+                wb.connect_media(self.args.video, persist=True)
+                self.wait(lambda: wb._file_duration > 0 and "media_ref" not in wb._jobs, 60)
             fdur = wb._file_duration
-            # ---- 2. ① 구간 2개
+            cov = wb.media_coverage() or []
+            ok = bool(fdur) and len(cov) == 1 and one_bar
+            ok_all &= self.check("flow_media", ok, t1,
+                                 f"file_ms={fdur} coverage_before={cov_before} coverage_vod_ms={cov} "
+                                 f"one_status_bar={one_bar}")
+            if not ok:
+                return False
+            c_lo, c_hi = cov[0]
+            if self.args.window_size:
+                self._resize(self.args.window_size)
+            # ---- 2. ① 구간 2개 (경계는 영상 끝 2분 전: 두 구간 다 영상에 걸쳐야 저장된다, D-10 3)
             t1 = time.perf_counter()
             gate_before = wb.gates()[ph.REACTIONS].allowed
             ok = wb.set_mode(ph.SEGMENTS) and wb.segment_form is not None
             f = wb.segment_form
             vdur = max(1, wb._vod_duration)
-            cut = min(vdur - 60_000, wb.file_to_vod(fdur)) if fdur else vdur // 2
+            cut = min(vdur - 60_000, c_hi - 120_000)
             wb.seek_vod(cut)
             ok = ok and wb.add_boundary_here() and len(f.model.segments) == 2
             a, b = f.model.segments
             f.select_segment(a.id)
             ok = ok and f.set_category("just_chatting") and f.set_confidence("certain") and \
-                f.set_rationale(f"{_hms(0)} smoke 저스트채팅")
+                f.set_rationale(f"{_hms(c_lo + 5_000)} smoke 저스트채팅")
             f.select_segment(b.id)
             ok = ok and f.set_category("game") and f.set_confidence("probably") and \
                 f.set_rationale(f"{_hms(cut)} smoke 게임")
+            self._shot("_flow_segments")                     # 구간 폼 (저장 전)
+            fit_seg = self._fit(f)
             ts = time.perf_counter()
+            n_busy = len(busy_log)
             recs = f.save()
             seg_ms = (time.perf_counter() - ts) * 1000
+            busy_seen = len(busy_log) > n_busy and busy_log[n_busy] is True
+            self.pump(30)
+            busy_off = not wb.is_busy() and busy_log[-1:] == [False]
             tl_segs = len(getattr(wb.timeline, "_segments", []))
             ok = ok and recs is not None and len(recs) == 2 and wb.mark_phase_done() is not None
-            ok = ok and not gate_before and wb.gates()[ph.REACTIONS].allowed and tl_segs == 2
+            ok = ok and not gate_before and wb.gates()[ph.REACTIONS].allowed and tl_segs == 2 and busy_seen and busy_off
             ok_all &= self.check("flow_segments", ok, t1,
                                  f"saved={len(recs or [])} save_ms={seg_ms:.1f} timeline_segments={tl_segs} "
-                                 f"reactions_locked_before={not gate_before}")
+                                 f"reactions_locked_before={not gate_before} busy_shown={busy_seen} "
+                                 f"busy_cleared={busy_off} fit={fit_seg}")
             if not ok:
                 return False
             # ---- 3. ② 반응 1건 (강한 증거 · 7-2 재확인)
@@ -556,6 +586,8 @@ class Smoke:
             wb.mark_reaction()
             ed = wb.editor
             ok = wb.is_editing() and ed.target_chat_id() == chat_id and ed.grade() is None
+            self.pump(30)
+            self.fit_edit = self._fit(ed)
             ed.utt_start.setText(f"{(t_chat + 1_000) / 1000:.3f}")
             ed.utt_end.setText(f"{(t_chat + 3_000) / 1000:.3f}")
             ed._on_utt_times()
@@ -573,8 +605,7 @@ class Smoke:
                     ed.listen_again()
                     if k == 0 and self.args.screenshot and _inside(self.args.screenshot, SCREENS_DIR):
                         self.pump(1500)                  # 범위 반복 재생 중인 편집 상태 화면
-                        root_, ext = os.path.splitext(self.args.screenshot)
-                        self._grab(root_ + "_flow_edit" + (ext or ".png"))
+                        self._shot("_flow_edit")
                     got = self.wait(lambda: rv.current_coverage() >= 0.97, 90)
                     covs.append(rv.current_coverage())
                     passes += 1 if got else 0
@@ -593,7 +624,8 @@ class Smoke:
             ok_all &= self.check("flow_reaction", ok, t1,
                                  f"lines={len((res or {}).get('utterances') or []) + 1 + len((res or {}).get('video_checks') or [])} "
                                  f"passes={passes} coverage={'/'.join(f'{c:.2f}' for c in covs) or '-'} "
-                                 f"complete={complete} save_ms={r_ms:.1f} marker={marks[0][1] if marks else '-'}")
+                                 f"complete={complete} save_ms={r_ms:.1f} marker={marks[0][1] if marks else '-'} "
+                                 f"fit={getattr(self, 'fit_edit', '-')}")
             if not ok:
                 return False
             # ---- 4. ③ 표본 뽑기 · 재현 검증 · 1건 판정
@@ -606,25 +638,80 @@ class Smoke:
             tv = time.perf_counter()
             ver = q.run_verify()
             v_ms = (time.perf_counter() - tv) * 1000
+            from app.core import sampling as sp
+            ex = man.get("excluded") or {}
+            pre, post = (man.get("media") or {}).get("pre_roll_ms", 0), (man.get("media") or {}).get("post_roll_ms", 0)
+            # 영상 안 범위에서만 뽑혔는가: 모든 표본의 7-2 확인 범위가 영상 범위 안 (D-10 3)
+            inside = all(sp.window_in_coverage(it["t_ms"], sp.normalize_coverage(cov), pre, post)
+                         for it in man.get("items") or [])
+            had2 = sum(1 for it in man.get("items") or [] if q.has_stage2_label(it["chat_id"]))
             ok = ok and ver is not None and ver.ok and len(os.listdir(os.path.join(dst, "samples"))) == 1
+            ok = ok and man.get("algorithm") == sp.ALGORITHM_V2 and inside and bool(man.get("items"))
             ok_all &= self.check("flow_sample_draw", ok, t1,
-                                 f"eligible={(man.get('eligible') or {}).get('size')} items={len(man.get('items') or [])} "
-                                 f"census={man.get('census')} buffer_excluded={(man.get('excluded') or {}).get('buffer')} "
+                                 f"alg={man.get('algorithm')} eligible={(man.get('eligible') or {}).get('size')} "
+                                 f"items={len(man.get('items') or [])} census={man.get('census')} "
+                                 f"out_of_media={ex.get('out_of_media')} buffer_excluded={ex.get('buffer')} "
+                                 f"all_inside_media={inside} items_with_stage2={had2} "
                                  f"verify={'ok' if ver and ver.ok else 'fail'} verify_ms={v_ms:.0f}")
             if not ok:
                 return False
             t1 = time.perf_counter()
+            q.next_pending() if q.current_item() and q.has_stage2_label(q.current_item()["chat_id"]) else None
             q.set_confidence("certain")
             it = q.current_item()
             q.rationale.setText(f"{_hms(it['t_ms'] if it else 0)} smoke 답 없음")
             rec = q.judge_unconfirmed()
             pr = q.progress()
-            ok = rec is not None and pr is not None and pr.done == 1
+            done1 = pr.done if pr else -1
+            ok = rec is not None and pr is not None and done1 == 1 + had2
             ok_all &= self.check("flow_sample_judge", ok, t1,
                                  f"progress={pr.done if pr else '-'}/{pr.denominator_text() if pr else '-'}")
-            if self.args.screenshot and _inside(self.args.screenshot, SCREENS_DIR):
-                root_, ext = os.path.splitext(self.args.screenshot)
-                self._grab(root_ + "_flow" + (ext or ".png"))
+            # ---- 4-2. ③ 에서 ② 라벨 다시 열기 (D-10 4): 대기 표본 하나에 ② 반응을 만든 뒤 ③ 으로 돌아와 고친다
+            t1 = time.perf_counter()
+            ok = q.next_pending()
+            it2 = q.current_item()
+            x_chat, x_t = (it2["chat_id"], int(it2["t_ms"])) if it2 else (None, 0)
+            ok = ok and x_chat is not None and wb.set_mode(ph.REACTIONS)
+            wb.chat.select_chat(x_chat)
+            wb.seek_vod(x_t + 1_000)
+            wb.mark_reaction()
+            ed = wb.editor
+            ok = ok and wb.is_editing() and ed.target_chat_id() == x_chat
+            ed.utt_start.setText(f"{(x_t + 1_000) / 1000:.3f}")
+            ed.utt_end.setText(f"{(x_t + 3_000) / 1000:.3f}")
+            ed._on_utt_times()
+            ed.heard.setText("smoke")
+            ed._on_heard_edited("smoke")
+            ed.evidence.boxes["nickname_called"].setChecked(True)
+            ed.set_grade("direct")
+            ed.set_confidence("certain")
+            ed.rationale.setText(f"{_hms(x_t + 1_000)} smoke 호명 2")
+            res2 = ed.save()
+            x_eid = (res2 or {}).get("reaction", {}).get("entity_id") if res2 else None
+            ok = ok and res2 is not None and wb.set_mode(ph.SAMPLES)
+            q = wb.queue
+            judged2 = q.state_of(x_chat) == sp.JUDGED and q.has_stage2_label(x_chat)
+            pr2 = q.progress()
+            q.go(next((i for i, x in enumerate(q._items) if x["chat_id"] == x_chat), 0))
+            n_rec = len(wb.store.records())
+            blocked = q.judge_undeterminable() is None and len(wb.store.records()) == n_rec
+            wb.mark_reaction()                                # M → 그 ② 라벨을 고치는 편집기
+            reopened = wb.is_editing() and (ed._existing or {}).get("entity_id") == x_eid and \
+                ed._entry == "from_utterance"
+            ed.set_confidence("probably")
+            res3 = ed.save()
+            same_entity = bool(res3) and res3["reaction"]["entity_id"] == x_eid and \
+                res3["reaction"]["body"]["entry"] == "from_utterance"
+            pr3 = q.progress()
+            ok = ok and judged2 and blocked and reopened and same_entity and pr2 is not None and \
+                pr2.done == done1 + 1 and pr3.done == pr2.done
+            ok_all &= self.check("flow_sample_stage2", ok, t1,
+                                 f"judged_by_stage2={judged2} quick_save_blocked={blocked} reopened_existing={reopened} "
+                                 f"same_entity={same_entity} progress={pr2.done if pr2 else '-'}->{pr3.done if pr3 else '-'}")
+            self.pump(50)
+            self._shot("_flow")                                # 큐 화면
+            fit_q = self._fit(wb.page_samples)
+            self.check("flow_layout", True, t1, f"queue_fit={fit_q} window={self.win.width()}x{self.win.height()}")
             # ---- 5. 내보내기
             t1 = time.perf_counter()
             os.makedirs(os.path.dirname(out_zip), exist_ok=True)
@@ -639,8 +726,11 @@ class Smoke:
             got = sorted((r["label_kind"], r["entity_id"], r["label_id"]) for r in rows
                          if r["label_kind"] in ("segment", "reaction"))
             bad_rows = [w for w in er.warnings if "export-row" in w]
+            # 반응 3 = ② 1건 + ③ 판정 1건 + ③ 에서 고친 ② 1건 (같은 채팅에 라벨 둘이 생기지 않았다)
             ok = {"labels.jsonl", "segments.csv", "reactions.csv", "manifest.json"} <= names and got == want and \
-                not bad_rows and er.by_kind.get("segment") == 2 and er.by_kind.get("reaction") == 2
+                not bad_rows and er.by_kind.get("segment") == 2 and er.by_kind.get("reaction") == 3
+            chats = [r.get("chat_id") for r in rows if r.get("label_kind") == "reaction"]
+            ok = ok and len(chats) == len(set(chats))
             ok_all &= self.check("flow_export", ok, t1,
                                  f"rows={len(rows)} by_kind={dict((k, v) for k, v in er.by_kind.items() if v)} "
                                  f"zip_bytes={os.path.getsize(out_zip)} rows_match_effective={got == want}")
@@ -680,6 +770,61 @@ class Smoke:
             else:
                 self.check("flow_cleanup", True, time.perf_counter(),
                            f"사본 지움 (흐름 전체 {time.perf_counter() - t0:.1f}초)")
+
+    def _resize(self, spec: str) -> None:
+        """--window-size '1366x768': 메인 창 바깥 크기(테두리 포함)를 그 크기로 맞춘다(노트북 화면 확인, 11 4-2 의 2)."""
+        w, h = (int(x) for x in spec.lower().split("x", 1))
+        self.win.showNormal()
+        self.pump(50)
+        fw = max(0, self.win.frameGeometry().width() - self.win.width())
+        fh = max(0, self.win.frameGeometry().height() - self.win.height())
+        self.win.resize(max(400, w - fw), max(300, h - fh))
+        self.win.move(0, 0)
+        self.pump(200)
+
+    def _shot(self, suffix: str) -> None:
+        """--screenshot 이름 뒤에 suffix 를 붙여 찍는다(SCREENS_DIR 안일 때만)."""
+        p = self.args.screenshot
+        if p and _inside(p, SCREENS_DIR):
+            root_, ext = os.path.splitext(p)
+            self._grab(root_ + suffix + (ext or ".png"))
+
+    def _fit(self, w) -> str:
+        """오른쪽 칸 부품이 잘리는지 숫자로: 크기, 세로 스크롤 필요 여부, 글자가 잘린 단추·라벨 수(폭이 sizeHint 보다 좁음),
+        부품 오른쪽 밖으로 나간 자식 수. 글자는 찍지 않는다."""
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QAbstractButton, QLabel, QLineEdit, QScrollArea
+        self.pump(30)
+        vs = hs = False
+        for sa in ([w] if isinstance(w, QScrollArea) else []) + w.findChildren(QScrollArea):
+            if sa.isVisibleTo(w) or sa is w:
+                vs = vs or sa.verticalScrollBar().maximum() > 0
+                hs = hs or sa.horizontalScrollBar().maximum() > 0     # 가로 스크롤 = 폭이 모자라 오른쪽이 가려짐
+        clipped = outside = 0
+        for c in w.findChildren(QAbstractButton) + w.findChildren(QLabel) + w.findChildren(QLineEdit):
+            if not c.isVisibleTo(w) or c.width() <= 0:
+                continue
+            if isinstance(c, QLabel) and (c.wordWrap() or not c.text()):
+                pass
+            elif isinstance(c, QAbstractButton) and c.text() and c.sizeHint().width() > c.width() + 1:
+                clipped += 1
+            elif isinstance(c, QLabel) and c.sizeHint().width() > c.width() + 1:
+                clipped += 1
+            # 스크롤 영역 안 자식은 그 보이는 칸(viewport) 기준
+            sa = next((p for p in self._ancestors(c, w) if isinstance(p, QScrollArea)), None)
+            box = sa.viewport() if sa is not None else w
+            right = c.mapTo(box, QPoint(c.width(), 0)).x()
+            if right > box.width() + 1:
+                outside += 1
+        return (f"{w.width()}x{w.height()}/vscroll={'y' if vs else 'n'}/hscroll={'y' if hs else 'n'}"
+                f"/clipped={clipped}/outside={outside}")
+
+    @staticmethod
+    def _ancestors(c, top):
+        p = c.parentWidget()
+        while p is not None and p is not top:
+            yield p
+            p = p.parentWidget()
 
     def _grab(self, p: str) -> tuple[bool, int, str]:
         os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)

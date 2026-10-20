@@ -145,6 +145,8 @@ def test_values_match_schema_descriptions():
     for sec, sec_spec in schema["$defs"]["values"]["properties"].items():
         for key, spec in sec_spec["properties"].items():
             desc = spec.get("description", "")
+            if key not in vals[sec] and key not in sec_spec.get("required", ()):
+                continue          # v0.1 파일에 없는 선택 항목(예: recheck.heard_min_coverage, D-10 6 — 코드 기본값)
             got = vals[sec][key]
             m = (re.search(r"v0\.1 시작값 ([0-9]+(?:\.[0-9]+)?)", desc)
                  or re.search(r"시작값 ([0-9]+(?:\.[0-9]+)?)\(안내서에 없는 새 값\)", desc))

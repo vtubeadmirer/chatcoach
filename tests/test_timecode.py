@@ -354,3 +354,28 @@ def test_tool_saves_real_project(tmp_path):
 @pytest.mark.parametrize("text", ["²:00", "1:²0", "١:00", "²", "1h²m", "1:0²"])
 def test_parse_time_non_ascii_digits_return_none(text):
     assert tc.parse_time(text) is None      # 예전에는 '²:00' 이 ValueError
+
+
+# ── 영상이 덮는 VOD 범위 (08 D-10 3) ─────────────────────────────────────
+def _cov_cal(offset_ms):
+    c = tc.Calibration(offset_ms=offset_ms, rev=1, status="verified", created_at="2026-10-21T09:00:00+09:00",
+                       created_by="L01")
+    return tc.append_rev(tc.initial_calibration_json("2026-10-21T09:00:00+09:00", "L01"), tc.calibration_to_json(c))
+
+
+def _media(duration_ms):
+    return {"media_rev": 1, "current": {"probe": {"duration_ms": duration_ms, "vfr": False}}, "history": []}
+
+
+def test_media_coverage():
+    # 영상 파일 = VOD + offset → 파일 0초가 VOD 20분이면 offset = −20분
+    assert tc.media_coverage(_media(1_153_000), _cov_cal(-1_238_000)) == [(1_238_000, 2_391_000)]
+    assert tc.media_coverage(_media(60_000), _cov_cal(0)) == [(0, 60_000)]
+    assert tc.media_coverage(_media(60_000), _cov_cal(10_000)) == [(0, 50_000)]     # VOD 0 앞은 자른다
+    assert tc.media_coverage(_media(60_000), _cov_cal(90_000)) == []                # 다 VOD 0 앞
+    assert tc.media_coverage(_media(60_000), None) == [(0, 60_000)]             # 보정 없음 = 오프셋 0
+    assert tc.media_coverage({"media_rev": 0, "current": None, "history": []}, _cov_cal(0)) == []   # 영상 없음
+    assert tc.media_coverage(None, None) == []
+    assert tc.media_coverage(_media(0), _cov_cal(0)) is None                        # 길이 모름
+    assert tc.media_coverage({"current": {"probe": {}}}, None) is None
+    assert tc.media_coverage(_media(60_000), {"active_rev": 9, "revs": []}) == [(0, 60_000)]   # 못 읽으면 오프셋 0

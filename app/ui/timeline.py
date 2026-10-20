@@ -26,6 +26,7 @@ from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QHBoxLayout, QScrollBar, QSizePolicy, QSlider, QToolButton, QToolTip, QVBoxLayout, QWidget
 
+from app.core.segments import record_buffers
 from app.core.timecode import fmt_time
 from app.i18n import tr
 
@@ -104,8 +105,8 @@ def fmt_timecode(ms: float, fps: float) -> str:
 
 
 def buffer_ranges(boundaries: Sequence[int], duration_ms: int, buffer_ms: int) -> list[tuple[int, int]]:
-    """안쪽 경계마다 [b - buffer, b + buffer) 를 영상 범위로 자르고, 겹치거나 맞닿으면 합친다.
-    app/core/segments.py SegmentTimeline.buffer_ranges 와 같은 규칙(그쪽은 모델 객체가 있어야 해서 여기서는 dict 목록용으로)."""
+    """안쪽 경계마다 [b - buffer, b + buffer) 를 영상 범위로 자르고, 겹치거나 맞닿으면 합친다(모든 경계 = sha256-tau-v1 규칙).
+    타임라인 음영은 이제 분류가 바뀌는 경계만 쓴다(_segment_buffers). 이 함수는 경계 목록만 있을 때를 위해 남긴다."""
     out: list[tuple[int, int]] = []
     if buffer_ms <= 0:
         return out
@@ -403,7 +404,7 @@ class Timeline(QWidget):
         self._position = min(self._position, ms)
         if changed:
             self.view_start, self.view_len = 0.0, float(ms)
-            self._buffers = buffer_ranges(self._boundaries(), ms, self._buffer_ms)
+            self._buffers = self._segment_buffers()
             self._data_changed()
             self._sync_bar()
             self.viewChanged.emit(0, ms)
@@ -434,8 +435,16 @@ class Timeline(QWidget):
         self._segments = segs
         if buffer_ms is not None:
             self._buffer_ms = max(0, int(buffer_ms))
-        self._buffers = buffer_ranges(self._boundaries(), self._duration, self._buffer_ms)
+        self._buffers = self._segment_buffers()
         self._data_changed()
+
+    def _segment_buffers(self) -> list[tuple[int, int]]:
+        """완충 음영: 분류가 바뀌는 경계에만(08 D-10 1, core.segments.record_buffers 의 기본 규칙 — 표본 뽑기와 같다).
+        빈틈·안 매긴 구간(category None)과 맞닿은 경계는 전환으로 본다. 영상 처음·끝은 경계가 아니다."""
+        if self._duration <= 0:
+            return []
+        return record_buffers([{"start_ms": s, "end_ms": e, "category": c} for s, e, c in self._segments],
+                              self._duration, self._buffer_ms)
 
     def _boundaries(self) -> list[int]:
         out = set()

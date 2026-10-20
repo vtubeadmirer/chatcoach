@@ -534,3 +534,16 @@ def test_cli(proj, tmp_path, capsys):
     assert TEXT_SECRET in read_zip(str(tmp_path / "t.zip"))[export.JSONL_NAME].decode("utf-8")
     assert mod.main(["--project", proj["root"], "--out", os.path.join(ROOT, "x.zip")]) == 2
     assert not os.path.exists(os.path.join(ROOT, "x.zip"))
+
+
+# ------------------------------------------------------------------------------------------------ D-10 6·7
+
+def test_manifest_counts_linked_reactions_without_continuation(proj, tmp_path):
+    """직접·높음 반응에 이어짐이 없으면 막지 않고 매니페스트 warnings 에 건수를 남긴다(D-10 7)."""
+    res, files = do_export(proj, tmp_path)
+    w = [x for x in res.manifest["warnings"] if "이어짐을 비운 직접·높음 반응" in x]
+    assert w == ["이어짐을 비운 직접·높음 반응 1건(이어짐은 선택 항목, D-10 7)."]   # 세션 B 의 '높음' 1건
+    assert sum(r["label_kind"] == "reaction" for r in rows_of(files)) == 2      # 행은 그대로 나감
+    res2, _ = do_export(proj, tmp_path, name="a.zip", options=export.ExportOptions(session_ids=(SID_A,)))
+    assert not any("이어짐을 비운" in x for x in res2.manifest["warnings"])     # A 는 이어짐이 있다
+

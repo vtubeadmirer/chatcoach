@@ -477,6 +477,62 @@ def test_in_buffer_matches_ranges():
     assert not make().in_buffer(5)
 
 
+def test_buffer_rule_category_change_timeline():
+    """08 D-10 1: 분류가 바뀌는 경계에만 완충. 안 매긴 구간·판단 불가끼리는 전환으로 본다."""
+    tl = make()
+    tl.add_boundaries([2 * MIN, 4 * MIN, 6 * MIN, 8 * MIN])
+    for i, cat in enumerate(["just_chatting", "just_chatting", "game", "undeterminable"]):
+        label(tl, i, cat)
+    label(tl, 4, "undeterminable")
+    # 경계: 2분(JC|JC 같음) 4분(JC|게임) 6분(게임|판단 불가) 8분(판단 불가|판단 불가 → 전환으로 봄)
+    assert tl.buffer_boundaries() == [4 * MIN, 6 * MIN, 8 * MIN]
+    assert tl.buffer_boundaries(sg.BUFFER_RULE_ALL) == [2 * MIN, 4 * MIN, 6 * MIN, 8 * MIN]
+    assert [b.boundaries for b in tl.buffer_ranges(10_000)] == [(4 * MIN,), (6 * MIN,), (8 * MIN,)]
+    assert len(tl.buffer_ranges(10_000, sg.BUFFER_RULE_ALL)) == 4
+    assert not tl.in_buffer(2 * MIN)
+    assert tl.in_buffer(2 * MIN, rule=sg.BUFFER_RULE_ALL)
+    assert tl.in_buffer(4 * MIN - 10_000)
+    # 안 매긴 구간과 맞닿은 경계는 무엇으로 바뀌는지 모르니 완충
+    tl2 = make()
+    tl2.add_boundaries([2 * MIN, 4 * MIN])
+    label(tl2, 0, "just_chatting")
+    assert tl2.buffer_boundaries() == [2 * MIN, 4 * MIN]
+    with pytest.raises(SegmentError):
+        tl.buffer_ranges(10_000, "every")
+
+
+def test_is_transition():
+    assert not sg.is_transition("game", "game")
+    assert sg.is_transition("game", "singing")
+    assert sg.is_transition(None, "game") and sg.is_transition("game", None) and sg.is_transition(None, None)
+    assert sg.is_transition("undeterminable", "undeterminable")
+
+
+def test_record_buffers_rules():
+    def r(s, e, cat="just_chatting"):
+        return rec(uid(s + 1), s, e, cat)
+    D = 10 * MIN
+    segs = [r(0, 2 * MIN), r(2 * MIN, 4 * MIN), r(4 * MIN, 6 * MIN, "game"),
+            # 6분~7분 빈틈(안 매긴 시간)
+            r(7 * MIN, 9 * MIN, "game"), r(9 * MIN, D, "game")]
+    allb = sg.record_buffers(segs, D, 10_000, rule=sg.BUFFER_RULE_ALL)
+    assert allb == [(2 * MIN - 10_000, 2 * MIN + 10_000), (4 * MIN - 10_000, 4 * MIN + 10_000),
+                    (6 * MIN - 10_000, 6 * MIN + 10_000), (7 * MIN - 10_000, 7 * MIN + 10_000),
+                    (9 * MIN - 10_000, 9 * MIN + 10_000)]
+    chg = sg.record_buffers(segs, D, 10_000)                   # 기본 = category_change
+    assert chg == [(4 * MIN - 10_000, 4 * MIN + 10_000),        # JC → 게임
+                   (6 * MIN - 10_000, 6 * MIN + 10_000),        # 게임 → 빈틈
+                   (7 * MIN - 10_000, 7 * MIN + 10_000)]        # 빈틈 → 게임
+    # 분류 칸이 없는 dict({start_ms, end_ms})는 예전처럼 모든 경계
+    plain = [{"start_ms": 0, "end_ms": 2 * MIN}, {"start_ms": 2 * MIN, "end_ms": D}]
+    assert sg.record_buffers(plain, D, 10_000) == [(2 * MIN - 10_000, 2 * MIN + 10_000)]
+    # 같은 경계에 구간이 여럿 걸리면(겹침 이상) 전환으로 본다
+    dup = [r(0, 2 * MIN), r(2 * MIN, D), rec(uid(99), 2 * MIN, 3 * MIN)]
+    assert sg.record_buffers(dup, D, 10_000) == [(2 * MIN - 10_000, 2 * MIN + 10_000), (3 * MIN - 10_000, 3 * MIN + 10_000)]
+    with pytest.raises(SegmentError):
+        sg.record_buffers(segs, D, 10_000, rule="v3")
+
+
 # ---------------------------------------------------------------- undo / redo
 def test_undo_redo_roundtrip():
     tl = make()

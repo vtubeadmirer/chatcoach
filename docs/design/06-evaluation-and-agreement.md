@@ -71,7 +71,7 @@
 | seed_material | `"{sample_seed}\|{draw_no}"` | 매니페스트에 그대로 적는다. 매니페스트 하나만 받아도 재현할 수 있다 |
 | 순서 키 | `key = sha256( UTF-8(seed_material + "\|" + chat_id) )` 의 소문자 hex. 곧 `sha256("{sample_seed}\|{draw_no}\|{chat_id}")` | Python 버전·언어와 무관하다. AI 엔진 쪽에서도 같은 표본을 만들 수 있다 |
 | 순서 | key 오름차순 (hex 문자열 비교와 숫자 비교가 같다) | |
-| 알고리즘 이름 | `sha256-tau-v1` | 매니페스트 `algorithm` 에 기록한다. 규칙을 바꾸면 이름을 올린다. 기준서 시작값이 아니다 (10장) |
+| 알고리즘 이름 | `sha256-tau-v2` (지금 기본). `sha256-tau-v1` 은 이미 쓴 매니페스트의 재현 검증에만 쓴다 | 매니페스트 `algorithm` 에 기록한다. 규칙을 바꾸면 이름을 올린다. 기준서 시작값이 아니다 (10장). v2 에서 바뀐 것은 둘이다([08](08-decisions-2026-10-20.md) D-10 1·3): 경계 완충을 분류가 바뀌는 경계에만 두고, 영상 밖 채팅을 적격에서 뺀다(2-2). 순서 키·τ·불감소는 v1 과 같다. 같은 계열(원 구간·draw_no) 안에서는 알고리즘을 바꾸지 않는다 |
 
 - `random.Random(seed).sample` 은 쓰지 않는다. 결과가 CPython 구현에 묶이기 때문이다.
 - seed 는 비밀이 아니다. 무작위의 목적은 숨기는 것이 아니라 라벨러가 고르지 않게 하는 것이다.
@@ -88,14 +88,20 @@
 | 0 | 이 저스트채팅 구간 밖 | 활동 구간 라벨 | 이 구간의 대상 아님 | — | 1장 5, 2장 |
 | 1 | 후원·구독·시스템 메시지 | API messageTypeCode | 줄 세우기 전에 뺀다 | excluded_non_text | 2장, 6장 F |
 | 2 | 채팅 시각이 없거나 범위 밖 | 수집 검사 | 줄 세우기 전에 뺀다 | excluded_invalid_time | — |
-| 3 | 경계 완충 안 | 구간 경계 ± boundary_buffer_sec | 적격에서 제외한다. 순서 키는 매기지만 τ 계산·표본 수·판정 큐에 넣지 않는다 | excluded_buffer | 3장 |
+| 2-1 | 영상 밖 (v2) | 영상이 덮는 VOD 범위(media coverage, 보정 offset 반영) | 7-2 확인 범위(채팅 −10초 ~ +30초, recheck.pre_roll_sec·post_roll_sec)가 영상 범위 하나 안에 다 들지 않으면 적격에서 제외한다. 완충에도 걸리면 이쪽으로 센다 | excluded_out_of_media | 7-2 |
+| 3 | 경계 완충 안 | 분류가 바뀌는 구간 경계 ± boundary_buffer_sec | 적격에서 제외한다. 순서 키는 매기지만 τ 계산·표본 수·판정 큐에 넣지 않는다 | excluded_buffer | 3장 |
 | — | 여기까지 남은 것이 적격 채팅 | | | | |
 | 4 | 상태가 정상이 아님 (클린봇 가림 등) | API messageStatusType | 판정한다. 표시하고 따로 센다 (확인 필요) | flag_status | — |
 | 5 | 출처 가상 | 출처 판정 (v1) | 판정한다. 실제 시청자 통계에서 뺀다 | origin_virtual | 검토 의견 1 |
 | 6 | 출처 판별 불가 | 출처 판정 (v1) | 판정한다. 실제 시청자 통계에서 기본 제외 | origin_undeterminable | 검토 의견 1 |
 | 7 | 출처 미판정 | MVP 에는 출처 판정이 없다 | 보고서 머리에 '출처 미판정' 을 표시하고 집계 | origin_unknown | — |
 
-- 경계 완충은 '구간 분류가 바뀌는 경계마다 양쪽 각 10초' (시작값) 로 계산한다. 방송 시작과 끝은 경계가 아니다. 안내서 3장의 '앞뒤 10초' 를 이렇게 읽는다 ([01](01-analysis-and-ideas.md) G3, [v0.2 초안](../labeling-guide/v0.2-draft.md)).
+- 경계 완충은 '구간 분류가 바뀌는 경계마다 양쪽 각 10초' (시작값) 로 계산한다. 방송 시작과 끝은 경계가 아니다. 안내서 3장의 '앞뒤 10초' 를 이렇게 읽는다 ([01](01-analysis-and-ideas.md) G3, [v0.2 초안](../labeling-guide/v0.2-draft.md)). `sha256-tau-v2` 의 세부 규칙(`core.segments` 의 `category_change`):
+  - 같은 분류끼리 맞닿은 경계는 전환이 아니라 완충이 없다([03](03-data-model.md) 4-3 규칙 4).
+  - 한쪽이 빈틈('아직 안 매긴 시간')이거나 분류를 안 매긴 구간이면 무엇으로 바뀌는지 모르므로 전환으로 보고 완충을 둔다.
+  - '판단 불가' 끼리 맞닿은 경계도 같은 활동이라는 근거가 없어 전환으로 본다.
+  - `sha256-tau-v1` 은 같은 분류끼리의 경계를 포함해 모든 안쪽 경계에 완충을 두었다(`all_boundaries`). v1 매니페스트는 이 규칙으로 계속 재현 검증한다.
+- 영상 밖(2-1번, v2): 소리를 들을 수 없는 자리는 라벨을 매길 수 없으므로 처음부터 모집단의 적격을 '영상이 있는 범위' 로 정한다([08](08-decisions-2026-10-20.md) D-10 3). 표본을 뽑을 때는 반응 후보 발화가 없으니 확인 범위는 채팅 시각 기준 [max(0, t − 10초), t + 30초] 다. 영상 범위는 부르는 쪽이 보정 offset 을 반영한 VOD ms 로 넘기고, 매니페스트 `media` 에 쓴 범위·확인 범위 값을 남겨 재현 검증이 그 값으로 다시 계산한다. 영상 범위를 넘기지 않으면 검사하지 않고 `media.coverage = null`('coverage 없음')로 남긴다(`out_of_media` = 0).
 - 완충을 '뽑은 뒤 표시만' 하지 않고 적격에서 빼는 이유 (옛 [03](03-data-model.md) 15-2·[05](05-security.md) S-35 의 방식을 폐기한 이유. 지금은 03·05 도 이 규칙을 따른다):
 
 | | 옛 방식 (100개 안에 넣고 표시, 폐기) | 이 문서 (적격에서 제외) |
@@ -195,7 +201,7 @@ flowchart TD
   "source_segment": {"session_id": "L01-P-20261021-a1b2", "entity_id": "7f3c2a1b-…", "version_id": "…", "start_ms": 3600000, "end_ms": 9180000},
   "guide_version": "0.1",
   "thresholds_sha256": "…",
-  "algorithm": "sha256-tau-v1",
+  "algorithm": "sha256-tau-v2",
   "seed_material": "9b1f…|1",
   "draw_no": 1,
   "sample_rev": 1,
@@ -203,7 +209,9 @@ flowchart TD
   "reason": "initial",
   "changes": null,
   "population": {"kinds": ["text"], "statuses": null, "range_start_ms": 3600000, "range_end_ms": 9180000, "size": 1855, "chat_ids_sha256": "…", "messages_sha256": "…"},
-  "excluded": {"non_text": 45, "invalid_time": 0, "buffer": 60},
+  "excluded": {"non_text": 45, "invalid_time": 0, "buffer": 60, "out_of_media": 0},
+  "media": {"coverage": [[3500000, 9300000]], "pre_roll_ms": 10000, "post_roll_ms": 30000},
+  "boundary_buffers": [[9170000, 9180000]],
   "eligible": {"size": 1795, "chat_ids_sha256": "…"},
   "requested_size": 100,
   "census": false,
@@ -223,7 +231,9 @@ flowchart TD
 | 필드 | 뜻 |
 |---|---|
 | population | 구간 범위 안의 kind=text 채팅 (2-2 의 1·2번을 뺀 것) |
-| excluded | 2-2 의 1~3번에서 뺀 건수 |
+| excluded | 2-2 의 1~3번에서 뺀 건수와 (v2) 영상 밖 `out_of_media` |
+| media | (v2) 영상 밖 판정에 쓴 영상 범위 `coverage`(VOD ms 목록, null = coverage 없음)와 확인 범위 `pre_roll_ms`·`post_roll_ms`. v1 매니페스트에는 `media`·`out_of_media` 가 없다 |
+| boundary_buffers | (v2) 뽑을 때 쓴 경계 완충 [start, end) 중 원 구간 범위에 걸치는 것을 그 범위로 자르고 합친 목록. v2 완충은 이웃 구간의 분류에 달려 있어 매니페스트에 남겨야 하나만 받아도 재현된다. 재현 검증은 이 값으로 다시 계산한다. v1 에는 없다(v1 완충은 원 구간 경계만으로 다시 만든다) |
 | eligible | 적격 채팅. `chat_ids_sha256` 는 적격 채팅의 chat_id 를 정렬해 줄바꿈으로 이은 UTF-8 바이트의 sha256 이다 |
 | tau_key · tau_real_key | 2-3 의 τ, 2-4 의 τ_real (v1, 없으면 null) |
 | items[].order · rank | order 는 화면 제시 순서(2-8), rank 는 적격 채팅 중 key 순위 |
@@ -614,7 +624,7 @@ p_e^w = Σ_ij w_ij · (n_i· · n_·j) / N²
 | 9 | calibration_unverified | 라벨을 매길 때의 보정 판이 verified 가 아니거나, 그 뒤 보정이 크게 바뀌어 '보정 변경 후 미확인' 인 라벨 (03 4-2). `skipped` 판을 참고 점수에 넣을지는 확인 필요 | 제외 | 제외 | 행 |
 | 10 | view_exposed | 그 라벨을 만든 세션에 블라인드 대상 자료를 연 `view.exposed` 기록이 있음 (3-4). 7-1 의 봉인 조기 해제 뒤 만든 세션도 여기에 든다 | 제외 | 제외 | 행 |
 | 11 | audio_not_heard | 확인 범위를 소리로 듣지 않고 저장함 (경고 `audio_not_heard` 를 넘김, 안내서 7-2) | 제외 | 제외 | 행 |
-| 12 | recheck_incomplete | 직접·높음인데 처음 확인과 재확인 기록이 recheck.min_views_direct_likely(2회) 에 못 미침 (안내서 7-2) | 제외 | 제외 | 행 |
+| 12 | recheck_incomplete | 직접·높음인데 '들었다고 인정된 회차 수' 가 recheck.min_views_direct_likely(2회) 에 못 미침. 한 회차는 소리를 켜고 확인 범위를 `heard_min_coverage`(0.9) 이상 덮어야 인정된다. 확인 기록 줄 수로 세지 않는다 (안내서 7-2, D-10 10) | 제외 | 제외 | 행 |
 | 13 | confidence_undeterminable | 확신도 '판단 불가' (안내서 1장 2) | 제외 | 제외 | 행 |
 | 14 | grade_unclear | 등급 '불명확' (D8) | 제외 | 제외 | 행 |
 | 15 | adjudicated_exclude | 조정에서 '평가 제외'(decision = exclude_from_eval) 로 정함 | 제외 | 제외 | 행 |

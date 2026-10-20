@@ -141,7 +141,8 @@
           "properties": {
             "pre_roll_sec": {"type": "number", "minimum": 0, "maximum": 300, "description": "확인 범위 시작: 채팅이 화면에 뜨기 이 시간 전부터. v0.1 시작값 10."},
             "post_roll_sec": {"type": "number", "minimum": 0, "maximum": 600, "description": "확인 범위 끝: 반응 후보 발화가 끝난 이 시간 뒤까지. v0.1 시작값 30."},
-            "min_views_direct_likely": {"type": "integer", "minimum": 1, "maximum": 5, "description": "직접 반응·연결 가능성 높음 라벨이 완료되려면 필요한 영상 확인 횟수. v0.1 시작값 2."}
+            "min_views_direct_likely": {"type": "integer", "minimum": 1, "maximum": 5, "description": "직접 반응·연결 가능성 높음 라벨이 완료되려면 필요한 영상 확인 횟수. v0.1 시작값 2."},
+            "heard_min_coverage": {"type": "number", "minimum": 0.5, "maximum": 1, "description": "선택 항목(D-10 6). 듣기 회차 하나를 '소리로 들었다' 고 인정하는 확인 범위 덮은 비율(0.5~1.0). v0.1 시작값 파일에는 없다(이미 프로젝트들이 해시로 묶은 판이라 고치지 않음). 없으면 코드 기본값 0.9(app.core.rules.HEARD_MIN_COVERAGE)를 쓴다."}
           }
         },
         "relabel": {

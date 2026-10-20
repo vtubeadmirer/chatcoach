@@ -9,14 +9,24 @@
 - ① 구간 (W1): 오른쪽은 구간 폼(app.ui.forms.SegmentForm). `B` = 지금 위치에 경계. 저장은 폼의 Ctrl+Enter.
   폼이 고친(저장 전) 구간표가 곧바로 타임라인에 그려진다(모델 층). Ctrl+Z 는 폼의 모델 층 실행 취소다(02 7-6).
 - ② 반응 (W2): 오른쪽은 채팅 표. `M` 이나 채팅 더블클릭으로 반응 편집기(ReactionEditor)가 열린다. 저장·취소 전에는
-  다른 라벨·모드로 넘어가지 않는다(편집 중 상태). Ctrl+Z 는 이번 실행에서 저장한 마지막 반응 라벨을 철회한다.
-- ③ 표본 (W3): 오른쪽은 표본 큐(QueueView). 뽑기는 프로그램이 한다(app.core.sampling). '반응 있음'(M) 은 같은 편집기를 연다.
+  다른 라벨·모드로 넘어가지 않는다(편집 중 상태). Ctrl+Z 는 이번 실행의 마지막 반응 저장 한 번을 통째로 되돌린다(D-10 9).
+- ③ 표본 (W3): 오른쪽은 표본 큐(QueueView). 뽑기는 프로그램이 한다(app.core.sampling, 새로 뽑으면 sha256-tau-v2).
+  '반응 있음'(M) 은 같은 편집기를 연다. 표본 채팅에 이미 ② 반응 라벨이 있으면 새 라벨을 만들지 않고 그 라벨을 고친다(D-10 4).
+- 채팅 1건 = 현재 유효 라벨 1건(D-10 4): ② 에서 반응 라벨이 있는 채팅을 열면 그 라벨을 고치는 편집기로 연다.
 - 구간 라벨이 없거나, 저스트채팅 구간이 없거나, 단계 완료 표시(phase.mark)가 없으면 ②·③ 은 꺼지고 까닭이 보인다.
 
 블라인드 (안내서 원칙 3, 03 12장)
 - 라벨링 세션(primary·relabel_*)에서는 엔진 결과·다른 세션 라벨·AI 등급 제안을 어디에도 보이지 않는다.
   '분석 보기'(엔진 마커)는 visibility.can_show(engine_results) 가 허락하는 분석 세션에서만 메뉴에 나온다.
 - 폼은 store 가 읽은 자기 세션 기록만 받는다(store 는 다른 세션 파일을 디스크에서 읽지 않는다).
+
+영상이 덮는 범위 (08 D-10 3, app.core.timecode.media_coverage)
+- project.json 의 media.current(영상 길이)와 활성 보정 판으로 VOD 범위를 계산해 표본 뽑기(영상 밖 채팅은 적격에서 뺌)·
+  반응 편집기·구간 폼(영상 밖 자리는 저장을 막고 이유를 보임)에 같은 값을 넘긴다. 영상이 연결되지 않았으면 [](덮는 곳 없음),
+  영상 길이를 모르면 None(편집기·폼은 검사하지 않고, 표본은 뽑지 않음).
+
+저장 중 표시 (08 D-10 2): store 에 쓰는 동안 바쁨 커서와 상태 줄 '저장 중…'. 한 번의 저장(반응 4~5줄 등)이 끝나 이벤트
+루프로 돌아가면 푼다(QTimer 0ms). 메인 창에 붙으면 상태 칩은 메인 창 상태 줄 하나로 옮긴다(attach_status_bar, 11 4-2 의 9).
 
 시각 축 (03 4장, app.core.timecode)
 - 플레이어는 영상 파일 시각(file_ms), 채팅 패널·타임라인·라벨·엔진 결과는 VOD 시각(vod_ms = 채팅 시각).
@@ -48,8 +58,8 @@ from typing import Callable, Mapping
 
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-                               QMessageBox, QPushButton, QSplitter, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QMessageBox, QPushButton, QSplitter, QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import jsonl, media
 from .. import project as project_mod
@@ -80,11 +90,17 @@ LINK_MAX_BYTES = 64 * 1024 * 1024
 ENGINE_ITEM = "engine_results"    # app.core.visibility.ENGINE_RESULTS (엔진 판정, 분석 모드). 봉인 AI 결과(ai_results)와 다르다
 # 타임라인에 반영하는 라벨 종류(현재 유효 판). retract 는 대상을 지운다.
 HEAD_KINDS = ("segment", "utterance", "reaction", "continuation", "video_check")
-HEARD_MIN_COVERAGE = rules.HEARD_MIN_COVERAGE   # 들었다고 인정하는 덮은 비율(core.rules, review_player 와 같은 값)
+HEARD_MIN_COVERAGE = rules.HEARD_MIN_COVERAGE   # '들었다' 인정 비율의 코드 기본값. 실제 값은 기준서 recheck.heard_min_coverage(D-10 6)
 DEFAULT_MIN_VIEWS = 2             # guide-config recheck.min_views_direct_likely
 DEFAULT_BUFFER_MS = 10_000        # guide-config segment.boundary_buffer_sec
 DEFAULT_SAMPLE_N = 100            # guide-config sample.per_segment
 DEFAULT_CENSUS_MAX = 100          # guide-config sample.census_max
+DEFAULT_PRE_ROLL_MS = 10_000      # guide-config recheck.pre_roll_sec (7-2 확인 범위)
+DEFAULT_POST_ROLL_MS = 30_000     # guide-config recheck.post_roll_sec
+SAVING_TEXT = "저장 중…"          # D-10 2: 저장하는 동안 상태 줄
+# 표본을 다음 sample_rev 로 다시 뽑을 까닭(sample_stale_reason) → 단추 문구
+STALE_LABELS = {"boundary_changed": "표본 갱신 (구간이 바뀜)", "buffers_changed": "표본 갱신 (경계 완충이 바뀜)",
+                "media_changed": "표본 갱신 (영상 범위가 바뀜)"}
 
 _ORPHANS: set = set()             # 화면이 닫힐 때 아직 도는 워커를 붙잡아 둔다(8장: setParent(None) + deleteLater)
 
@@ -299,10 +315,50 @@ def reaction_marks(reactions, video_checks, *, min_views: int = DEFAULT_MIN_VIEW
     return out
 
 
-def segment_buffers(segments, duration_ms: int, buffer_ms: int) -> list[tuple[int, int]]:
-    """현재 유효 구간 레코드의 안쪽 경계마다 [b − 완충, b + 완충) (core.segments.record_buffers — 내보내기와 같은 규칙)."""
+def segment_buffers(segments, duration_ms: int, buffer_ms: int, rule: str | None = None) -> list[tuple[int, int]]:
+    """현재 유효 구간 레코드의 경계 완충 [b − 완충, b + 완충) (core.segments.record_buffers — 내보내기와 같은 규칙).
+    rule 을 주지 않으면 기본(category_change, sha256-tau-v2). v1 표본 계열은 sp.buffer_rule('sha256-tau-v1')."""
     from ..core.segments import record_buffers
-    return record_buffers(segments, duration_ms, buffer_ms)
+    if rule is None:
+        return record_buffers(segments, duration_ms, buffer_ms)
+    return record_buffers(segments, duration_ms, buffer_ms, rule=rule)
+
+
+def recheck_rolls(values: Mapping) -> tuple[int, int]:
+    """기준서 recheck.pre_roll_sec·post_roll_sec → (pre_ms, post_ms). 표본 적격·큐·편집기가 같은 값을 쓴다."""
+    return (_sec_ms(values, "recheck", "pre_roll_sec", DEFAULT_PRE_ROLL_MS),
+            _sec_ms(values, "recheck", "post_roll_sec", DEFAULT_POST_ROLL_MS))
+
+
+def sample_stale_reason(manifest: Mapping | None, seg: Mapping, segments, *, duration_ms: int, values: Mapping,
+                        coverage) -> str | None:
+    """가장 최근 매니페스트가 지금 구간표·영상 범위와 맞지 않으면 그 까닭(다음 sample_rev 를 뽑을 사유), 맞으면 None.
+
+    - 원 구간의 판(version_id)이 바뀜 → 'boundary_changed' (06 2-6)
+    - (v2) 지금 구간표로 만든 완충이 매니페스트 boundary_buffers 와 다름(이웃 구간의 분류가 바뀜) → 'buffers_changed'
+    - (v2) 영상이 덮는 범위가 매니페스트 media.coverage 와 다름(영상 교체·보정 변경) → 'media_changed'
+    """
+    from ..core import sampling as sp
+    if manifest is None:
+        return None
+    if (manifest.get("source_segment") or {}).get("version_id") != seg.get("id"):
+        return sp.REASON_BOUNDARY
+    if manifest.get("algorithm") != sp.ALGORITHM_V2:
+        return None
+    b = seg.get("body") or {}
+    buf = _sec_ms(values, "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
+    try:
+        now = sp.clip_buffers(segment_buffers(segments, duration_ms, buf, sp.buffer_rule(sp.ALGORITHM_V2)),
+                              int(b["start_ms"]), int(b["end_ms"]))
+        rec = tuple(tuple(x) for x in manifest.get("boundary_buffers") or [])
+        if now != rec:
+            return "buffers_changed"
+        cov_m = (manifest.get("media") or {}).get("coverage")
+        if sp.normalize_coverage(coverage) != sp.normalize_coverage(cov_m):
+            return "media_changed"
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
 
 
 def _now_iso() -> str:
@@ -320,18 +376,38 @@ def read_messages(messages_path: str) -> tuple[list[dict], str]:
 
 def prepare_sample(messages_path: str, seg: Mapping, segments, *, duration_ms: int, values: Mapping,
                    project_data: Mapping, meta: Mapping, drawn_by: str, app_version: str,
-                   previous: Mapping | None = None, drawn_at: str | None = None) -> tuple[dict, dict[str, dict]]:
+                   previous: Mapping | None = None, drawn_at: str | None = None, coverage=None,
+                   reason: str | None = None) -> tuple[dict, dict[str, dict]]:
     """표본 매니페스트를 계산한다(파일에 쓰지 않음). (manifest, 표본 채팅 chat_id → 줄 dict).
 
     seg = 표본을 뽑을 구간의 현재 유효 레코드(entity_id·id·body). segments = 지금 구간표(경계 완충 계산용).
-    시작값: sample.per_segment(n)·sample.census_max·segment.boundary_buffer_sec. 시드는 project.json 의 sample_seed.
+    시작값: sample.per_segment(n)·sample.census_max·segment.boundary_buffer_sec·recheck.pre/post_roll_sec.
+    시드는 project.json 의 sample_seed.
+    알고리즘: previous 가 있으면 그 계열의 알고리즘(v1 계열은 v1 완충·영상 범위 없음), 없으면 sha256-tau-v2.
+    v2 는 coverage(영상이 덮는 VOD 범위, timecode.media_coverage)가 있어야 한다. None(영상 길이 모름)·[](영상 없음)이거나
+    영상 밖이라 적격이 하나도 없으면 ValueError — 빈 매니페스트를 써서 그 계열을 막지 않게 한다(매니페스트는 불변).
+    reason: previous 가 있을 때 매니페스트 reason (sample_stale_reason 의 값). 없으면 'boundary_changed'.
     """
     from ..core import sampling as sp
+    alg = (previous or {}).get("algorithm") or sp.ALGORITHM
+    if alg == sp.ALGORITHM_V2:
+        if coverage is None:
+            raise ValueError(tr("영상 길이를 몰라 영상 밖 채팅을 뺄 수 없습니다 — 영상을 다시 연결하세요 (D-10 3)"))
+        if not coverage:
+            raise ValueError(tr("영상이 연결되지 않았습니다 — 영상이 덮는 채팅만 표본이 됩니다. 먼저 영상을 연결하세요 (D-10 3)"))
     msgs, sha = read_messages(messages_path)
     b = seg["body"]
     buf = _sec_ms(values, "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
-    buffers = segment_buffers(segments, duration_ms, buf)
-    pop = sp.build_population(msgs, int(b["start_ms"]), int(b["end_ms"]), buffers)
+    buffers = segment_buffers(segments, duration_ms, buf, sp.buffer_rule(alg))
+    if alg == sp.ALGORITHM_V2:
+        pre, post = recheck_rolls(values)
+        pop = sp.build_population(msgs, int(b["start_ms"]), int(b["end_ms"]), buffers, coverage=coverage,
+                                  pre_roll_ms=pre, post_roll_ms=post)
+        if not pop.eligible and pop.excluded_out_of_media:
+            raise ValueError(tr("이 구간에는 영상이 덮는 채팅이 없어 표본을 뽑지 않았습니다 (영상 밖 {0}건)")
+                             .format(pop.excluded_out_of_media))
+    else:
+        pop = sp.build_population(msgs, int(b["start_ms"]), int(b["end_ms"]), buffers)
     smp = values.get("sample") if isinstance(values.get("sample"), Mapping) else {}
     n = smp.get("per_segment") if _is_int(smp.get("per_segment")) else DEFAULT_SAMPLE_N
     cmax = smp.get("census_max") if _is_int(smp.get("census_max")) else DEFAULT_CENSUS_MAX
@@ -342,7 +418,7 @@ def prepare_sample(messages_path: str, seg: Mapping, segments, *, duration_ms: i
         guide_version=meta["guide_version"], thresholds_sha256=meta["thresholds_sha256"],
         sample_seed=project_data["sample_seed"], draw_no=1, population=pop, messages_sha256=sha,
         n=int(n), census_max=int(cmax), drawn_at=drawn_at or _now_iso(), drawn_by=drawn_by,
-        app_version=app_version, previous=previous)
+        app_version=app_version, previous=previous, reason=reason if previous is not None else None, algorithm=alg)
     wanted = {it["chat_id"] for it in man["items"]}
     return man, {m["chat_id"]: m for m in msgs if m.get("chat_id") in wanted}
 
@@ -584,6 +660,8 @@ class Workbench(QWidget):
     seekIssued = Signal(int, int)        # (file_ms, vod_ms) — 영상이 없으면 file_ms = -1
     modeChanged = Signal(str)
     labelsChanged = Signal()             # 저장·철회·단계 표시로 라벨 기록이 바뀜
+    messageShown = Signal(str)           # 잠깐 보이는 상태 문장(_say). 메인 창 상태 줄이 받는다
+    busyChanged = Signal(bool)           # 저장 중(D-10 2) 켜짐·꺼짐
 
     def __init__(self, parent=None, *, parts: dict | None = None, session_kind=None, phase=None,
                  labeler_id: str | None = None, session=None, store_options: dict | None = None):
@@ -641,6 +719,10 @@ class Workbench(QWidget):
         self._edit_snapshot: dict[str, dict] = {}
         self._sample_manifest: dict | None = None
         self._sample_msgs: dict[str, dict] = {}
+        self._media_cov: list[tuple[int, int]] | None = None   # 영상이 덮는 VOD 범위 (D-10 3, open_project 에서 계산)
+        self._busy = False                   # 저장 중(D-10 2)
+        self._busy_failed = False
+        self._status_bar = None              # attach_status_bar 로 붙인 메인 창 상태 줄
 
         # 바탕을 늘 칠한다: 작업대를 바꿀 때(다른 프로젝트·사본 열기) 닫힌 플레이어의 네이티브 창 자리에 옛 영상 그림이
         # 남아 보이던 것(실제 창 스모크 화면)을 막는다
@@ -729,17 +811,21 @@ class Workbench(QWidget):
         self.hsplit.setStretchFactor(1, 2)
         root.addWidget(self.hsplit, 1)
 
-        srow2 = QHBoxLayout()
+        # 상태 칩 줄. 메인 창에 붙으면(attach_status_bar) 칩을 메인 창 상태 줄로 옮기고 이 줄은 숨긴다(상태 줄 하나, 11 4-2 의 9)
+        self.status_row = QWidget()
+        srow2 = QHBoxLayout(self.status_row)
+        srow2.setContentsMargins(0, 0, 0, 0)
         self.lbl_vod = QLabel("")
         self.lbl_file = QLabel("")
         self.lbl_cal = QLabel("")
         self.lbl_chats = QLabel("")
         self.lbl_session = QLabel("")        # 02 7-7: 라벨러 · 세션 ID · 기준서 버전 (세션이 있을 때만)
-        for w in (self.lbl_vod, self.lbl_file, self.lbl_cal, self.lbl_chats, self.lbl_session):
+        self.status_chips = (self.lbl_vod, self.lbl_file, self.lbl_cal, self.lbl_chats, self.lbl_session)
+        for w in self.status_chips:
             w.setObjectName("statusChip")
             srow2.addWidget(w)
         srow2.addStretch(1)
-        root.addLayout(srow2)
+        root.addWidget(self.status_row)
 
         # ---- 검색 디바운스 (QTimer.start 에 시그널을 바로 잇지 않는다 — 8장)
         self._filter_timer = QTimer(self)
@@ -906,6 +992,7 @@ class Workbench(QWidget):
             self._fps, self._vfr = fps_from_probe(cur.get("probe"))
         self._vod_duration = int((data.get("broadcast") or {}).get("duration_ms") or 0)
         self._vod_pos = 0
+        self._refresh_coverage()
         self._refresh_notes()
         self._update_status(full=True)
         self._link_path = find_link_file(proj.paths.derived_dir)
@@ -1015,7 +1102,7 @@ class Workbench(QWidget):
         if "reaction" in kinds or "video_check" in kinds:
             self.timeline.set_markers(LABEL_TRACK, reaction_marks(
                 self._label_heads["reaction"].values(), self._label_heads["video_check"].values(),
-                min_views=self._min_views()))
+                min_views=self._min_views(), min_coverage=rules.heard_min_coverage(self.guide_values())))
 
     def _push_segments_track(self) -> None:
         """활동 구간 트랙: ① 구간 모드면 폼의 모델(저장 전 상태 포함), 아니면 store 의 현재 유효 판."""
@@ -1064,7 +1151,12 @@ class Workbench(QWidget):
         if isinstance(draft, dict) and draft.get("kind") == "retract":
             b = draft.get("body") or {}
             return self.retract_label(draft.get("entity_id"), b.get("reason", "undo"), b.get("merged_into"))
-        rec = self.store.append_label(draft)
+        self._begin_busy()
+        try:
+            rec = self.store.append_label(draft)
+        except Exception:
+            self._busy_failed = True
+            raise
         self._apply_saved(rec)
         return rec
 
@@ -1072,9 +1164,49 @@ class Workbench(QWidget):
         """대상 철회(store.retract). SegmentForm 의 retract 콜백."""
         if self.store is None:
             raise RuntimeError("라벨 기록이 열려 있지 않습니다 (세션 없음)")
-        rec = self.store.retract(entity_id, reason, merged_into=merged_into)
+        self._begin_busy()
+        try:
+            rec = self.store.retract(entity_id, reason, merged_into=merged_into)
+        except Exception:
+            self._busy_failed = True
+            raise
         self._apply_saved(rec)
         return rec
+
+    # ---- 저장 중 표시 (D-10 2)
+    def is_busy(self) -> bool:
+        return self._busy
+
+    def _begin_busy(self) -> None:
+        """저장을 시작한다: 바쁨 커서 + 상태 줄 '저장 중…'. 한 번의 저장(여러 줄)이 끝나 이벤트 루프로 돌아가면 푼다.
+
+        줄마다 fsync(D-09 3)라 반응 1건이 0.1~0.2초 걸린다. 그사이 화면이 멈춘 것처럼 보이지 않게 문구를 바로 그린다
+        (repaint — processEvents 는 저장 도중 다른 입력을 처리할 수 있어 쓰지 않는다)."""
+        if self._busy or self._closed:
+            return
+        self._busy, self._busy_failed = True, False
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._say(tr(SAVING_TEXT))
+        self.busyChanged.emit(True)
+        w = self._status_bar if self._status_bar is not None else self.mode_reason
+        try:
+            w.repaint()
+        except RuntimeError:
+            pass
+        QTimer.singleShot(0, self, self._end_busy)
+
+    def _end_busy(self) -> None:
+        if not self._busy:
+            return
+        self._busy = False
+        QApplication.restoreOverrideCursor()
+        self.busyChanged.emit(False)
+        if self._last_said != tr(SAVING_TEXT):
+            return          # 부른 쪽이 이미 결과(실패 이유 등)를 보였다 — 덮어쓰지 않는다
+        if self._busy_failed:
+            self._say(tr("저장하지 못했습니다 (화면의 문구를 보세요)"))
+        else:
+            self._say(tr("저장했습니다"))
 
     def undo_last(self) -> dict | None:
         """마지막 라벨 줄 되돌리기(store.retract_last, 02 3-3 의 기록 층 Ctrl+Z)."""
@@ -1088,7 +1220,12 @@ class Workbench(QWidget):
         """운영 기록(warning·view.exposed·phase.mark) 한 줄. 반응 편집기의 ops 콜백."""
         if self.store is None:
             raise RuntimeError("라벨 기록이 열려 있지 않습니다 (세션 없음)")
-        rec = self.store.append_ops(kind, body)
+        self._begin_busy()
+        try:
+            rec = self.store.append_ops(kind, body)
+        except Exception:
+            self._busy_failed = True
+            raise
         if kind == "phase.mark":
             self._marks.add(rec)
             self._update_modes()
@@ -1153,7 +1290,7 @@ class Workbench(QWidget):
     # ------------------------------------------------------------ 영상
     def _load_media(self, path: str) -> None:
         self.media_path = path
-        self.media_info.setText(os.path.basename(path))
+        self.media_info.setText(f"{os.path.basename(path)} · {self.coverage_text()}")
         self.media_info.setToolTip(path)
         self.btn_media.setText(tr("영상 바꾸기…"))
         self.player.load(path)
@@ -1251,7 +1388,44 @@ class Workbench(QWidget):
             if replacing:
                 self._note(tr("영상을 바꿨습니다. 시간 정렬(보정)을 다시 해야 합니다."))
         self._fps, self._vfr = fps_from_probe(ref.get("probe"))
+        self._refresh_coverage()
         self._load_media(os.path.normpath(path))
+
+    # ------------------------------------------------------------ 영상이 덮는 범위 (D-10 3)
+    def media_coverage(self) -> list[tuple[int, int]] | None:
+        """영상이 덮는 VOD 범위(timecode.media_coverage). [] = 영상 없음, None = 영상 길이 모름."""
+        return None if self._media_cov is None else list(self._media_cov)
+
+    def _refresh_coverage(self) -> None:
+        """project.json(media·calibration)으로 범위를 다시 계산해 구간 폼·반응 편집기에 넘기고 영상 줄에 보인다."""
+        data = (self.project.data if self.project is not None else None) or {}
+        cov = tc.media_coverage(data.get("media"), data.get("calibration"))
+        self._media_cov = cov
+        if cov is None:
+            self._note(tr("영상 길이를 몰라 영상 밖 검사를 하지 않습니다 (표본은 뽑지 않습니다). 영상을 다시 연결하세요"))
+            tip = tr("영상이 덮는 범위: 모름")
+        elif not cov:
+            tip = tr("영상이 덮는 범위: 없음 — 영상을 연결해야 구간·반응을 저장할 수 있습니다")
+        else:
+            tip = tr("영상이 덮는 범위 (VOD): ") + ", ".join(
+                f"{tc.fmt_display(a)} ~ {tc.fmt_display(b)}" for a, b in cov)
+        self.btn_media.setToolTip(tip)
+        if self.segment_form is not None:
+            self.segment_form.set_media_coverage(cov)
+        if self.editor is not None:
+            self.editor.load_context(media_coverage=cov)
+        q = getattr(self, "queue", None)
+        if q is not None:
+            q.set_media_coverage(cov)
+
+    def coverage_text(self) -> str:
+        """영상 줄에 붙이는 짧은 범위 문구."""
+        cov = self._media_cov
+        if cov is None:
+            return tr("범위 모름")
+        if not cov:
+            return tr("영상 없음")
+        return " · ".join(f"VOD {tc.fmt_display(a)}~{tc.fmt_display(b)}" for a, b in cov)
 
     def _write_project(self, mutate, by: str) -> None:
         """project.json 쓰기. 라벨 기록(store)이 열려 있으면 store 를 통해서만 쓴다(02 3-2 '유일한 쓰기 통로').
@@ -1497,7 +1671,11 @@ class Workbench(QWidget):
         """저장하지 않은 구간 변경이 있을 때 묻는다: 'save' · 'discard' · 'cancel'. 시험에서는 바꿔 끼운다."""
         box = QMessageBox(self)
         box.setWindowTitle(tr("저장하지 않은 구간"))
-        box.setText(tr("구간표에 저장하지 않은 변경이 있습니다. 저장할까요?"))
+        text = tr("구간표에 저장하지 않은 변경이 있습니다. 저장할까요?")
+        part = self.segment_form.partial_count() if self.segment_form is not None else 0
+        if part:
+            text += "\n" + tr("분류만 고르고 확신도·근거가 빠진 구간 {0}개는 저장할 수 없습니다 — 버리면 사라집니다").format(part)
+        box.setText(text)
         bs = box.addButton(tr("저장"), QMessageBox.AcceptRole)
         bd = box.addButton(tr("버리기"), QMessageBox.DestructiveRole)
         box.addButton(tr("취소"), QMessageBox.RejectRole)
@@ -1524,6 +1702,11 @@ class Workbench(QWidget):
                 if not allow_cancel:
                     LOG.warning("닫을 때 구간 저장이 막혀 저장하지 않은 변경을 버립니다")
                     return True
+                return False
+            if f.partial_count() and allow_cancel:
+                # 다 매긴 것은 저장했지만 분류만 고른 구간이 남았다: 모드를 바꾸면 사라지므로 머문다(11 4-2 의 5)
+                self._say(tr("확신도·근거가 빠진 구간 {0}개가 남았습니다 — 채워 저장하거나, 모드를 바꿀 때 '버리기' 를 고르세요")
+                          .format(f.partial_count()))
                 return False
             return True
         if ans == "discard":
@@ -1593,7 +1776,8 @@ class Workbench(QWidget):
                        session_id=self.session.session_id if self.session else None,
                        fps=None if self._vfr else self._fps, frame_origin_ms=self.timemap.to_vod(0),
                        thresholds=seg_cfg if isinstance(seg_cfg, Mapping) else None,
-                       position_ms=self._vod_pos, read_only=bool(self.store is None or self.store.read_only))
+                       position_ms=self._vod_pos, read_only=bool(self.store is None or self.store.read_only),
+                       media_coverage=self._media_cov)
         self.right.setCurrentWidget(f)
 
     def _on_form_segments(self) -> None:
@@ -1616,7 +1800,9 @@ class Workbench(QWidget):
         if self.mode == ph.SEGMENTS:
             p = "segments"
             if self.segment_form is not None and self.segment_form.has_unsaved:
-                self._say(tr("저장하지 않은 구간 변경이 있습니다. 먼저 저장하세요 (Ctrl+Enter)"))
+                part = self.segment_form.partial_count()
+                self._say(tr("저장하지 않은 구간 변경이 있습니다. 먼저 저장하세요 (Ctrl+Enter)") + (
+                    " · " + tr("확신도·근거가 빠진 구간 {0}개").format(part) if part else ""))
                 return None
             if not self.segment_heads():
                 self._say(tr("저장된 구간이 없습니다"))
@@ -1670,7 +1856,24 @@ class Workbench(QWidget):
         ed = self._ensure_editor()
         ed.load_context(chats=self._editor_chats(), segments=self.segment_heads(), thresholds=self.guide_values(),
                         session_kind=self.session_kind, phase=self.mode if self.mode != ph.BROWSE else ph.REACTIONS,
-                        position_fn=self.vod_position, review=self._ensure_review())
+                        position_fn=self.vod_position, review=self._ensure_review(),
+                        media_coverage=self._media_cov, label_of=self._reaction_entity_for_chat)
+
+    def reaction_for_chat(self, chat_id: str | None) -> dict | None:
+        """그 채팅의 (이 세션) 현재 유효 반응 라벨. 없으면 None. 받은 dict 는 store 내부 객체라 고치지 않는다(D-10 4)."""
+        if not isinstance(chat_id, str):
+            return None
+        found = [r for r in self._label_heads["reaction"].values() if (r.get("body") or {}).get("chat_id") == chat_id]
+        if not found:
+            return None
+        # 같은 채팅에 둘 이상(D-10 4 전 기록)이면 ③ 표본 판정을 앞에, 그다음 늦게 만든 것
+        found.sort(key=lambda r: ((r.get("body") or {}).get("entry") == "from_sample",
+                                  r.get("seq") if _is_int(r.get("seq")) else 0))
+        return found[-1]
+
+    def _reaction_entity_for_chat(self, chat_id: str) -> str | None:
+        r = self.reaction_for_chat(chat_id)
+        return r.get("entity_id") if r is not None else None
 
     def mark_reaction(self) -> None:
         """M (02 7-6): 반응 지점 찍기 — 편집기를 열기만 한다(저장하지 않음). ③ 표본에서는 '반응 있음'."""
@@ -1697,6 +1900,11 @@ class Workbench(QWidget):
             return False
         if self.is_editing():
             return False
+        if existing is None:
+            # 채팅 1건 = 현재 유효 라벨 1건(D-10 4): 그 채팅에 이미 반응 라벨이 있으면 새로 만들지 않고 그것을 고친다
+            existing = self.reaction_for_chat(chat_id)
+            if existing is not None:
+                self._say(tr("이 채팅에는 이미 반응 라벨이 있어 그 라벨을 고칩니다"))
         self._editor_context()
         ed = self.editor
         self._editor_return = self.right.currentWidget()
@@ -1815,7 +2023,7 @@ class Workbench(QWidget):
             Qt.OtherFocusReason)
 
     def undo_shortcut(self) -> None:
-        """Ctrl+Z (02 7-6). ① 구간: 폼의 모델 층 실행 취소. ②·③: 이 세션의 직전 반응 라벨 철회(철회 줄 1건)."""
+        """Ctrl+Z (02 7-6). ① 구간: 폼의 모델 층 실행 취소. ②·③: 이번 실행의 마지막 반응 저장 한 번을 통째로 되돌림(D-10 9)."""
         if self.mode == ph.SEGMENTS and self.segment_form is not None:
             self.segment_form.undo()
             return
@@ -1885,7 +2093,9 @@ class Workbench(QWidget):
             self.sample_seg_box.currentIndexChanged.connect(lambda _i: self._on_sample_target())
             row.addWidget(self.sample_seg_box, 1)
             self.btn_draw = QPushButton(tr("표본 뽑기"))
-            self.btn_draw.setToolTip(tr("프로그램이 sha256-tau-v1 로 뽑습니다. 다시 뽑기는 없습니다 (안내서 2장)"))
+            from ..core import sampling as sp
+            self.btn_draw.setToolTip(tr("프로그램이 {0} 로 뽑습니다. 다시 뽑기는 없습니다 (안내서 2장). "
+                                        "영상이 덮는 채팅만 표본이 됩니다 (D-10 3)").format(sp.ALGORITHM))
             self.btn_draw.clicked.connect(lambda _c=False: self.draw_sample())
             row.addWidget(self.btn_draw)
             pl.addLayout(row)
@@ -1951,13 +2161,18 @@ class Workbench(QWidget):
             self.btn_draw.setEnabled(True)
             self._load_queue(None, {})
             return
-        stale = (latest.get("source_segment") or {}).get("version_id") != seg.get("id")
-        self.btn_draw.setText(tr("표본 갱신 (구간이 바뀜)") if stale else tr("표본 있음"))
-        self.btn_draw.setEnabled(stale)
+        stale = self.sample_stale(seg, latest)
+        self.btn_draw.setText(tr(STALE_LABELS.get(stale, "표본 갱신")) if stale else tr("표본 있음"))
+        self.btn_draw.setEnabled(bool(stale))
         mpath = self.project.paths.messages_jsonl
         ids = [it["chat_id"] for it in latest.get("items", [])]
         self._run_job("sample_msgs", lambda cancelled: sample_messages(mpath, ids),
                       lambda msgs, err, m=latest: self._load_queue(m, msgs or {}, err), sync)
+
+    def sample_stale(self, seg: Mapping, manifest: Mapping | None) -> str | None:
+        """그 구간의 최근 매니페스트를 다시 뽑아야 하는 까닭(sample_stale_reason). 맞으면 None."""
+        return sample_stale_reason(manifest, seg, self.segment_heads(), duration_ms=self._vod_duration,
+                                   values=self.guide_values(), coverage=self._media_cov)
 
     def draw_sample(self, *, sync: bool = False) -> None:
         """고른 구간의 표본을 뽑는다(워커) → samples/<id>.json 을 한 번 쓴다 → 큐에 싣는다.
@@ -1981,14 +2196,16 @@ class Workbench(QWidget):
         meta = self.store.session_meta or {}
         mans = self._manifests_for(seg["entity_id"])
         prev = mans[-1] if mans else None
-        if prev is not None and (prev.get("source_segment") or {}).get("version_id") == seg.get("id"):
+        why = self.sample_stale(seg, prev) if prev is not None else None
+        if prev is not None and why is None:
             self._say(tr("이 구간의 표본이 이미 있습니다 (다시 뽑지 않습니다)"))
             return
         if prev is not None and prev.get("guide_version") != meta.get("guide_version"):
             prev = None                         # 기준서 판이 바뀌면 새 계열 (06 2-6) — 이번 판은 draw 1 그대로 거부될 수 있다
         from .. import __version__
         args = dict(duration_ms=self._vod_duration, values=self.guide_values(), project_data=dict(self.project.data),
-                    meta=meta, drawn_by=self.labeler_id or "L01", app_version=__version__, previous=prev)
+                    meta=meta, drawn_by=self.labeler_id or "L01", app_version=__version__, previous=prev,
+                    coverage=self.media_coverage(), reason=why)
         mpath = self.project.paths.messages_jsonl
         segs = [dict(s) for s in self.segment_heads()]
         seg_c = copy.deepcopy(seg)
@@ -2025,15 +2242,14 @@ class Workbench(QWidget):
             self._say(tr("표본 채팅을 읽지 못했습니다: {0}").format(err[:200]))
         self._sample_manifest = manifest
         self._sample_msgs = msgs or {}
-        pre = _sec_ms(self.guide_values(), "recheck", "pre_roll_sec", 10_000)
-        post = _sec_ms(self.guide_values(), "recheck", "post_roll_sec", 30_000)
+        pre, post = recheck_rolls(self.guide_values())
         self.queue.load_context(manifest=manifest, messages=self._sample_msgs, session_kind=self.session_kind,
                                 phase=ph.SAMPLES, session_id=self.session.session_id if self.session else None,
                                 reactions=list(self._label_heads["reaction"].values()),
                                 viewer_no=self.chat_data.viewer_no or None,
                                 player=self.player if self.media_path else None,
                                 to_file=self.vod_to_file, to_vod=self.file_to_vod, pre_roll_ms=pre, post_roll_ms=post,
-                                autoplay=bool(self.media_path))
+                                autoplay=bool(self.media_path), media_coverage=self._media_cov)
 
     def _queue_save(self, draft: dict) -> dict:
         snap = self._undo_snapshot(draft.get("entity_id") if isinstance(draft, Mapping) else None)
@@ -2057,24 +2273,30 @@ class Workbench(QWidget):
                                   existing=existing)
 
     def _verify_sample(self, manifest: dict):
-        """재현 검증(03 15-5): 같은 입력(채팅 파일·뽑을 때의 구간표 완충)으로 다시 계산해 견준다. UI 스레드에서 돈다.
+        """재현 검증(03 15-5): 같은 입력(채팅 파일·뽑을 때의 완충·영상 범위)으로 다시 계산해 견준다. UI 스레드에서 돈다.
 
-        뽑을 때의 완충은 매니페스트의 source_segment 경계(start_ms·end_ms)만으로 다시 만든다. 모집단은 그 구간 안 채팅이고,
-        구간끼리는 겹치지 않으므로 다른 구간의 경계가 만든 완충이 이 범위에 닿는 부분은 늘 이 구간 양 끝 경계의 완충 안에
-        든다(segment_buffers 는 모든 시작·끝을 경계로 본다). 그래서 지금 구간표가 바뀌었어도(stale 판) 결과가 같다.
+        - sha256-tau-v1: 뽑을 때의 완충을 매니페스트의 source_segment 경계(start_ms·end_ms)만으로 v1 규칙(모든 경계)으로
+          다시 만든다. 모집단은 그 구간 안 채팅이고 구간끼리는 겹치지 않으므로, 다른 구간의 경계가 만든 완충이 이 범위에
+          닿는 부분은 늘 이 구간 양 끝 경계의 완충 안에 든다. 그래서 지금 구간표가 바뀌었어도(stale 판) 결과가 같다.
+        - sha256-tau-v2: 완충은 이웃 구간 분류에 달려 있어 원 구간 경계만으로는 만들 수 없다. 매니페스트의 boundary_buffers·
+          media(영상 범위·확인 범위)로 다시 계산한다(매니페스트 하나로 재현). 지금 구간표·영상 범위와 다른지는 재현과 따로
+          '표본 갱신' 단추(sample_stale)가 알린다.
         """
         from ..core import sampling as sp
         msgs, sha = read_messages(self.project.paths.messages_jsonl)
-        buf = _sec_ms(self.guide_values(), "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
-        src = manifest.get("source_segment") or {}
-        buffers = segment_buffers([{"start_ms": src.get("start_ms"), "end_ms": src.get("end_ms")}],
-                                  self._vod_duration, buf)
         prev = None
         rev = manifest.get("sample_rev", 1)
         if rev and rev > 1:
             prev = next((m for m in self._manifests_for(manifest["source_segment"]["entity_id"])
                          if m.get("sample_rev") == rev - 1), None)
-        return sp.verify_manifest(manifest, msgs, buffers, messages_sha256=sha, previous=prev)
+        if manifest.get("algorithm") == sp.ALGORITHM_V1:
+            buf = _sec_ms(self.guide_values(), "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
+            src = manifest.get("source_segment") or {}
+            bounds = [{"start_ms": src.get("start_ms"), "end_ms": src.get("end_ms")}]
+            dur = self._vod_duration
+            return sp.verify_manifest(manifest, msgs, lambda rule: segment_buffers(bounds, dur, buf, rule),
+                                      messages_sha256=sha, previous=prev)
+        return sp.verify_manifest(manifest, msgs, messages_sha256=sha, previous=prev)
 
     # ------------------------------------------------------------ 내보내기
     def export_labels(self, out_path: str, *, overwrite: bool = False):
@@ -2136,10 +2358,50 @@ class Workbench(QWidget):
         self._refresh_notes()
 
     def _say(self, text: str) -> None:
-        """잠깐 보이는 상태 문장(모드 줄 오른쪽). 띠(notes)에는 쌓지 않는다."""
+        """잠깐 보이는 상태 문장. 띠(notes)에는 쌓지 않는다.
+
+        메인 창 상태 줄에 붙었으면(attach_status_bar) 그 줄 하나에만 보이고(messageShown), 아니면 모드 줄 오른쪽에 보인다."""
         if text:
-            _set_text(self.mode_reason, text)
+            self._last_said = text
+            if self._status_bar is None:
+                _set_text(self.mode_reason, text)
+            self.messageShown.emit(text)
             self.statusChanged.emit(text)
+
+    _last_said = ""
+
+    def last_message(self) -> str:
+        """마지막으로 보인 상태 문장(_say)."""
+        return self._last_said
+
+    # ---- 상태 줄 하나로 (11 4-2 의 9)
+    def attach_status_bar(self, bar) -> None:
+        """메인 창 상태 줄(QStatusBar)에 상태 칩을 옮겨 붙이고 작업대 아래 칩 줄을 숨긴다. 잠깐 문장은 messageShown 으로
+        그 줄의 왼쪽에 나온다(메인 창이 잇는다). 닫을 때 detach_status_bar 로 뗀다."""
+        if self._status_bar is bar:
+            return
+        self.detach_status_bar()
+        self._status_bar = bar
+        for i, w in enumerate(self.status_chips):
+            bar.insertPermanentWidget(i, w)
+            w.show()
+        self.status_row.setVisible(False)
+        _set_text(self.mode_reason, "")
+        self._update_modes()
+
+    def detach_status_bar(self) -> None:
+        bar, self._status_bar = self._status_bar, None
+        if bar is None:
+            return
+        lay = self.status_row.layout()
+        for i, w in enumerate(self.status_chips):
+            try:
+                bar.removeWidget(w)
+            except RuntimeError:
+                continue
+            lay.insertWidget(i, w)
+            w.show()
+        self.status_row.setVisible(True)
 
     def _refresh_notes(self) -> None:
         lines = self.part_problems + self.notes
@@ -2188,6 +2450,8 @@ class Workbench(QWidget):
             if self._closed:
                 return
             self._closed = True
+        self._end_busy()                     # 바쁨 커서가 남지 않게(0ms 타이머가 오기 전에 닫힐 수 있다)
+        self.detach_status_bar()
         self._filter_timer.stop()
         for w in list(self._jobs.values()):
             self._orphan(w)

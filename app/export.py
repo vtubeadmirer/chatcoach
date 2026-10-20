@@ -11,7 +11,8 @@
                  safe_cell). 다시 가져올 수 없다(매니페스트 notes).
 - manifest.json: $defs/exportManifest. 파일별 크기·SHA-256·행 수, 기준서 버전·문서 해시·시작값 해시(세션의
                  session.open 값), 활성 보정값, messages_sha256, 앱 버전, 내보낸 세션 목록(filters.session_ids), 종류별 행 수,
-                 제외 사유 계단 건수(06 6-6: 행마다 처음 걸린 사유 하나), 경고.
+                 제외 사유 계단 건수(06 6-6: 행마다 처음 걸린 사유 하나), 경고(이어짐을 비운 직접·높음 반응 건수 포함, D-10 7).
+'들었다' 인정 비율은 라벨 기준서 판의 recheck.heard_min_coverage(없으면 rules.HEARD_MIN_COVERAGE, D-10 6).
 - 그 밖의 프로젝트 파일(chat/protected/·derived/·origin/·samples/·locks/·guide/ 원문·project.json 원문·messages.jsonl
   원문)은 zip 에 들어가지 않는다. derived/ 와 앱 data\\ai\\ 는 열지도 않는다(엔진·AI 결과).
 
@@ -153,6 +154,9 @@ class ExportOptions:
     include_heard_text: bool = False           # 발화 받아쓰기
     session_ids: tuple[str, ...] | None = None  # 이 세션들만(없으면 열 수 있는 전부)
     overwrite: bool = False
+    # '들었다' 인정 비율(D-10 6). None 이면 라벨의 기준서 판(project.json guides[].thresholds)의
+    # recheck.heard_min_coverage, 그것도 없으면 rules.HEARD_MIN_COVERAGE. 주면 모든 판에 이 값(작업대가 편집기와 같은 값을 넘길 때).
+    heard_min_coverage: float | None = None
 
 
 @dataclass
@@ -437,10 +441,12 @@ def _sessions_info(view: rs.EffectiveView) -> dict[str, _SessionInfo]:
 
 
 class _GuideRules:
-    """기준서 버전별 증거 강도표와 재확인 횟수(project.json guides[].thresholds)."""
+    """기준서 버전별 증거 강도표·재확인 횟수·경계 완충·'들었다' 인정 비율(project.json guides[].thresholds)."""
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, heard_override: float | None = None):
         self._by: dict[str, tuple[dict, int]] = {}
+        self._heard: dict[str, float] = {}
+        self._heard_override = None if heard_override is None else float(heard_override)
         for g in data.get("guides") or []:
             if not isinstance(g, dict):
                 continue
@@ -453,6 +459,7 @@ class _GuideRules:
             bs = sg.get("boundary_buffer_sec")
             buf = int(round(bs * 1000)) if isinstance(bs, (int, float)) and not isinstance(bs, bool) and bs >= 0                 else segmod.DEFAULT_BUFFER_MS
             self._by[g.get("guide_version")] = (strength, mv if _is_int(mv) and mv >= 1 else 2, buf)
+            self._heard[g.get("guide_version")] = rules.heard_min_coverage(th)
 
     def strength(self, gv) -> dict:
         return self._by.get(gv, (dict(V0_1_STRENGTH), 2, segmod.DEFAULT_BUFFER_MS))[0]
@@ -462,6 +469,12 @@ class _GuideRules:
 
     def buffer_ms(self, gv) -> int:
         return self._by.get(gv, (None, 2, segmod.DEFAULT_BUFFER_MS))[2]
+
+    def heard_min_coverage(self, gv) -> float:
+        """D-10 6: 옵션 값 → 그 판의 recheck.heard_min_coverage → rules.HEARD_MIN_COVERAGE."""
+        if self._heard_override is not None:
+            return self._heard_override
+        return self._heard.get(gv, rules.HEARD_MIN_COVERAGE)
 
 
 def _sample(body: dict) -> tuple[str | None, int | None]:
@@ -488,7 +501,7 @@ class _RowBuilder:
         self.opts = opts
         self.chats = chats
         self.sessions = _sessions_info(view)
-        self.rules = _GuideRules(project_data)
+        self.rules = _GuideRules(project_data, opts.heard_min_coverage)
         self.cal_status: dict[int, str] = {}
         for c in ((project_data.get("calibration") or {}).get("revs") or []):
             if isinstance(c, dict) and _is_int(c.get("rev")):
@@ -555,11 +568,13 @@ class _RowBuilder:
         if row.get("label_kind") == "reaction":
             checks = row.get("video_checks") or []
             # '들었다' = audio_heard 이고 coverage_ratio ≥ 기준(편집기·작업대와 같은 core 규칙, 안내서 7-2).
-            heard = rules.heard_count(checks)
+            cov = self.rules.heard_min_coverage(rec.get("guide_version"))
+            heard = rules.heard_count(checks, cov)
             if rec["entity_id"] in info.audio_warned or (checks and heard == 0):
                 rs_.add("audio_not_heard")
             if not rules.recheck_complete(row.get("grade"), checks,
-                                          min_views=self.rules.min_views(rec.get("guide_version"))):
+                                          min_views=self.rules.min_views(rec.get("guide_version")),
+                                          min_coverage=cov):
                 rs_.add("recheck_incomplete")
             if row.get("grade") == "unclear":
                 rs_.add("grade_unclear")
@@ -727,6 +742,14 @@ def _continuation_target_ok(view: rs.EffectiveView, rec: dict) -> bool:
     return b.get("result") == "graded" and b.get("grade") in ("direct", "likely")
 
 
+def _linked_without_continuation(rows: list[dict]) -> int:
+    """내보내는 행 가운데 이어짐 행이 붙지 않은 직접·높음 반응 수(같은 세션 기준, D-10 7 경고 건수)."""
+    has = {(r["session_id"], r.get("reaction_entity_id")) for r in rows if r.get("label_kind") == "continuation"}
+    return sum(1 for r in rows
+               if r.get("label_kind") == "reaction" and r.get("result") == "graded"
+               and r.get("grade") in ("direct", "likely") and (r["session_id"], r["entity_id"]) not in has)
+
+
 # ---------------------------------------------------------------------------------------------- 공개 함수
 
 def build_rows(project_dir: str, options: ExportOptions | None = None, *, viewer=None,
@@ -767,6 +790,9 @@ def build_rows(project_dir: str, options: ExportOptions | None = None, *, viewer
         elif k in SKIPPED_KINDS:
             skipped_kinds[k] = skipped_kinds.get(k, 0) + 1
     warns = list(loaded.warnings) + mwarn
+    no_cont = _linked_without_continuation(rows)
+    if no_cont:
+        warns.append(f"이어짐을 비운 직접·높음 반응 {no_cont}건(이어짐은 선택 항목, D-10 7).")
     if b.missing_chat:
         warns.append(f"messages.jsonl 에 없는 chat_id 를 가리킨 행이 {b.missing_chat}개 있습니다(채팅 정보 빈칸).")
     if b.defaulted_modality:
@@ -783,6 +809,7 @@ def build_rows(project_dir: str, options: ExportOptions | None = None, *, viewer
         "project": data, "view": view, "session_ids": loaded.session_ids, "warnings": warns,
         "messages_sha256": msha, "viewer_no": vno, "sessions": b.sessions,
         "conflicts": len(conflicts), "invalid_records": loaded.invalid_lines + len(view.invalid_ids),
+        "continuation_missing": no_cont,
     }
     return rows, info
 

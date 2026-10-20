@@ -31,6 +31,11 @@
    store.retract_last(2·3단계의 Ctrl+Z, 기록 층 한 줄 되돌리기)는 이 폼이 부르지 않는다. 그걸 쓰면 디스크 판이 폼의 장부와
    어긋나므로, 작업대는 그 뒤 load_context 를 다시 불러야 한다.
 
+영상 밖 (08 D-10 3): load_context(media_coverage=…) 로 영상이 덮는 VOD 범위를 받으면, 그 범위와 조금도 겹치지 않는 구간은
+저장하지 않는다(보고 들을 수 없는 자리는 매길 수 없다). 저장 계획(plan)의 errors 에 이유를 넣어 저장 전체를 막고 화면에 보인다.
+일부만 걸친 구간은 저장한다(보이는 부분으로 판단). 철회는 막지 않는다. coverage None = 검사 안 함, [] = 영상 없음(모두 막음).
+분류만 고르고 확신도·근거를 비운 구간은 기록으로 낼 수 없지만 '저장 안 한 변경' 이다(has_unsaved, 11 4-2 의 5).
+
 블라인드: 이 폼은 load_context 로 받은 레코드만 그린다. session_id 를 주면 다른 세션의 줄은 버리고 건수만 알린다.
 등급·엔진·AI 는 이 폼과 관계가 없다(구간 단계).
 
@@ -86,6 +91,37 @@ TIME_KEY = "Ctrl+T"
 CANCEL_KEY = "Escape"
 
 VFR_STEP_MS = 100   # 가변 프레임률(fps 모름)일 때 '1프레임' 대신 0.1초 (02 7-6)
+_KEEP = object()    # load_context(media_coverage=…) 를 넘기지 않음(None 은 '검사 안 함' 이라 따로 둔다)
+
+
+def _norm_coverage(coverage) -> list[tuple[int, int]] | None:
+    """[(start, end)] 또는 {start_ms, end_ms} 목록 → 정렬·합친 목록. None 은 None. 모양이 틀린 칸은 버린다."""
+    if coverage is None:
+        return None
+    spans = []
+    for r in coverage:
+        if isinstance(r, Mapping):
+            r = (r.get("start_ms"), r.get("end_ms"))
+        try:
+            a, b = r
+        except (TypeError, ValueError):
+            continue
+        if isinstance(a, int) and isinstance(b, int) and not isinstance(a, bool) and not isinstance(b, bool) and b > a:
+            spans.append((a, b))
+    out: list[tuple[int, int]] = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def overlaps_media(start_ms: int, end_ms: int, coverage: list[tuple[int, int]] | None) -> bool:
+    """[start, end) 가 영상 범위와 조금이라도 겹치는가. coverage None(모름)이면 True."""
+    if coverage is None:
+        return True
+    return any(a < end_ms and start_ms < b for a, b in coverage)
 
 
 @dataclass
@@ -160,6 +196,7 @@ class SegmentForm(QWidget):
         self._edge = "start"            # 미세 조정할 경계: 고른 구간의 'start' 또는 'end'
         self.follow_position = True     # 재생 위치가 다른 구간으로 가면 그 구간을 고른다(근거를 고치던 중이면 안 함)
         self._updating = False
+        self._coverage: list[tuple[int, int]] | None = None   # 영상이 덮는 VOD 범위(D-10 3). None = 검사 안 함
         self._build()
         self._install_shortcuts(shortcut_context)
         self._refresh()
@@ -372,7 +409,7 @@ class SegmentForm(QWidget):
                      fps: float | None = None, frame_origin_ms: int = 0,
                      thresholds: SegmentThresholds | Mapping | None = None,
                      position_ms: int = 0, read_only: bool = False,
-                     new_id: Callable[[], str] | None = None) -> bool:
+                     new_id: Callable[[], str] | None = None, media_coverage=_KEEP) -> bool:
         """작업대 상태를 받아 모델을 새로 만든다. 모델 층 undo 스택은 비워진다. 성공하면 True.
 
         - records: 이 세션의 현재 유효 segment 레코드(봉투 포함: id·entity_id·session_id·body). 다른 kind 는 무시한다.
@@ -380,7 +417,11 @@ class SegmentForm(QWidget):
         - fps·frame_origin_ms: ±1프레임 격자(타임라인 set_fps 와 같은 값). fps None 이면 가변 프레임률로 보고 0.1초.
         - thresholds: SegmentThresholds 또는 guide-config 의 `thresholds.segment` 절(초 단위). 없으면 v0.1 시작값.
         - 겹치는 기록·형식이 틀린 기록이면 모델을 만들지 않고 읽기 전용으로 둔다(문제는 `problems`, 작업대가 '겹침/빈틈 고치기').
+        - media_coverage: 영상이 덮는 VOD 범위 [(start_ms, end_ms)] (D-10 3). 넘기지 않으면 그대로, None 은 검사 안 함,
+          [] 는 영상 없음(어떤 구간도 저장하지 않음).
         """
+        if media_coverage is not _KEEP:
+            self._coverage = _norm_coverage(media_coverage)
         self._problems = []
         self._model = None
         self._disk = {}
@@ -484,6 +525,39 @@ class SegmentForm(QWidget):
     @property
     def min_length_ms(self) -> int:
         return self._thr.min_length_ms
+
+    @property
+    def media_coverage(self) -> list[tuple[int, int]] | None:
+        return None if self._coverage is None else list(self._coverage)
+
+    def set_media_coverage(self, coverage) -> None:
+        """영상 범위만 바꾼다(영상 연결·교체 뒤). 모델·undo 스택은 그대로다. None = 검사 안 함, [] = 영상 없음."""
+        self._coverage = _norm_coverage(coverage)
+        self._refresh()
+
+    def outside_media(self, seg: Segment | None = None) -> bool:
+        """그 구간(기본: 고른 구간)이 영상 범위와 조금도 겹치지 않는가(D-10 3 — 저장 불가)."""
+        s = seg if seg is not None else self.selected
+        if s is None:
+            return False
+        a, b = s.record_span()
+        return not overlaps_media(a, b, self._coverage)
+
+    def _media_error(self, body: Mapping) -> str | None:
+        a, b = body.get("start_ms"), body.get("end_ms")
+        if not (isinstance(a, int) and isinstance(b, int)) or overlaps_media(a, b, self._coverage):
+            return None
+        if not self._coverage:
+            return tr("영상이 연결되지 않아 구간을 저장할 수 없습니다 — 먼저 영상을 연결하세요 (보고 들을 수 없는 자리는 매기지 않음)")
+        cov = ", ".join(f"{fmt_display(x)}~{fmt_display(y)}" for x, y in self._coverage[:3])
+        return tr("구간 {0}~{1} 은 영상이 덮지 않는 자리라 저장할 수 없습니다 (영상 범위 {2}). 경계를 영상 안으로 옮기거나 "
+                  "Ctrl+Z 로 분류를 되돌리세요").format(fmt_display(a), fmt_display(b), cov)
+
+    def partial_count(self) -> int:
+        """분류는 골랐지만 확신도·근거가 빠져 기록으로 낼 수 없는 구간 수(저장 안 한 변경, 11 4-2 의 5)."""
+        if self._model is None:
+            return 0
+        return sum(1 for s in self._model.segments if s.is_labeled and not s.is_complete)
 
     def segments_for_timeline(self) -> list[dict]:
         """timeline.set_segments 모양(03 6-5 body 필드 + entity_id). 모델의 모든 구간(안 매긴 구간은 category None),
@@ -861,6 +935,10 @@ class SegmentForm(QWidget):
                 errors.append(tr("합쳐서 남은 구간({0})의 분류·확신도·근거를 채운 뒤 저장하세요").format(rng))
             else:
                 retracts.append((eid, "merged", survivor.id, d.head_id))
+        for w in writes:
+            why = self._media_error(w["body"])
+            if why and why not in errors:
+                errors.append(why)
         return SavePlan(tuple(self._order_writes(writes, {e for e, *_ in retracts})), tuple(retracts), tuple(errors))
 
     def _order_writes(self, writes: list[dict], retracted: set[str]) -> list[dict]:
@@ -901,7 +979,8 @@ class SegmentForm(QWidget):
 
     @property
     def has_unsaved(self) -> bool:
-        return self._field_dirty() or not self.plan().empty
+        """저장하지 않은 것이 있는가: 근거 칸의 글자, 저장 계획(새 판·철회), 분류만 고른(확신도·근거가 빠진) 구간."""
+        return self._field_dirty() or not self.plan().empty or self.partial_count() > 0
 
     def save(self) -> list[dict] | None:
         """Ctrl+Enter: 모델과 디스크의 차이를 save·retract 콜백으로 쓴다. 쓴 레코드 목록(없으면 []).
@@ -1041,6 +1120,12 @@ class SegmentForm(QWidget):
             i + 1, n, fmt_display(s.start_ms), fmt_display(s.end_ms), _fmt_len(s.length_ms), state)
         if s.out_of_media:
             head += " · " + tr("영상 길이 밖에 걸친 기록")
+        if self.outside_media(s):
+            head += " · " + (tr("영상 없음 — 저장 불가") if not self._coverage else tr("영상이 덮지 않는 자리 — 저장 불가"))
+        elif self._coverage is not None:
+            a, b = s.record_span()
+            if not any(x <= a and b <= y for x, y in self._coverage):
+                head += " · " + tr("일부만 영상 안")
         if self._read_only:
             head += " · " + tr("읽기 전용")
         self.lbl_head.setText(head)

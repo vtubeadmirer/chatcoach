@@ -36,6 +36,19 @@ DEFAULT_MIN_GAP_MS = 100          # 두 경계 사이 최소 간격(구간 최�
 UNDO_LIMIT = 200
 RATIONALE_MAX = 300               # label-event 스키마 rationale maxLength
 
+# ---------------------------------------------------------------------------- 경계 완충 규칙 (08 D-10 1)
+# all_boundaries : 모든 안쪽 경계에 완충 (표본 알고리즘 sha256-tau-v1 이 쓴 규칙, v1 매니페스트 재현용).
+# category_change: 분류가 바뀌는 경계에만 완충 (안내서 3장 '활동이 바뀌는 시점', 03 4-3 규칙 4, sha256-tau-v2).
+#   - 양쪽이 같은 분류(판단 불가 제외)로 맞닿은 경계는 전환이 아니라 완충이 없다.
+#   - 한쪽이 빈틈('아직 안 매긴 시간')이거나 분류를 안 매긴 구간이면 무엇으로 바뀌는지 모르니 전환으로 보고 완충을 둔다.
+#   - 판단 불가끼리 맞닿은 경계도 같은 활동이라는 근거가 없어 전환으로 본다.
+#   - 영상 처음·끝(0, duration)은 어느 규칙에서도 경계가 아니다.
+BUFFER_RULE_ALL = "all_boundaries"
+BUFFER_RULE_CHANGE = "category_change"
+BUFFER_RULES: tuple[str, ...] = (BUFFER_RULE_ALL, BUFFER_RULE_CHANGE)
+DEFAULT_BUFFER_RULE = BUFFER_RULE_CHANGE
+_NO_SAME_CATEGORY = "undeterminable"    # 같은 값이어도 '같은 활동' 으로 보지 않는 분류
+
 _UUID4_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 _MS_MIN, _MS_MAX = -3_600_000, 172_800_000   # label-event 스키마 $defs.ms
 
@@ -198,6 +211,24 @@ def _check_ms(name: str, v) -> int:
     if isinstance(v, bool) or not isinstance(v, int):
         raise TypeError(f"{name} 는 정수 ms 여야 한다: {v!r}")
     return v
+
+
+def _check_rule(rule) -> str:
+    if rule not in BUFFER_RULES:
+        raise SegmentError(f"알 수 없는 완충 규칙: {rule!r} ({BUFFER_RULES} 중 하나)")
+    return rule
+
+
+def is_transition(left_category: str | None, right_category: str | None) -> bool:
+    """경계 왼쪽·오른쪽 구간의 분류로 '활동이 바뀌는 경계' 인가 (category_change 규칙).
+
+    None 은 빈틈 또는 안 매긴 구간(모름) → 전환으로 본다. 판단 불가끼리도 전환으로 본다.
+    """
+    if left_category is None or right_category is None:
+        return True
+    if left_category == _NO_SAME_CATEGORY and right_category == _NO_SAME_CATEGORY:
+        return True
+    return left_category != right_category
 
 
 def _check_uuid(v) -> str:
@@ -618,16 +649,25 @@ class SegmentTimeline:
                                        next_id=nxt.id if nxt else None, suggested=sug))
         return out
 
-    def buffer_ranges(self, buffer_ms: int = DEFAULT_BUFFER_MS) -> list[BufferRange]:
-        """안쪽 경계마다 [b - buffer, b + buffer) 를 완충으로 (안내서 3장 '전환 앞뒤 10초'). 영상 범위로 자르고,
-        겹치거나 맞닿은 완충은 하나로 합친다. 0 과 duration(영상 처음·끝)은 전환이 아니라 완충을 두지 않는다."""
+    def buffer_boundaries(self, rule: str = DEFAULT_BUFFER_RULE) -> list[int]:
+        """완충을 둘 안쪽 경계. all_boundaries = 모든 안쪽 경계, category_change = 분류가 바뀌는 경계만(is_transition)."""
+        _check_rule(rule)
+        if rule == BUFFER_RULE_ALL:
+            return self.boundaries
+        return [b.start_ms for a, b in zip(self._segs, self._segs[1:]) if is_transition(a.category, b.category)]
+
+    def buffer_ranges(self, buffer_ms: int = DEFAULT_BUFFER_MS, rule: str = DEFAULT_BUFFER_RULE) -> list[BufferRange]:
+        """완충을 둘 경계(buffer_boundaries)마다 [b - buffer, b + buffer) 를 완충으로 (안내서 3장 '전환 앞뒤 10초').
+        영상 범위로 자르고, 겹치거나 맞닿은 완충은 하나로 합친다. 0 과 duration(영상 처음·끝)은 전환이 아니라 완충을 두지 않는다.
+        rule 기본은 category_change(08 D-10 1). v1 표본 재현에는 all_boundaries 를 넘긴다."""
         _check_ms("buffer_ms", buffer_ms)
         if buffer_ms < 0:
             raise SegmentError("buffer_ms 는 0 이상")
+        bounds = self.buffer_boundaries(rule)
         if buffer_ms == 0:
             return []
         out: list[BufferRange] = []
-        for b in self.boundaries:
+        for b in bounds:
             lo, hi = max(0, b - buffer_ms), min(self.duration_ms, b + buffer_ms)
             if out and lo <= out[-1].end_ms:
                 last = out[-1]
@@ -636,10 +676,11 @@ class SegmentTimeline:
                 out.append(BufferRange(lo, hi, (b,)))
         return out
 
-    def in_buffer(self, t_ms: int, buffer_ms: int = DEFAULT_BUFFER_MS) -> bool:
-        """t 가 어느 경계의 완충 안인가 (b - buffer <= t < b + buffer, buffer_ranges 와 같은 반열린 구간). 채팅 반응 평가 제외 판정용."""
+    def in_buffer(self, t_ms: int, buffer_ms: int = DEFAULT_BUFFER_MS, rule: str = DEFAULT_BUFFER_RULE) -> bool:
+        """t 가 어느 경계의 완충 안인가 (b - buffer <= t < b + buffer, buffer_ranges 와 같은 반열린 구간·같은 규칙).
+        채팅 반응 평가 제외 판정용."""
         _check_ms("t_ms", t_ms)
-        bs = self.boundaries
+        bs = self.buffer_boundaries(rule)
         if not bs or buffer_ms <= 0:
             return False
         j = bisect.bisect_left(bs, t_ms)
@@ -791,23 +832,40 @@ class SegmentTimeline:
 
 
 # ---------------------------------------------------------------------------- 기록 구간표의 경계 완충 (모델 없이)
-def record_buffers(segments: Iterable[Mapping], duration_ms: int, buffer_ms: int) -> list[tuple[int, int]]:
-    """현재 유효 구간 레코드(또는 body·{start_ms, end_ms} dict) 목록의 경계마다 [b − 완충, b + 완충) (안내서 3장).
+def record_buffers(segments: Iterable[Mapping], duration_ms: int, buffer_ms: int, *,
+                   rule: str = DEFAULT_BUFFER_RULE) -> list[tuple[int, int]]:
+    """현재 유효 구간 레코드(또는 body·{start_ms, end_ms, category} dict) 목록의 경계마다 [b − 완충, b + 완충) (안내서 3장).
 
-    모든 시작·끝을 경계로 본다(SegmentTimeline.buffer_ranges 와 같은 규칙). 0 과 duration_ms(영상 처음·끝)는 전환이
-    아니라 빼고, duration_ms 가 0(모름)이면 끝 쪽은 자르지 않는다. 겹치거나 맞닿은 완충은 하나로 합친다.
-    작업대 표본 뽑기·재현 검증과 내보내기(eval.in_boundary_buffer)가 같이 쓴다.
+    모든 시작·끝이 경계 후보다. rule (08 D-10 1):
+      - all_boundaries : 후보 전부 (sha256-tau-v1 이 쓴 규칙. v1 매니페스트 재현 검증은 이것으로 한다).
+      - category_change: 분류가 바뀌는 경계만 (기본, sha256-tau-v2). 경계 b 에서 끝나는 구간과 b 에서 시작하는 구간이
+        하나씩이고 is_transition 이 거짓(같은 분류, 판단 불가 아님)이면 완충이 없다. 한쪽이 없거나(빈틈) 분류가 없거나
+        (category 칸 없는 dict 포함) 같은 자리에 여러 구간이 걸리면(겹침 이상) 전환으로 보고 완충을 둔다.
+    0 과 duration_ms(영상 처음·끝)는 전환이 아니라 빼고, duration_ms 가 0(모름)이면 끝 쪽은 자르지 않는다. 겹치거나 맞닿은
+    완충은 하나로 합친다. 작업대 표본 뽑기·재현 검증과 내보내기(eval.in_boundary_buffer)가 같이 쓴다.
     """
+    _check_rule(rule)
     bs: set[int] = set()
+    ends: dict[int, list] = {}
+    starts: dict[int, list] = {}
     for s in segments or ():
         b = s.get("body") if isinstance(s.get("body"), Mapping) else s
-        for k in ("start_ms", "end_ms"):
+        cat = b.get("category")
+        for k, side in (("start_ms", starts), ("end_ms", ends)):
             v = b.get(k)
             if isinstance(v, int) and not isinstance(v, bool):
                 bs.add(v)
+                side.setdefault(v, []).append(cat if isinstance(cat, str) else None)
     out: list[tuple[int, int]] = []
     if buffer_ms <= 0:
         return out
+    if rule == BUFFER_RULE_CHANGE:
+        def keep(b: int) -> bool:
+            left, right = ends.get(b, []), starts.get(b, [])
+            if len(left) != 1 or len(right) != 1:
+                return True
+            return is_transition(left[0], right[0])
+        bs = {b for b in bs if keep(b)}
     for b in sorted(bs):
         if b <= 0 or (duration_ms and b >= duration_ms):
             continue

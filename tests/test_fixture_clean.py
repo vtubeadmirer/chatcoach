@@ -60,6 +60,11 @@ ALLOWED_HEX: dict[str, str] = {
     "1aef486198b0fe3e6c754e64b4a4037f219071d084e87216647b400e77c5a57a": "합성 시드·cid(0) 의 순서 키 골든값",
     "18479e845f54a37964a5ba7e135d05ee540f2d9dcb83aef492af54ff12c89d5e": "합성 시드·cid(1) 의 순서 키 골든값",
     "84a0bcf1c56f546d9ddd7280ac5ee558019af93fa05a115359f74b23cb874c57": "합성 시드·'c'+'a'*20+'_2' 의 순서 키 골든값",
+    # tests/test_sampling.py — v1 재현 골든값(08 D-10 1): 합성 채팅·합성 시드로 고친 코드 전의 v1 코드가 낸 값
+    "22d86ad32463ed9479faf3853d3b62c2768fa995ac7fce8732e22fb4b0181c87": "합성 v1 매니페스트 전체 sha256 골든값",
+    "1f21a51b767f10b9cd53ce9fe9fd8e80d5fbd8206e80cd66f128ca21a8779746": "합성 v1 τ 골든값",
+    "4a6e1c248a1e77916b4d74adb304b1d4aa151c720070a8191c5b0e0a5825167e": "합성 v1 표본 chat_id 해시 골든값",
+    "0efb01788b76723602c59b7985ad023ee50805ced8af469fffc4a7279d80d7f3": "합성 v1 적격 chat_id 해시 골든값",
 }
 ALLOWED_VIDEO_NOS: dict[str, str] = {
     # tests/test_chzzk_parse.py test_parse_video_no — 주소 파싱 시험의 1~3자리 값 (실제 VOD 번호는 7~8자리)

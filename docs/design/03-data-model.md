@@ -553,17 +553,18 @@ flowchart LR
 | `sample_rev`, `previous_sample_rev`, `reason`, `changes` | 같은 계열(원 구간 entity_id·`draw_no`)의 몇 번째 매니페스트인지. 경계가 바뀌면 올린 새 파일을 쓰고, 바로 앞 번호·사유·들어오고 나간 chat_id(`added`, `removed[]` 의 `reason = boundary_changed`)를 적는다. 1 이면 `previous_sample_rev`·`changes` 가 `null` 이고 `reason` 은 `initial` 이다. 유효한 것은 가장 큰 `sample_rev` 다(15-4). |
 | `source_segment` | 기준이 된 1차 세션 구간 판(세션·대상·판·시작·끝). |
 | `guide_version`, `thresholds_sha256` | 뽑을 때의 기준서 버전과 시작값 해시. `sample.per_segment`·`sample.census_max`·`segment.boundary_buffer_sec` 가 이 시작값에서 온다. |
-| `algorithm`, `seed_material` | `sha256-tau-v1`, `"{sample_seed}\|{draw_no}"`(15-1). 매니페스트 하나만 받아도 재현할 수 있다. |
+| `algorithm`, `seed_material` | 새로 뽑으면 `sha256-tau-v2`, `"{sample_seed}\|{draw_no}"`(15-1). v2 는 완충을 **분류가 바뀌는 경계에만** 둔다. 같은 분류끼리 맞닿은 경계에는 두지 않는다. 이미 있는 `sha256-tau-v1` 매니페스트는 v1 규칙(모든 안쪽 경계에 완충)으로 계속 재현 검증한다. 매니페스트 하나만 받아도 재현할 수 있다 (D-10 1). |
 | `population` | 범위 안에서 `kind ∈ kinds` 이고 시각이 정상인 채팅: `kinds`, `statuses`, 범위, 크기, `chat_ids_sha256`, `messages_sha256`. |
-| `excluded` | 뺀 건수: `non_text`, `invalid_time`, `buffer`([06](06-evaluation-and-agreement.md) 2-2 의 1~3번). |
-| `eligible` | 적격 채팅(모집단 − 경계 완충)의 `size`, `chat_ids_sha256`. |
+| `excluded` | 뺀 건수: `non_text`, `invalid_time`, `buffer`([06](06-evaluation-and-agreement.md) 2-2 의 1~3번), `out_of_media`. `out_of_media` 는 영상이 덮지 않는 채팅이다. 7-2 확인 범위(채팅 −10초 ~ +30초)가 영상 안에 다 들어와야 적격이다 (D-10 3). |
+| `eligible` | 적격 채팅(모집단 − 경계 완충 − 영상 밖)의 `size`, `chat_ids_sha256` (D-10 3). |
+| `media`, `boundary_buffers` | (v2 전용, 필수) 영상 밖 판정에 쓴 영상 범위·확인 범위, 그리고 뽑을 때 쓴 경계 완충을 원 구간 범위로 자르고 합친 목록. v2 완충은 이웃 구간의 분류에 달려 있어 원 구간 경계만으로는 다시 만들 수 없으므로 남긴다(매니페스트 하나로 재현). 지금 구간표의 완충·영상 범위가 이 값과 다르면 작업대가 '표본 갱신' 으로 다음 `sample_rev` 를 뽑게 한다(`reason` = `buffers_changed`·`media_changed`). |
 | `requested_size`, `census` | 요청 크기(`sample.per_segment`), 전수 여부(적격 수 ≤ `sample.census_max`). |
 | `tau_key`, `tau_real_key` | 임계 키 τ(적격이 0개면 `null`), 실제 시청자 보충용 τ_real(v1, [06](06-evaluation-and-agreement.md) 2-4, 없으면 `null`). |
 | `items[]` | `order`(제시 순서), `chat_id`, `t_ms`, `rank`(적격 중 key 순위), `sort_key`(선택), `role`(`base` = key ≤ τ / `origin_extend` = τ_real 보충분). |
 | `presentation_order` | 제시 순서 규칙. 기본 `time`(구간 안 시각 순, [06](06-evaluation-and-agreement.md) 2-8). |
 | `drawn_at/by`, `app_version` | |
 
-표본 항목의 판정 상태(`pending`/`judged`/`out_of_sample`)는 저장하지 않는다. 그 chat_id 에 같은 계열 매니페스트를 가리키는 유효한 `reaction`(entry=`from_sample`)이 있는지와, 그 chat_id 가 가장 큰 `sample_rev` 의 `items` 에 남아 있는지로 계산한다. 빠진 채팅의 판정은 지우지 않고 `out_of_sample` 로 표본 통계에서만 뺀다.
+표본 항목의 판정 상태(`pending`/`judged`/`out_of_sample`)는 저장하지 않는다. 그 세션에서 그 chat_id 에 (가) 같은 계열 매니페스트를 가리키는 유효한 `reaction`(entry=`from_sample`)이 있거나 (나) 유효한 ② `reaction`(entry=`from_utterance`)이 있거나 (다) 다른 계열(쪼개기·합치기 전 원 구간 등, [06](06-evaluation-and-agreement.md) 2-6)을 가리키는 유효한 `from_sample` 판정이 있는지와, 그 chat_id 가 가장 큰 `sample_rev` 의 `items` 에 남아 있는지로 계산한다(`core.sampling.item_states`). (나)는 D-10 4 다: ③ 은 이미 ② 라벨이 있는 채팅에 새 라벨을 만들지 않고 그 라벨을 고치므로(entry 는 `from_utterance` 그대로), 그 라벨이 곧 그 표본의 판정이다(채팅 1건 = 현재 유효 라벨 1건). (다)도 같다: 원 구간에서 뽑힌 채팅이 새 구간에 남으면 그 판정이 유지되고, ③ 은 그 라벨을 편집기(M)로 고치며(sample_ref 는 원 계열 그대로) 빠른 저장으로 두 번째 라벨을 만들지 않는다. 고를 머리 라벨은 같은 계열 > 다른 계열 > ② 순이다(`item_heads`). `out_of_sample` 은 같은 계열 판정만 센다. 표본 통계를 다시 셀 때도 매니페스트 `items` 의 chat_id 마다 그 세션의 현재 유효 `reaction` 하나(entry 무관)를 판정으로 쓴다. 빠진 채팅의 `from_sample` 판정은 지우지 않고 `out_of_sample` 로 표본 통계에서만 뺀다(② 라벨은 ② 라벨로 남는다).
 
 ### 6-14. 잠금 · 재라벨 계획 · 가상 채팅 생성 기록 · AI 봉인 · 보고서
 
@@ -747,6 +748,7 @@ flowchart LR
 ### 9-3. 시작값을 바꿀 때
 
 - 기본값 파일은 `assets/guide-config.v0.1.json`([스키마](../../schemas/guide-config.schema.json))이다. 값 하나라도 바꾸면 `guide_version` 을 올리고 `change_log` 에 이유를 적는다.
+- '들었다' 인정 비율은 기준서 시작값(`values`) 의 `recheck.heard_min_coverage`(기본 0.9)다. 안내서 7-2 영상 재확인 값이라 `recheck` 묶음에 둔다. 한 회차는 소리를 켜고 확인 범위를 이 비율 이상 덮어야 '들었다' 로 센다. 스키마에는 선택 항목이다. v0.1 파일은 이미 프로젝트들이 해시로 묶어 두었으므로 고치지 않는다. 값이 없으면 코드 기본값 0.9 를 쓴다. 다음 기준서 판부터 파일에 적는다 (D-10 6).
 - 앱 설정 화면에서 시작값을 고치면 '새 기준서 버전 만들기' 흐름으로만 저장된다. 이미 붙은 `guides[]` 항목은 바뀌지 않는다.
 - 안내서에 숫자가 없는 항목(같은 시간대 창, 채팅 속도 상한, 출처 대조 기준)은 `null` 이다. `null` 이면 그 값에 기대는 자동 제안을 하지 않는다.
 - 일치도 허용 오차(경계 짝짓기 창 등)는 기준서 시작값이 아니라 분석 설정(eval_settings)이라 guide-config 에 두지 않는다. 바꿔도 기준서 버전이 오르지 않고, 보고서마다 값과 해시를 기록한다([06](06-evaluation-and-agreement.md) 10장 D13, 6-14 보고서 `inputs.eval_settings`).
@@ -1121,7 +1123,7 @@ E, n          = 적격 수, requested_size (= sample.per_segment)
 | `labeler_package` (v1) | 다른 라벨러가 작업할 최소 자료(허용 목록) | 외부·두 번째 라벨러 |
 | `backup` | 라벨과 메타 | 복구 |
 
-모든 내보내기는 zip 하나에 `manifest.json` 을 넣는다([스키마 `$defs/exportManifest`](../../schemas/export-row.schema.json)). 매니페스트에는 파일별 크기·SHA-256, 필터, 기준서 해시, 활성 보정값, `messages_sha256`, 종류별 행 수, 제외 사유별 건수가 들어간다.
+모든 내보내기는 zip 하나에 `manifest.json` 을 넣는다([스키마 `$defs/exportManifest`](../../schemas/export-row.schema.json)). 매니페스트에는 파일별 크기·SHA-256, 필터, 기준서 해시, 활성 보정값, `messages_sha256`, 종류별 행 수, 제외 사유별 건수가 들어간다. 막지 않는 경고는 `warnings` 에 한 줄씩 적는다. 직접·높음 반응의 이어짐은 선택이라, 비어 있어도 내보낸다. 대신 비어 있는 반응 수를 경고 줄로 남긴다 (D-10 7).
 
 ### 16-2. 무엇이 들어가나 (허용 목록 방식)
 

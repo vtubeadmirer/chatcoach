@@ -3,7 +3,7 @@
 화면 (작업대 오른쪽 칸에 끼운다. 작업대 연결은 통합 담당이 한다)
   ┌ 머리 ───────────────────────────────────────────────────────────┐
   │ 표본: 구간 01:02:10 ~ 01:48:33   진행 37 / 100   적격 1,795       │
-  │ 시드 a91f…  draw 1  rev 1  τ 0e4b…  완충 60·후원 45 은 적격 밖 [재현 검증] │
+  │ 시드 a91f…  draw 1  rev 1  τ 0e4b…  완충·후원·영상 밖은 적격 밖 [재현 검증] │
   ├ 표본 카드 ──────────────────────────────────────────────────────┤
   │ 표본 #38 · 01:20:41 · 시청자 0233 · 대기                          │
   │ "본문"                                                           │
@@ -19,8 +19,11 @@
 규칙
   - 표본은 프로그램이 뽑는다. 이 화면에 뽑기·다시 뽑기·고르기 기능은 없다(안내서 2장). 매니페스트를 받아 보여 주기만 한다.
   - 블라인드(안내서 원칙 3, 03 12장): 엔진 결과·다른 세션 라벨·AI 등급 제안·출처 배지·2단계 연결 표시를 보이지 않는다.
-    채팅은 시각·시청자 번호·본문만 쓰고, 판정 기록은 자기 세션의 from_sample 반응만 센다(session_id 로 거른다).
+    채팅은 시각·시청자 번호·본문만 쓰고, 판정 기록은 자기 세션의 반응만 센다(session_id 로 거른다).
     등급을 미리 고르지 않는다. '반응 있음' 은 반응 편집기(7-3, 같은 부품)를 여는 요청일 뿐이다.
+  - 표본 채팅에 이미 자기 세션의 ② 반응 라벨이 있으면(08 D-10 4) 그 표본은 판정함으로 센다(sp.item_states). 새 라벨을
+    만들지 않는다: 'M' 은 그 라벨을 고치는 편집기를 열고, 반응 미확인·판단 불가 단추는 막는다(그 라벨의 내용을 보지 않고
+    덮어쓰지 않게). 화면에는 '② 라벨 있음' 만 보이고 등급·근거는 편집기를 열어야 보인다.
   - '반응 미확인' 과 '판단 불가' 는 여기서 바로 reaction 초안(result=unconfirmed)을 save 콜백으로 넘긴다.
     판단 불가 = result unconfirmed + confidence undeterminable (안내서 5장: 판정 자체를 못 내림).
   - 저장하면 다음 표본으로 간다(02 7-4). 들어가면 7-2 범위 [채팅 − pre_roll, 채팅 + post_roll] 반복·자동 재생.
@@ -91,7 +94,7 @@ def read_manifest_file(path: str) -> dict:
     with open(path, "rb") as f:
         data = f.read(MANIFEST_MAX_BYTES + 1)
     obj = load_json_strict(data, MANIFEST_MAX_BYTES)
-    if obj.get("schema") != sp.SCHEMA or obj.get("algorithm") != sp.ALGORITHM:
+    if obj.get("schema") != sp.SCHEMA or obj.get("algorithm") not in sp.ALGORITHMS:
         raise ValueError(f"표본 매니페스트가 아닙니다: {os.path.basename(path)}")
     sp.parse_sample_set_id(obj.get("sample_set_id"))
     return obj
@@ -199,6 +202,9 @@ class QueueView(QWidget):
         self._viewer_no: Mapping[str, int] | None = None
         self._states: dict[str, str] = {}
         self._heads: dict[str, tuple[str, str]] = {}
+        self._from_utt: set[str] = set()         # ② 반응 라벨로 판정된 표본 chat_id (D-10 4)
+        self._other_series: set[str] = set()     # 다른 계열(분할·병합 전 원 구간)의 ③ 판정으로 판정된 표본 chat_id (06 2-6)
+        self._coverage: sp.Coverage | None = None   # 영상이 덮는 VOD 범위. None = 검사 안 함 (D-10 3)
         self._out_of_sample: tuple[str, ...] = ()
         self._idx = -1
         self._player = None
@@ -358,7 +364,8 @@ class QueueView(QWidget):
                      viewer_no: Mapping[str, int] | None = None, player=None,
                      to_file: Callable[[int], int] | None = None, to_vod: Callable[[int], int] | None = None,
                      pre_roll_ms: int = DEFAULT_PRE_ROLL_MS, post_roll_ms: int = DEFAULT_POST_ROLL_MS,
-                     autoplay: bool = True, start_at: str | None = None) -> None:
+                     autoplay: bool = True, start_at: str | None = None,
+                     media_coverage: Iterable | None = None) -> None:
         """작업대 상태를 받는다.
 
         manifest: 이 계열의 가장 큰 sample_rev 매니페스트(sp.latest_of). None 이면 '표본 없음'.
@@ -367,7 +374,10 @@ class QueueView(QWidget):
         player: MpvPlayer 계약 모양(seek·set_ab_loop·play·show_text·position_ms). 없으면 rangeRequested 만 낸다.
         to_file / to_vod: VOD ↔ 영상 파일 시각 변환(작업대 TimeMap). 없으면 같은 값.
         start_at: 이 chat_id 에서 시작. 없으면 첫 '대기' 표본.
+        media_coverage: 영상이 덮는 VOD 범위(timecode.media_coverage). 표본 채팅의 7-2 범위가 그 밖이면 빠른 저장
+            ('반응 미확인'·'판단 불가')을 막는다(D-10 3, 편집기 M 과 같은 규칙). None = 검사 안 함, [] = 영상 없음.
         """
+        self._coverage = self._norm_cov(media_coverage)
         scope = vis.files_to_open(session_kind or "", phase) if session_kind else vis.BLOCKED
         self._can_read = scope.can_read("samples")
         self._can_write = scope.can_write_label("reaction")
@@ -410,21 +420,50 @@ class QueueView(QWidget):
                 continue
             own.append(r)
         self._heads = {}
+        self._from_utt = set()
+        self._other_series = set()
         if self._manifest is None:
             self._states, self._out_of_sample = {}, ()
             return
         self._states, self._out_of_sample = sp.item_states(self._manifest, own)
-        ser = sp.series_of(self._manifest["sample_set_id"])
-        for r in own:
-            b = r.get("body") if isinstance(r.get("body"), Mapping) else None
-            if not b or b.get("entry") != "from_sample" or not r.get("entity_id") or not r.get("id"):
-                continue
-            try:
-                if sp.series_of((b.get("sample_ref") or {}).get("sample_set_id", "")) != ser:
-                    continue
-            except sp.SamplingError:
-                continue
-            self._heads[b["chat_id"]] = (r["entity_id"], r["id"])
+        for cid, r in sp.item_heads(self._manifest, own).items():
+            self._heads[cid] = (r["entity_id"], r["id"])
+            self._classify_head(cid, r)
+
+    def _classify_head(self, cid: str, rec: Mapping) -> None:
+        """그 채팅의 머리 라벨이 ② 반응인지, 다른 계열 ③ 판정인지, 이 계열 판정인지 적는다(빠른 저장 막기용, D-10 4)."""
+        self._from_utt.discard(cid)
+        self._other_series.discard(cid)
+        if sp.head_is_this_series(self._manifest, rec):
+            return
+        b = rec.get("body") if isinstance(rec.get("body"), Mapping) else rec
+        if b.get("entry") == "from_utterance":
+            self._from_utt.add(cid)
+        elif b.get("entry") == "from_sample":
+            self._other_series.add(cid)
+
+    @staticmethod
+    def _norm_cov(coverage) -> sp.Coverage | None:
+        try:
+            return sp.normalize_coverage(coverage)
+        except (sp.SamplingError, TypeError, ValueError):
+            log.warning("큐 모드: 영상 범위 형식이 맞지 않아 영상 밖 검사를 하지 않습니다")
+            return None
+
+    def set_media_coverage(self, coverage) -> None:
+        """영상 범위만 바꾼다(영상 연결·교체 뒤). None = 검사 안 함, [] = 영상 없음."""
+        self._coverage = self._norm_cov(coverage)
+        self._refresh()
+
+    def item_in_media(self, item: Mapping | None = None) -> bool:
+        """표본 채팅의 7-2 확인 범위가 영상 안인가(D-10 3). 영상 범위를 모르거나 표본이 없으면 True."""
+        it = item or self.current_item()
+        if it is None:
+            return True
+        return sp.window_in_coverage(int(it["t_ms"]), self._coverage, self._pre, self._post)
+
+    def _existing_label(self, chat_id: str) -> bool:
+        return chat_id in self._from_utt or chat_id in self._other_series
 
     # ------------------------------------------------------------------ 조회
     @property
@@ -439,6 +478,14 @@ class QueueView(QWidget):
 
     def state_of(self, chat_id: str) -> str | None:
         return self._states.get(chat_id)
+
+    def has_stage2_label(self, chat_id: str) -> bool:
+        """그 표본 채팅을 자기 세션의 ② 반응 라벨이 판정하고 있는가 (D-10 4)."""
+        return chat_id in self._from_utt
+
+    def has_existing_label(self, chat_id: str) -> bool:
+        """그 표본 채팅을 이 계열 밖의 라벨(② 반응·다른 계열 ③ 판정)이 판정하고 있는가 — 빠른 저장을 막고 M 으로 고친다."""
+        return self._existing_label(chat_id)
 
     def out_of_sample(self) -> tuple[str, ...]:
         return self._out_of_sample
@@ -595,6 +642,15 @@ class QueueView(QWidget):
             self._say(why)
             return None
         it = self.current_item()
+        if it["chat_id"] in self._from_utt:
+            self._say(tr("이 채팅에는 ② 반응 라벨이 있습니다 — 새 라벨을 만들지 않고 그 라벨을 고칩니다 (M)"))
+            return None
+        if it["chat_id"] in self._other_series:
+            self._say(tr("이 채팅에는 원 구간 표본에서 매긴 판정이 있습니다 — 새 라벨을 만들지 않고 그 라벨을 고칩니다 (M)"))
+            return None
+        if not self.item_in_media(it):
+            self._say(tr("영상이 덮지 않는 자리라 저장하지 않았습니다 (확인 범위가 영상 밖) — 표본 갱신을 하세요"))
+            return None
         try:
             draft = unconfirmed_draft(self._manifest, it, confidence=conf, rationale=self.rationale.text(),
                                       head=self._heads.get(it["chat_id"]))
@@ -622,6 +678,7 @@ class QueueView(QWidget):
         self._states[cid] = sp.JUDGED
         if record.get("entity_id") and record.get("id"):
             self._heads[cid] = (record["entity_id"], record["id"])
+            self._classify_head(cid, record)
         self._say(tr("저장함"))
         if all(v == sp.JUDGED for v in self._states.values()):
             self._refresh()
@@ -682,9 +739,10 @@ class QueueView(QWidget):
             seed, draw_no = sp.parse_seed_material(m["seed_material"])
             ex = m["excluded"]
             census = tr(" · 전수") if m.get("census") else ""
-            self.meta.setText(tr("시드 {0}  draw {1}  rev {2}  τ {3}{4}  완충 {5}·후원 등 {6}·시각 이상 {7} 은 적격 밖").format(
-                _short(seed), draw_no, m["sample_rev"], _short(m.get("tau_key")), census,
-                ex["buffer"], ex["non_text"], ex["invalid_time"]))
+            oom = tr("·영상 밖 {0}").format(ex["out_of_media"]) if "out_of_media" in ex else ""
+            self.meta.setText(tr("{8} · 시드 {0}  draw {1}  rev {2}  τ {3}{4}  완충 {5}·후원 등 {6}·시각 이상 {7}{9} 은 적격 밖")
+                              .format(_short(seed), draw_no, m["sample_rev"], _short(m.get("tau_key")), census,
+                                      ex["buffer"], ex["non_text"], ex["invalid_time"], m.get("algorithm") or "-", oom))
         self.verify_btn.setEnabled(self._verify is not None and m is not None)
         it = self.current_item()
         if it is None:
@@ -694,6 +752,12 @@ class QueueView(QWidget):
         else:
             msg = self._msgs.get(it["chat_id"])
             state = tr("판정함") if self._states.get(it["chat_id"]) == sp.JUDGED else tr("대기")
+            if it["chat_id"] in self._from_utt:
+                state = tr("판정함 (② 라벨 있음 — M 으로 고치기)")
+            elif it["chat_id"] in self._other_series:
+                state = tr("판정함 (원 구간 표본의 판정 — M 으로 고치기)")
+            if not self.item_in_media(it):
+                state += tr(" · 영상 밖")
             self.item_line.setText(tr("표본 #{0} · {1} · {2} · {3}").format(
                 it["order"], tc.fmt_time(it["t_ms"], ms_digits=False, always_hours=True),
                 _viewer_text(msg, self._viewer_no), state))
@@ -704,9 +768,31 @@ class QueueView(QWidget):
                 tc.fmt_time(a, ms_digits=False, always_hours=True), tc.fmt_time(b, ms_digits=False, always_hours=True)))
         self.loop_btn.setChecked(self._loop_on and it is not None)
         can = has and self._can_write and it is not None
-        for w in (self.react_btn, self.unconf_btn, self.undet_btn, self.rationale, self.time_btn,
-                  *self.conf_btns.values()):
-            w.setEnabled(can)
+        stage2 = it is not None and it["chat_id"] in self._from_utt
+        other = it is not None and it["chat_id"] in self._other_series
+        outside = it is not None and not self.item_in_media(it)
+        if stage2:
+            self.react_btn.setText(tr("② 라벨 고치기 → 편집기 M"))
+        elif other:
+            self.react_btn.setText(tr("원 구간 판정 고치기 → 편집기 M"))
+        else:
+            self.react_btn.setText(tr("반응 있음 → 편집기 M"))
+        self.react_btn.setEnabled(can)
+        quick = can and not stage2 and not other
+        for w in (self.rationale, self.time_btn, *self.conf_btns.values()):
+            w.setEnabled(quick)
+        for w in (self.unconf_btn, self.undet_btn):
+            w.setEnabled(quick and not outside)
+        if stage2:
+            tip = tr("이 채팅에는 ② 반응 라벨이 있어 새 라벨을 만들지 않습니다 — 편집기(M)로 고치세요")
+        elif other:
+            tip = tr("이 채팅에는 원 구간 표본에서 매긴 판정이 있어 새 라벨을 만들지 않습니다 — 편집기(M)로 고치세요")
+        elif outside:
+            tip = tr("확인 범위가 영상 밖이라 저장할 수 없습니다 — 표본 갱신을 하세요")
+        else:
+            tip = ""
+        for w in (self.unconf_btn, self.undet_btn):
+            w.setToolTip(tip)
         self.loop_btn.setEnabled(it is not None)
         self.prev_btn.setEnabled(has and self._idx > 0)
         self.next_btn.setEnabled(has and self._idx + 1 < len(self._items))

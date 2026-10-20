@@ -108,7 +108,9 @@ def cid(i):
     return f"c{i:020x}"
 
 
-def make_project(tmp_path):
+def make_project(tmp_path, media_ms=DURATION):
+    """합성 프로젝트. media_ms 를 주면(기본: 방송 전체) 그 길이의 영상이 연결된 것으로 적는다(파일은 없음, D-10 3).
+    0 이나 None 이면 영상 없음 — 구간·반응 저장과 표본 뽑기가 막힌다."""
     proj = project_mod.create(str(tmp_path / "한글 프로젝트"), "합성 방송", "0", labeler_id="L01",
                               created_app_version="0.0.0", now=NOW, salt=bytes(range(32)),
                               sample_seed="0" * 32, engine_author=False, machine4="test", duration_ms=DURATION)
@@ -122,7 +124,27 @@ def make_project(tmp_path):
     cal = tc.Calibration(offset_ms=0, rev=1, status="verified", created_at=NOW.isoformat(), created_by="L01")
     proj.update(lambda d: d.__setitem__("calibration", tc.append_rev(d["calibration"], tc.calibration_to_json(cal))),
                 now=NOW, by="L01")
+    if media_ms:
+        set_media(proj, media_ms)
     return proj
+
+
+def fake_media_ref(tmp_path_or_root, duration_ms):
+    """mediaRef 모양(파일은 없다). 영상이 덮는 범위(D-10 3)는 project.json 의 영상 길이·보정만으로 정해진다."""
+    return {"path_abs": os.path.join(str(tmp_path_or_root), "합성 영상 없음.mp4"), "path_rel": None, "size": 1,
+            "mtime_ns": 0, "partial_fp": "0" * 64, "full_sha256": None, "ntfs_file_id": None, "volume_serial": None,
+            "probe": {"duration_ms": int(duration_ms), "video_codec": None, "audio_codec": None, "width": None,
+                      "height": None, "r_frame_rate": None, "avg_frame_rate": None, "vfr": False, "nb_frames": None}}
+
+
+def set_media(proj, duration_ms):
+    """project.json media.current 를 합성 mediaRef 로(영상 파일 0초 = VOD 0초, 보정 offset 0)."""
+    ref = fake_media_ref(proj.root, duration_ms)
+
+    def mut(d):
+        d["media"]["current"] = ref
+        d["media"]["media_rev"] = 1
+    proj.update(mut, now=NOW, by="L01")
 
 
 def session():
@@ -354,7 +376,22 @@ def test_full_labeling_flow_export_and_reopen(qapp, tmp_path):
         rec = q.judge_unconfirmed()
         assert rec is not None and rec["body"]["entry"] == "from_sample"
         assert q.state_of(first) == "judged"
-        assert q.progress().done == 1
+        # ② 라벨이 있는 표본(채팅 12)도 판정함으로 센다 (08 D-10 4: 채팅 1건 = 현재 유효 라벨 1건)
+        assert q.state_of(cid(12)) == "judged" and q.has_stage2_label(cid(12))
+        assert q.progress().done == 2
+        assert man["algorithm"] == "sha256-tau-v2" and man["media"]["coverage"] == [[0, DURATION]]
+        # ③ 에서 그 표본을 고르면: 반응 미확인 단추는 막히고, M 은 ② 라벨을 고치는 편집기를 연다(새 라벨 없음)
+        eid12 = wb.reaction_for_chat(cid(12))["entity_id"]
+        q.go(next(i for i, it in enumerate(q._items) if it["chat_id"] == cid(12)))
+        n_before = len(wb.store.records())
+        assert q.judge_undeterminable() is None and len(wb.store.records()) == n_before
+        assert not q.unconf_btn.isEnabled() and "② 라벨" in q.react_btn.text()
+        wb.mark_reaction()
+        assert wb.is_editing() and wb.editor._existing["entity_id"] == eid12 and wb.editor._entry == "from_utterance"
+        res12 = wb.editor.save()
+        assert res12 is not None, wb.editor.msg.text()
+        assert res12["reaction"]["entity_id"] == eid12 and res12["reaction"]["body"]["entry"] == "from_utterance"
+        assert q.progress().done == 2 and wb.right.currentWidget() is wb.page_samples
         # 블라인드: 큐·편집기 어디에도 등급 제안·엔진이 없다
         assert "engine" not in wb.timeline.markers
         # 내보내기 → zip

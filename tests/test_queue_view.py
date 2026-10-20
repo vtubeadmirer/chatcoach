@@ -143,13 +143,14 @@ def test_blind_nothing_from_engine_or_other_sessions(qapp):
         # 다른 세션의 표본 판정 → 무시
         {"id": "x", "entity_id": "y", "session_id": "L02-P-20261021-zzzz",
          "body": {"chat_id": first, "entry": "from_sample", "sample_ref": {"sample_set_id": m["sample_set_id"], "order": 1}}},
-        # 자기 세션 2단계 반응 → 2단계 연결 표시는 숨기므로 판정함으로 세지 않는다
+        # 자기 세션 ② 반응 → 판정함으로 센다(08 D-10 4). 등급·근거는 큐 화면에 보이지 않는다(편집기를 열어야 보임)
         {"id": "x2", "entity_id": "y2", "session_id": SID,
          "body": {"chat_id": second, "entry": "from_utterance", "grade": "direct", "rationale": SECRET}},
     ]
     v = qv.QueueView(Saver(), lambda: None)
     v.load_context(manifest=m, messages=msgs, session_kind="primary", session_id=SID, reactions=reactions)
-    assert v.state_of(first) == sp.PENDING and v.state_of(second) == sp.PENDING
+    assert v.state_of(first) == sp.PENDING and v.state_of(second) == sp.JUDGED
+    assert v.has_stage2_label(second) and not v.has_stage2_label(first)
     assert v.current_index() == 0
     for i in range(len(m["items"])):
         v.go(i)
@@ -356,3 +357,62 @@ def test_manifest_file_roundtrip(tmp_path):
     with pytest.raises(sp.SamplingError):
         qv.manifest_path(d, "../evil")
     assert not [n for n in os.listdir(d) if n.endswith(".tmp")]
+
+
+# --------------------------------------------------------------------------- 다른 계열 판정·영상 범위 (검토 수정)
+def test_other_series_label_counts_and_blocks_quick_save(qapp):
+    """분할·병합 전 원 구간 계열의 ③ 판정이 있는 표본 채팅(06 2-6): 판정함으로 세고, M 은 그 라벨을 고치며,
+    빠른 저장은 새 라벨(같은 채팅 두 번째 현재 유효 라벨)을 만들지 않는다(D-10 4)."""
+    msgs = synth_messages()
+    m = build(msgs)
+    first = m["items"][0]["chat_id"]
+    eid, lid = "00000000-0000-4000-8000-0000000000c1", "00000000-0000-4000-8000-0000000000c2"
+    old_ref = {"sample_set_id": "S-aaaaaaaa-d1-r1", "order": 7}
+    reactions = [{"id": lid, "entity_id": eid, "session_id": SID,
+                  "body": {"chat_id": first, "entry": "from_sample", "sample_ref": old_ref}}]
+    saver = Saver()
+    v = qv.QueueView(saver, lambda: None)
+    v.load_context(manifest=m, messages=msgs, session_kind="primary", session_id=SID, reactions=reactions,
+                   start_at=first)
+    assert v.state_of(first) == sp.JUDGED and v.has_existing_label(first) and not v.has_stage2_label(first)
+    assert "진행 1 / 20" in v.head.text() and "원 구간" in v.item_line.text()
+    assert not v.unconf_btn.isEnabled() and not v.undet_btn.isEnabled() and v.react_btn.isEnabled()
+    v.set_confidence("certain")          # 꺼진 단추라 골라지지 않는다
+    v.rationale.setText("x")
+    assert v.judge_undeterminable() is None and saver.drafts == []
+    assert "원 구간" in v.msg.text()
+    # M → 그 라벨(entity_id·supersedes)을 고치는 편집기 요청
+    got = []
+    v.reactionEditorRequested.connect(got.append)
+    v.request_reaction_editor()
+    assert got[-1]["entity_id"] == eid and got[-1]["supersedes"] == lid
+    # 편집기가 원 sample_ref 를 그대로 둔 채 저장 → 다시 읽어도 판정함 그대로(진행이 내려가지 않는다)
+    newrec = {"id": "00000000-0000-4000-8000-0000000000c3", "entity_id": eid, "session_id": SID,
+              "body": {"chat_id": first, "entry": "from_sample", "sample_ref": old_ref}}
+    v.mark_saved(newrec)
+    v.set_reactions([newrec])
+    assert v.state_of(first) == sp.JUDGED and "진행 1 / 20" in v.head.text()
+    assert v.has_existing_label(first)
+
+
+def test_quick_save_blocked_outside_media(qapp):
+    """영상이 덮지 않는 표본 채팅(영상 교체로 범위가 바뀜, v1 매니페스트 등): 빠른 저장도 막는다(D-10 3)."""
+    v, m, _, saver = make_view(qapp, media_coverage=[])          # 영상 없음
+    assert not v.item_in_media() and not v.unconf_btn.isEnabled() and not v.undet_btn.isEnabled()
+    assert "영상 밖" in v.item_line.text()
+    v.set_confidence("certain")
+    v.rationale.setText("x")
+    assert v.judge_undeterminable() is None and saver.drafts == []
+    assert "영상" in v.msg.text()
+    # 영상을 다시 연결해 범위가 표본을 덮으면 저장된다
+    v.set_media_coverage([(0, 10_000_000)])
+    assert v.item_in_media() and v.unconf_btn.isEnabled()
+    v.rationale.setText("x")
+    assert v.judge_undeterminable() is not None and len(saver.drafts) == 1
+    # 확인 범위(−10초 ~ +30초)가 영상 끝을 넘으면 밖
+    it = v.current_item()
+    v.set_media_coverage([(0, it["t_ms"] + 29_000)])
+    assert not v.item_in_media()
+    # None = 검사 안 함
+    v.set_media_coverage(None)
+    assert v.item_in_media()

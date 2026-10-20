@@ -25,9 +25,16 @@
   강한 증거가 0개면 거부(rules.direct_allowed).
 - 조건 충족 등급에 없는 등급을 고르면 grade_vs_conditions='deviates' 이고 사유(override_reason)가 필수다.
 - 반응 미확인(Ctrl+5)은 후보 발화가 없을 때만. 대상 채팅은 일반 채팅(kind=text)이고 저스트채팅 구간 안이어야 한다.
+- 영상 밖(D-10 3): load_context(media_coverage=...) 로 영상이 덮는 VOD 구간들을 받으면, 대상 채팅의 7-2 범위
+  [채팅 − pre_roll, 채팅 + post_roll] 이 그 안에 다 들어와야 저장된다(표본 적격 규칙과 같은 범위). None 이면 검사하지 않는다.
+- 채팅 1건 = 현재 유효 라벨 1건(D-10 4): load_context(label_of=…) 로 '그 채팅의 지금 반응 라벨 entity_id' 를 받으면,
+  고르는 대상 채팅에 이 편집이 고치는 것과 다른 라벨이 이미 있을 때 저장을 막는다(그 라벨을 고쳐야 한다).
 규칙 (저장은 되지만 표시·기록하는 것)
 - 직접·높음은 7-2 재확인('들었다' 고 인정된 회차 min_views 이상)이 없으면 '완료' 가 아니다(질문 15 기본안).
   result['complete'] = False, warning(recheck_missing). 타임라인은 속이 빈 표시(작업대 몫).
+  '들었다' 인정 비율은 기준서 시작값 recheck.heard_min_coverage(없으면 rules.HEARD_MIN_COVERAGE, D-10 6).
+- 직접·높음에서 이어짐을 비우면 경고 줄 continuation_missing(D-10 7, 막지 않음). 운영 기록에는 code 'other' 로 남긴다
+  (label-event 스키마의 warning code 목록에 없어서).
 - 확인 범위를 소리로 듣지 않음(audio_not_heard), 근거에 시각 없음(rationale_without_time),
   발화가 채팅보다 앞서는데 '되풀이' 체크(repeat_before_chat), 조건과 다르게 확정(grade_rule_override).
 
@@ -48,8 +55,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFormLayout, QFrame, QGridLayout, QGroupBox,
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
                                QVBoxLayout, QWidget)
 
 from ...core import rules
@@ -57,6 +64,7 @@ from ...core import visibility as vis
 from ...core.timecode import fmt_time, parse_time, parse_timestamps
 from ...i18n import tr
 from ..chat_panel import KIND_CODES, ChatData, clean_line, fmt_viewer_no
+from ..review_player import POST_ROLL_MS, PRE_ROLL_MS, merge_ranges, review_window
 from .continuation_editor import ContinuationEditor
 from .evidence_widget import EvidenceWidget, normalize_evidence
 
@@ -80,6 +88,12 @@ RATIONALE_MAX = 300
 OVERRIDE_MAX = 300
 LINKED_GRADES = ("direct", "likely")       # 연결 발화·반응 시각 필수, 이어짐·재확인 대상
 JUST_CHATTING = "just_chatting"
+CONTINUATION_MISSING = "continuation_missing"   # 편집기 경고 줄 코드(D-10 7). 운영 기록에는 'other' 로
+# label-event.schema.json $defs/warningBody.code 목록. 이 밖의 코드는 운영 기록에 'other' 로 쓴다.
+OPS_WARNING_CODES = frozenset({"audio_not_heard", "recheck_missing", "grade_rule_override", "rationale_without_time",
+                               "repeat_before_chat", "calibration_unverified", "relabel_too_early", "segment_too_short",
+                               "long_silence_signal", "clock_skew", "other"})
+_KEEP = object()                                 # load_context 에서 '넘기지 않음' 표시(None 과 구분)
 
 
 # ---------------------------------------------------------------------------- 후보 발화 상태
@@ -115,6 +129,35 @@ class Validation:
 def utterance_body(c: Candidate, segment_id: str | None) -> dict:
     return {"segment_id": segment_id, "start_ms": int(c.start_ms), "end_ms": int(c.end_ms),
             "heard_text": c.heard_text.strip()[:HEARD_MAX], "heard_text_source": c.heard_source}
+
+
+def normalize_coverage(coverage) -> list[tuple[int, int]] | None:
+    """영상이 덮는 VOD 구간들([시작, 끝) ms 쌍, 또는 {start_ms, end_ms}) → 합친 목록. None 은 None(검사 안 함).
+    모양이 틀린 칸은 버린다."""
+    if coverage is None:
+        return None
+    out = []
+    for r in coverage:
+        if isinstance(r, Mapping):
+            r = (r.get("start_ms"), r.get("end_ms"))
+        try:
+            a, b = r
+        except (TypeError, ValueError):
+            continue
+        if all(isinstance(v, (int, float)) and not isinstance(v, bool) and v == v for v in (a, b)):
+            out.append((int(a), int(b)))
+    return merge_ranges(out)
+
+
+def review_window_in_media(chat_ms: int, coverage, pre_roll_ms: int = PRE_ROLL_MS,
+                           post_roll_ms: int = POST_ROLL_MS) -> bool:
+    """대상 채팅의 7-2 확인 범위 [채팅 − pre_roll, 채팅 + post_roll](review_window: 시작은 0 아래로 내리지 않음)가
+    영상이 덮는 구간 하나 안에 다 들어오는가(D-10 3). coverage 가 None 이면 늘 True(검사 안 함)."""
+    cov = normalize_coverage(coverage)
+    if cov is None:
+        return True
+    a, b = review_window(int(chat_ms), None, pre_roll_ms, post_roll_ms)
+    return any(s <= a and b <= e for s, e in cov)
 
 
 def find_segment(segments: Sequence[Mapping], t_ms: int | None) -> Mapping | None:
@@ -181,6 +224,11 @@ class ReactionEditor(QWidget):
         self._asr_lookup: Callable[[int, int], str | None] | None = None
         self.review = None
         self._min_views = 2
+        self._min_coverage = rules.HEARD_MIN_COVERAGE   # 기준서 recheck.heard_min_coverage(D-10 6)
+        self._pre_roll_ms = PRE_ROLL_MS
+        self._post_roll_ms = POST_ROLL_MS
+        self._media_coverage: list[tuple[int, int]] | None = None   # 영상이 덮는 VOD 구간들. None = 검사 안 함
+        self._label_of: Callable[[str], str | None] | None = None    # chat_id → 그 채팅의 현재 반응 라벨 entity_id
         # 편집 상태
         self._open = False
         self._reaction_ms: int | None = None
@@ -236,8 +284,11 @@ class ReactionEditor(QWidget):
         lay.addLayout(row)
 
         # 후보 채팅
-        box = QGroupBox(tr("대상 채팅 (반응 지점 −60초 ~ +5초 · 고른 줄 = 대상 · 체크 = 비슷한 채팅)"))
+        box = QGroupBox(tr("대상 채팅 (반응 지점 −60초 ~ +5초)"))
         bl = QVBoxLayout(box)
+        hint = QLabel(tr("고른 줄 = 대상 · 체크 = 비슷한 채팅"))
+        hint.setWordWrap(True)
+        bl.addWidget(hint)
         self.chat_list = QListWidget()
         self.chat_list.setObjectName("candidate_chats")
         self.chat_list.setMinimumHeight(120)
@@ -253,9 +304,9 @@ class ReactionEditor(QWidget):
         self.on_topic = QCheckBox(tr("스트리머가 이미 그 주제를 말하던 중"))
         self.on_topic.toggled.connect(lambda _on: self._recompute())
         srow.addWidget(self.similar_box)
-        srow.addWidget(self.on_topic)
         srow.addStretch(1)
         bl.addLayout(srow)
+        bl.addWidget(self.on_topic)          # 다음 줄 (좁은 화면, 11 4-2 의 2)
         self.target_info = QLabel("")
         self.target_info.setWordWrap(True)
         bl.addWidget(self.target_info)
@@ -271,7 +322,8 @@ class ReactionEditor(QWidget):
         self.cand_add = QPushButton(tr("+ 후보 추가"))
         self.cand_del = QPushButton(tr("후보 지우기"))
         self.linked_box = QCheckBox(tr("연결 발화 (직접·높음일 때)"))
-        for w in (self.cand_prev, self.cand_label, self.cand_next, self.cand_add, self.cand_del, self.linked_box):
+        # 1366×768 에서 편집기 칸(약 470px)에 들어가게 '연결 발화' 는 다음 줄에 둔다(11 4-2 의 2)
+        for w in (self.cand_prev, self.cand_label, self.cand_next, self.cand_add, self.cand_del):
             nav.addWidget(w)
         nav.addStretch(1)
         self.cand_prev.clicked.connect(lambda: self._switch_cand(self._cur - 1))
@@ -280,21 +332,26 @@ class ReactionEditor(QWidget):
         self.cand_del.clicked.connect(self.remove_candidate)
         self.linked_box.toggled.connect(self._on_linked_toggled)
         cl.addLayout(nav)
+        cl.addWidget(self.linked_box)
         form = QFormLayout()
         trow = QHBoxLayout()
+        erow = QHBoxLayout()
         self.utt_start = QLineEdit()
         self.utt_start.setObjectName("utt_start")
         self.utt_end = QLineEdit()
         self.utt_end.setObjectName("utt_end")
         self.utt_start_now = QPushButton(tr("시작=지금"))
         self.utt_end_now = QPushButton(tr("끝=지금"))
-        for w in (self.utt_start, self.utt_start_now, QLabel("~"), self.utt_end, self.utt_end_now):
+        for w in (self.utt_start, self.utt_start_now):
             trow.addWidget(w)
+        for w in (self.utt_end, self.utt_end_now):
+            erow.addWidget(w)
         self.utt_start_now.clicked.connect(lambda: self._utt_now(self.utt_start))
         self.utt_end_now.clicked.connect(lambda: self._utt_now(self.utt_end))
         self.utt_start.editingFinished.connect(self._on_utt_times)
         self.utt_end.editingFinished.connect(self._on_utt_times)
-        form.addRow(tr("발화"), trow)
+        form.addRow(tr("발화 시작"), trow)
+        form.addRow(tr("발화 끝"), erow)
         hrow = QHBoxLayout()
         self.heard = QLineEdit()
         self.heard.setObjectName("heard_text")
@@ -331,9 +388,12 @@ class ReactionEditor(QWidget):
         lay.addWidget(self.cond_label)
 
         # 등급
-        gbox = QGroupBox(tr("등급 (Ctrl+1~4, 반응 미확인 Ctrl+5) — 조건과 다르게 고르면 사유 필수"))
+        gbox = QGroupBox(tr("등급 (Ctrl+1~5)"))
         gl = QVBoxLayout(gbox)
-        grow = QHBoxLayout()
+        ghint = QLabel(tr("반응 미확인 Ctrl+5 · 조건과 다르게 고르면 사유 필수"))
+        ghint.setWordWrap(True)
+        gl.addWidget(ghint)
+        grow = QGridLayout()                     # 2칸씩(좁은 화면에서 잘리지 않게, 11 4-2 의 2)
         self.grade_group = QButtonGroup(self)
         self.grade_buttons: dict[str, QPushButton] = {}
         for i, g in enumerate(GRADES + (UNCONFIRMED,), start=1):
@@ -343,7 +403,7 @@ class ReactionEditor(QWidget):
             b.setObjectName(f"grade_{g}")
             self.grade_group.addButton(b)
             self.grade_buttons[g] = b
-            grow.addWidget(b)
+            grow.addWidget(b, (i - 1) // 2, (i - 1) % 2)
             b.clicked.connect(lambda _c=False, gg=g: self.set_grade(gg))
         gl.addLayout(grow)
         urow = QHBoxLayout()
@@ -447,14 +507,22 @@ class ReactionEditor(QWidget):
     def load_context(self, *, chats=None, segments: Sequence[Mapping] | None = None,
                      thresholds: Mapping | None = None, session_kind: str | None = None, phase: str | None = None,
                      position_fn: Callable[[], int] | None = None, review=None,
-                     asr_lookup: Callable[[int, int], str | None] | None = None) -> None:
+                     asr_lookup: Callable[[int, int], str | None] | None = None,
+                     heard_min_coverage: float | None = None, media_coverage=_KEEP,
+                     label_of: Callable[[str], str | None] | None = None) -> None:
         """작업대 상태를 받는다. 부르지 않은 인자는 그대로 둔다(None 을 넘기면 비운다는 뜻이 아니다).
+        단 media_coverage 만은 None 을 넘기면 '검사 안 함' 으로 되돌린다(넘기지 않으면 그대로).
 
         chats: ChatData(병렬 배열, chat_panel) 또는 messages.jsonl 줄 dict 목록.
         segments: 이 세션의 현재 유효 구간 레코드(entity_id + body) — 반응·발화의 segment_id 를 정한다.
         thresholds: guide-config values(또는 project.json guides[].thresholds). 등급 규칙·재확인 시작값.
         session_kind / phase: visibility 로 자동 인식 문장 보기를 정한다.
         position_fn: 지금 VOD 위치(ms). review: ReviewPlayer. asr_lookup(start_ms, end_ms) → 참고 문장 또는 None.
+        heard_min_coverage: '들었다' 인정 비율을 직접 줄 때. 주지 않으면 thresholds 의 recheck.heard_min_coverage,
+            그것도 없으면 rules.HEARD_MIN_COVERAGE. review 에도 같은 값을 넘긴다(D-10 6, 전역 상태 없음).
+        media_coverage: 영상이 덮는 VOD 구간들 [(start_ms, end_ms), ...]. 대상 채팅의 7-2 범위가 그 밖이면
+            저장을 막고 이유를 보인다(D-10 3). None 이면 검사하지 않는다(지금처럼). 빈 목록은 '영상이 덮는 곳 없음'.
+        label_of: chat_id → 그 채팅에 이미 있는 (이 세션의) 현재 반응 라벨 entity_id 또는 None (D-10 4).
         """
         if chats is not None:
             self._chats = chats if isinstance(chats, ChatData) else ChatData(list(chats))
@@ -470,7 +538,17 @@ class ReactionEditor(QWidget):
             rc = thresholds.get("recheck") if isinstance(thresholds, Mapping) else None
             if isinstance(rc, Mapping) and isinstance(rc.get("min_views_direct_likely"), int):
                 self._min_views = int(rc["min_views_direct_likely"])
+            if isinstance(rc, Mapping):
+                for key, attr in (("pre_roll_sec", "_pre_roll_ms"), ("post_roll_sec", "_post_roll_ms")):
+                    v = rc.get(key)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and v >= 0:
+                        setattr(self, attr, int(round(v * 1000)))
+            self._min_coverage = rules.heard_min_coverage(thresholds)
             self.evidence.set_config(self._cfg)
+        if heard_min_coverage is not None:
+            self._min_coverage = float(heard_min_coverage)
+        if media_coverage is not _KEEP:
+            self._media_coverage = normalize_coverage(media_coverage)
         if session_kind is not None:
             self._session_kind = session_kind
         if phase is not None:
@@ -482,12 +560,19 @@ class ReactionEditor(QWidget):
             if self.review is not None:
                 self._disconnect_review()
             self.review = review
-            if hasattr(review, "set_thresholds") and thresholds is not None:
-                review.set_thresholds(thresholds)
             review.passStarted.connect(self._on_pass_started)
             review.coverageChanged.connect(self._on_coverage)
+        if self.review is not None and (thresholds is not None or heard_min_coverage is not None
+                                        or review is not None):
+            # 재생기도 편집기와 같은 '들었다' 기준을 쓴다(내보내기·마커와 같은 값)
+            if thresholds is not None and hasattr(self.review, "set_thresholds"):
+                self.review.set_thresholds(thresholds)
+            if hasattr(self.review, "set_config"):
+                self.review.set_config(min_coverage=self._min_coverage)
         if asr_lookup is not None:
             self._asr_lookup = asr_lookup
+        if label_of is not None:
+            self._label_of = label_of
         self.continuation.load_context(chats=self._chats, thresholds=self._thresholds,
                                        position_fn=self._position_fn)
         self._update_asr_controls()
@@ -499,6 +584,20 @@ class ReactionEditor(QWidget):
                 getattr(r, sig).disconnect(slot)
             except (RuntimeError, TypeError, AttributeError):
                 pass
+
+    def heard_min_coverage(self) -> float:
+        """이 편집기가 쓰는 '들었다' 인정 비율."""
+        return self._min_coverage
+
+    def media_coverage(self) -> list[tuple[int, int]] | None:
+        return None if self._media_coverage is None else list(self._media_coverage)
+
+    def target_in_media(self) -> bool:
+        """대상 채팅의 7-2 범위가 영상 안인가. 영상 범위를 모르거나(None) 대상이 없으면 True."""
+        chat_ms = self._chat_time(self._target)
+        if chat_ms is None or self._media_coverage is None:
+            return True
+        return review_window_in_media(chat_ms, self._media_coverage, self._pre_roll_ms, self._post_roll_ms)
 
     def asr_policy(self) -> str:
         """자동 인식 문장 보이기 정책(visibility). 세션 종류를 모르면 NEVER."""
@@ -1046,11 +1145,26 @@ class ReactionEditor(QWidget):
             errs.append(tr("대상 채팅이 일반 채팅이 아닙니다(후원·시스템은 판정하지 않음)"))
         chat_ms = self._chat_time(self._target)
         seg = find_segment(self._segments, chat_ms)
+        if self._target and self._label_of is not None:
+            try:
+                other = self._label_of(self._target)
+            except Exception:  # noqa: BLE001 — 조회 실패는 막지 않는다(store 가 판 연결을 다시 본다)
+                other = None
+            mine = (self._existing or self._saved_reaction or {}).get("entity_id")
+            if other is not None and other != mine:
+                errs.append(tr("이 채팅에는 이미 반응 라벨이 있습니다 — 새로 만들지 않고 그 라벨을 고치세요 (채팅 1건 = 라벨 1건)"))
         if self._target and chat_ms is not None:
             if seg is None or _seg_body(seg).get("category") != JUST_CHATTING:
                 errs.append(tr("대상 채팅이 저스트채팅 구간 밖입니다(구간 라벨을 먼저)"))
             elif _seg_id(seg) is None:
                 errs.append(tr("구간 라벨에 entity_id 가 없습니다"))
+            if not self.target_in_media() and not self._media_coverage:
+                errs.append(tr("영상이 연결되지 않아 저장할 수 없습니다 — 먼저 영상을 연결하세요 (소리를 들을 수 없는 자리는 판정하지 않음)"))
+            elif not self.target_in_media():
+                a, b = review_window(chat_ms, None, self._pre_roll_ms, self._post_roll_ms)
+                errs.append(tr("대상 채팅의 확인 범위({0} ~ {1})가 영상 밖이라 소리를 들을 수 없어 저장할 수 없습니다"
+                               " (영상이 덮는 자리의 채팅만 판정)").format(
+                    fmt_time(a, frac_digits=0, always_hours=True), fmt_time(b, frac_digits=0, always_hours=True)))
         # 등급
         if g is None:
             errs.append(tr("등급을 고르세요 (반응 미확인이면 Ctrl+5)"))
@@ -1107,6 +1221,8 @@ class ReactionEditor(QWidget):
         # 이어짐
         if g in LINKED_GRADES and self.continuation.is_touched():
             errs.extend(self.continuation.errors())
+        elif g in LINKED_GRADES:
+            warns.append((CONTINUATION_MISSING, tr("직접·높음 반응인데 이어짐을 비웠습니다 — 저장은 됩니다(이어짐은 선택)")))
         # 들은 범위·재확인
         heard = self._heard_count()
         if self.review is not None and heard == 0:
@@ -1120,7 +1236,8 @@ class ReactionEditor(QWidget):
 
     def _heard_count(self) -> int:
         """'들었다' 고 인정된 회차 수 = 불러온 영상 확인 기록 + 이번 편집의 회차."""
-        prior = rules.heard_count([(v.get("body") or v) for v in self._prior_checks])   # 내보내기·마커와 같은 규칙
+        prior = rules.heard_count([(v.get("body") or v) for v in self._prior_checks],
+                                  self._min_coverage)      # 내보내기·마커와 같은 규칙·같은 비율
         if self.review is None:
             return prior
         return prior + self.review.heard_count()
@@ -1431,6 +1548,9 @@ class ReactionEditor(QWidget):
     def _write_warning(self, code: str, entity_id: str | None, detail: str) -> None:
         if self._ops_cb is None:
             return
+        if code not in OPS_WARNING_CODES:
+            detail = f"{code}: {detail}"
+            code = "other"
         try:
             self._ops_cb("warning", {"code": code, "action": "shown", "entity_id": entity_id,
                                      "detail": detail[:300]})
@@ -1470,5 +1590,5 @@ def _err_text(e: Exception) -> str:
     return str(e) or type(e).__name__
 
 
-__all__ = ["ReactionEditor", "Candidate", "Validation", "find_segment", "utterance_body",
-           "GRADES", "GRADE_LABELS", "UNCONFIRMED", "CONFIDENCES"]
+__all__ = ["ReactionEditor", "Candidate", "Validation", "find_segment", "utterance_body", "normalize_coverage",
+           "review_window_in_media", "GRADES", "GRADE_LABELS", "UNCONFIRMED", "CONFIDENCES", "CONTINUATION_MISSING"]

@@ -1,4 +1,4 @@
-"""app/core/sampling.py 시험 — sha256-tau-v1 (06 2장, 03 6-13·15장, 02 3-3).
+"""app/core/sampling.py 시험 — sha256-tau-v2(기본)·v1(재현) (06 2장, 03 6-13·15장, 02 3-3, 08 D-10 1·3).
 
 합성 데이터만 쓴다(채팅 본문은 'x' 같은 자리표시). 실제 채팅·닉네임은 넣지 않는다.
 """
@@ -254,7 +254,10 @@ def test_manifest_shape_and_schema():
     m = make(pop)
     assert m["sample_set_id"] == "S-7f3c2a1b-d1-r1" and m["sample_rev"] == 1
     assert m["previous_sample_rev"] is None and m["changes"] is None and m["reason"] == "initial"
-    assert m["excluded"] == {"non_text": 1, "invalid_time": 1, "buffer": pop.excluded_buffer}
+    assert m["algorithm"] == "sha256-tau-v2"
+    assert m["excluded"] == {"non_text": 1, "invalid_time": 1, "buffer": pop.excluded_buffer, "out_of_media": 0}
+    # coverage 를 넘기지 않았으면 'coverage 없음' 을 명시한다
+    assert m["media"] == {"coverage": None, "pre_roll_ms": 10_000, "post_roll_ms": 30_000}
     assert m["eligible"]["size"] == m["population"]["size"] - m["excluded"]["buffer"]
     assert len(m["items"]) == 100 and all(it["role"] == "base" for it in m["items"])
     ts = [it["t_ms"] for it in m["items"]]
@@ -390,20 +393,27 @@ def test_item_states_and_progress():
                                       "sample_ref": {"sample_set_id": "S-7f3c2a1b-d1-r1", "order": 1}}},
         # 같은 계열의 다른 판을 가리켜도 같은 계열이면 센다
         {"chat_id": b, "entry": "from_sample", "sample_ref": {"sample_set_id": "S-7f3c2a1b-d1-r2", "order": 2}},
-        # 2단계 반응은 세지 않는다
+        # ② 반응이 있는 표본 채팅은 판정함으로 센다 (08 D-10 4: ③ 은 그 라벨을 고친다)
         {"chat_id": m["items"][2]["chat_id"], "entry": "from_utterance", "sample_ref": None},
-        # 다른 계열(draw 2)은 세지 않는다
+        # 표본 밖 채팅의 ② 반응은 out_of_sample 이 아니다 (② 라벨일 뿐)
+        {"chat_id": cid(66_666), "entry": "from_utterance", "sample_ref": None},
+        # 다른 계열(draw 2·분할 전 원 구간)의 판정도 그 채팅의 현재 유효 라벨이라 판정함 (D-10 4, 06 2-6)
         {"chat_id": m["items"][3]["chat_id"], "entry": "from_sample",
          "sample_ref": {"sample_set_id": "S-7f3c2a1b-d2-r1", "order": 4}},
+        # 다른 계열 판정이 이 표본에 없어도 out_of_sample 이 아니다 (그 계열의 판정일 뿐)
+        {"chat_id": cid(55_555), "entry": "from_sample", "sample_ref": {"sample_set_id": "S-aaaaaaaa-d1-r1", "order": 3}},
         # 표본에서 빠진 채팅의 판정 → out_of_sample
         {"chat_id": cid(77_777), "entry": "from_sample", "sample_ref": {"sample_set_id": "S-7f3c2a1b-d1-r1", "order": 9}},
     ]
     states, out = sp.item_states(m, reactions)
     assert states[a] == sp.JUDGED and states[b] == sp.JUDGED
-    assert sum(v == sp.JUDGED for v in states.values()) == 2
+    assert states[m["items"][2]["chat_id"]] == sp.JUDGED
+    assert states[m["items"][3]["chat_id"]] == sp.JUDGED
+    assert states[m["items"][4]["chat_id"]] == sp.PENDING
+    assert sum(v == sp.JUDGED for v in states.values()) == 4
     assert out == (cid(77_777),)
     pr = sp.progress(m, states)
-    assert (pr.done, pr.total, pr.base, pr.extra) == (2, 100, 100, 0)
+    assert (pr.done, pr.total, pr.base, pr.extra) == (4, 100, 100, 0)
     assert pr.denominator_text() == "100"
     m3 = dict(m, items=m["items"] + [dict(m["items"][0], chat_id=cid(88_000 + i), order=101 + i) for i in range(3)])
     assert sp.progress(m3, {}).denominator_text() == "100 + 3"
@@ -415,6 +425,260 @@ def test_latest_of():
     c = {"sample_set_id": "S-7f3c2a1b-d2-r1", "sample_rev": 1}
     got = sp.latest_of([b, a, c])
     assert got[("7f3c2a1b", 1)] is b and got[("7f3c2a1b", 2)] is c
+
+
+# --------------------------------------------------------------------------- v1 골든 · v2 완충 규칙 (08 D-10 1)
+# 같은 분류(저스트채팅)끼리 맞닿은 경계 200초 + 분류가 바뀌는 경계 400초(→ 게임). 표본 구간은 [200초, 400초).
+GOLD_RECS = [{"start_ms": 0, "end_ms": 200_000, "category": "just_chatting"},
+             {"start_ms": 200_000, "end_ms": 400_000, "category": "just_chatting"},
+             {"start_ms": 400_000, "end_ms": 600_000, "category": "game"}]
+# 이 값은 sha256-tau-v2 를 넣기 전 코드(v1 만 있던 판)로 같은 입력을 계산해 고정했다. 바뀌면 v1 재현이 깨진 것이다.
+GOLD_V1_MANIFEST_SHA = "22d86ad32463ed9479faf3853d3b62c2768fa995ac7fce8732e22fb4b0181c87"
+GOLD_V1_TAU = "1f21a51b767f10b9cd53ce9fe9fd8e80d5fbd8206e80cd66f128ca21a8779746"
+GOLD_V1_ITEMS_SHA = "4a6e1c248a1e77916b4d74adb304b1d4aa151c720070a8191c5b0e0a5825167e"
+GOLD_V1_ELIG_SHA = "0efb01788b76723602c59b7985ad023ee50805ced8af469fffc4a7279d80d7f3"
+
+
+def gold_msgs():
+    return [msg(i, i * 1000 + 500) for i in range(600)]
+
+
+def gold_make(pop, **kw):
+    return make(pop, source_segment=seg(200_000, 400_000), n=20, census_max=10, **kw)
+
+
+def gold_bufs(rule):
+    from app.core.segments import record_buffers
+    return record_buffers(GOLD_RECS, 600_000, 10_000, rule=rule)
+
+
+def _dict_sha(d):
+    return hashlib.sha256(json.dumps(d, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def test_v1_golden_manifest_reproduces():
+    from app.core.segments import BUFFER_RULE_ALL
+    assert sp.buffer_rule("sha256-tau-v1") == BUFFER_RULE_ALL
+    bufs = gold_bufs(BUFFER_RULE_ALL)
+    assert bufs == [(190_000, 210_000), (390_000, 410_000)]
+    pop = sp.build_population(gold_msgs(), 200_000, 400_000, bufs)
+    m = gold_make(pop, algorithm="sha256-tau-v1")
+    # v1 모양은 예전과 바이트까지 같다 (media·out_of_media 칸 없음)
+    assert "media" not in m and "out_of_media" not in m["excluded"]
+    assert m["tau_key"] == GOLD_V1_TAU
+    assert sp.ids_sha256([it["chat_id"] for it in m["items"]]) == GOLD_V1_ITEMS_SHA
+    assert m["eligible"] == {"size": 180, "chat_ids_sha256": GOLD_V1_ELIG_SHA}
+    assert m["excluded"] == {"non_text": 0, "invalid_time": 0, "buffer": 20}
+    assert _dict_sha(m) == GOLD_V1_MANIFEST_SHA
+    assert manifest_schema().check(m) == []
+    # 재현 검증: 완충을 목록으로 주든, 규칙을 받는 함수로 주든 v1 규칙(모든 경계)으로 통과
+    assert sp.verify_manifest(m, gold_msgs(), bufs).ok
+    v = sp.verify_manifest(m, gold_msgs(), lambda rule: gold_bufs(rule))
+    assert v.ok, v.problems
+    # v2 규칙 완충을 v1 매니페스트에 쓰면 실패한다(규칙이 실제로 다르다)
+    assert not sp.verify_manifest(m, gold_msgs(), gold_bufs("category_change")).ok
+    # v1 에 v2 칸을 붙이면 실패
+    bad = dict(m, media={"coverage": None, "pre_roll_ms": 10_000, "post_roll_ms": 30_000})
+    assert not sp.verify_manifest(bad, gold_msgs(), bufs).ok
+    assert manifest_schema().check(bad) != []
+
+
+def test_v2_only_category_change_boundary_buffered():
+    bufs = gold_bufs("category_change")
+    assert bufs == [(390_000, 410_000)]                     # 같은 분류 경계 200초에는 완충 없음
+    pop = sp.build_population(gold_msgs(), 200_000, 400_000, bufs)
+    m = gold_make(pop)
+    assert m["algorithm"] == "sha256-tau-v2"
+    assert m["excluded"] == {"non_text": 0, "invalid_time": 0, "buffer": 10, "out_of_media": 0}
+    assert m["eligible"]["size"] == 190 and len(m["items"]) == 20
+    assert manifest_schema().check(m) == []
+    assert sp.verify_manifest(m, gold_msgs(), lambda rule: gold_bufs(rule)).ok
+    # v1 규칙 완충으로 검증하면 실패
+    assert not sp.verify_manifest(m, gold_msgs(), gold_bufs("all_boundaries")).ok
+
+
+def test_series_keeps_algorithm():
+    msgs = synth(400)
+    pop = sp.build_population(msgs, 0, 600_000)
+    m1 = make(pop, algorithm="sha256-tau-v1")
+    pop2 = sp.build_population(msgs, 100_000, 600_000)
+    m2 = make(pop2, source_segment=seg(100_000, 600_000), previous=m1)     # 알고리즘을 안 주면 앞 판을 따른다
+    assert m2["algorithm"] == "sha256-tau-v1" and "media" not in m2
+    assert sp.verify_manifest(m2, msgs, [], previous=m1).ok
+    with pytest.raises(sp.SamplingError):
+        make(pop2, source_segment=seg(100_000, 600_000), previous=m1, algorithm="sha256-tau-v2")
+    with pytest.raises(sp.SamplingError):
+        make(pop, algorithm="sha256-tau-v9")
+    # v1 은 영상 범위를 쓰지 않는다
+    popc = sp.build_population(msgs, 0, 600_000, coverage=[(0, 600_000)])
+    with pytest.raises(sp.SamplingError):
+        make(popc, algorithm="sha256-tau-v1")
+
+
+# --------------------------------------------------------------------------- 영상 밖 (08 D-10 3)
+def test_normalize_coverage_and_window():
+    assert sp.normalize_coverage(None) is None
+    assert sp.normalize_coverage([]) == ()
+    assert sp.normalize_coverage([[50, 60], (0, 10), (10, 20), (15, 30)]) == ((0, 30), (50, 60))
+    for bad in ([(10, 10)], [(5, 1)], [(0.5, 3)], [(1, 2, 3)], [5]):
+        with pytest.raises(sp.SamplingError):
+            sp.normalize_coverage(bad)
+    cov = sp.normalize_coverage([(100_000, 200_000), (200_000, 300_000), (400_000, 500_000)])
+    assert sp.review_window(5_000) == (0, 35_000)
+    assert sp.window_in_coverage(110_000, cov)                 # [100000, 140000]
+    assert not sp.window_in_coverage(109_999, cov)             # 시작이 영상 앞
+    assert sp.window_in_coverage(270_000, cov)                 # 맞닿은 범위는 합쳐서 본다
+    assert not sp.window_in_coverage(270_001, cov)             # 끝이 영상 뒤
+    assert not sp.window_in_coverage(320_000, cov)             # 빈틈
+    assert not sp.window_in_coverage(395_000, cov)             # 두 범위에 걸침(빈틈 포함)
+    assert sp.window_in_coverage(5_000, ((0, 35_000),))        # 0 아래는 0 으로 자른다
+    assert sp.window_in_coverage(1, None)
+    assert not sp.window_in_coverage(150_000, ())
+
+
+def test_population_out_of_media_counts_first():
+    # 영상 [100초, 300초). 확인 범위 −10초 ~ +30초 가 다 들어오려면 110초 ≤ t ≤ 270초.
+    msgs = [msg(1, 50_000), msg(2, 105_000), msg(3, 110_000), msg(4, 200_000), msg(5, 205_000),
+            msg(6, 265_000), msg(7, 280_000), msg(8, 150_000, "donation"), msg(9, None)]
+    pop = sp.build_population(msgs, 0, 400_000, [(195_000, 215_000), (260_000, 290_000)], coverage=[(100_000, 300_000)])
+    assert pop.excluded_non_text == 1 and pop.excluded_invalid_time == 1
+    assert pop.excluded_out_of_media == 3                      # 50초, 105초, 280초(완충에도 걸리지만 영상 밖으로 센다)
+    assert pop.excluded_buffer == 3                            # 200초, 205초, 265초
+    assert pop.eligible_ids == [cid(3)]
+    assert len(pop.population) == 7                            # 모집단은 그대로(영상 밖도 모집단)
+    # 확인 범위 값을 바꿔 넘길 수 있다(기준서 recheck 값)
+    pop2 = sp.build_population(msgs, 0, 400_000, coverage=[(100_000, 300_000)], pre_roll_ms=0, post_roll_ms=0)
+    assert pop2.excluded_out_of_media == 1
+    with pytest.raises(sp.SamplingError):
+        sp.build_population(msgs, 0, 400_000, pre_roll_ms=-1)
+
+
+def test_manifest_records_coverage_and_verifies():
+    msgs = synth(600)                                         # 0~600초에 1초 간격
+    cov = [(300_000, 450_000), (100_000, 200_000)]
+    pop = sp.build_population(msgs, 0, 600_000, [(440_000, 460_000)], coverage=cov)
+    m = make(pop)
+    assert m["media"] == {"coverage": [[100_000, 200_000], [300_000, 450_000]], "pre_roll_ms": 10_000, "post_roll_ms": 30_000}
+    oom = m["excluded"]["out_of_media"]
+    assert oom == pop.excluded_out_of_media and oom > 0
+    assert m["eligible"]["size"] == m["population"]["size"] - oom - m["excluded"]["buffer"]
+    assert manifest_schema().check(m) == []
+    t_ok = [it["t_ms"] for it in m["items"]]
+    assert all(sp.window_in_coverage(t, sp.normalize_coverage(cov)) for t in t_ok)
+    bufs = [(440_000, 460_000)]
+    assert sp.verify_manifest(m, msgs, bufs).ok
+    assert sp.verify_manifest(m, msgs, bufs, coverage=list(reversed(cov))).ok       # 같은 범위(순서만 다름)
+    v = sp.verify_manifest(m, msgs, bufs, coverage=[(100_000, 450_000)])
+    assert not v.ok and any("coverage" in x for x in v.problems)
+    assert not sp.verify_manifest(m, msgs, bufs, coverage=None).ok                   # 뽑을 때는 있었는데 지금은 없음
+    # 매니페스트의 coverage 를 바꾸면 재계산이 달라져 실패
+    bad = copy.deepcopy(m)
+    bad["media"]["coverage"] = [[0, 600_000]]
+    assert not sp.verify_manifest(bad, msgs, bufs).ok
+    bad = copy.deepcopy(m)
+    bad["excluded"]["out_of_media"] += 1
+    assert not sp.verify_manifest(bad, msgs, bufs).ok
+    bad = copy.deepcopy(m)
+    del bad["media"]
+    assert not sp.verify_manifest(bad, msgs, bufs).ok
+    assert manifest_schema().check(bad) != []
+    bad = copy.deepcopy(m)
+    del bad["excluded"]["out_of_media"]
+    assert manifest_schema().check(bad) != []
+
+
+def test_manifest_empty_coverage_all_out_of_media():
+    msgs = synth(50)
+    pop = sp.build_population(msgs, 0, 600_000, coverage=[])
+    m = make(pop)
+    assert m["media"]["coverage"] == [] and m["excluded"]["out_of_media"] == 50
+    assert m["tau_key"] is None and m["items"] == []
+    assert manifest_schema().check(m) == []
+    assert sp.verify_manifest(m, msgs, []).ok
+
+
+def test_v2_records_boundary_buffers_and_reproduces_from_manifest():
+    """v2 완충은 이웃 구간 분류에 달려 있어 매니페스트에 boundary_buffers 로 남는다(구간 범위로 자름). 재현 검증은
+    그 값으로 다시 계산한다 — 그 뒤 이웃 구간 분류가 바뀌어도 매니페스트 하나로 재현된다(06 2-1)."""
+    from app.core.segments import record_buffers
+    msgs = synth(600)
+    # 표본 구간 [100초, 400초): 앞 이웃은 같은 분류(완충 없음), 뒤 이웃은 다른 분류(완충 390~410초)
+    recs = [{"start_ms": 0, "end_ms": 100_000, "category": "just_chatting"},
+            {"start_ms": 100_000, "end_ms": 400_000, "category": "just_chatting"},
+            {"start_ms": 400_000, "end_ms": 600_000, "category": "game"}]
+    bufs = record_buffers(recs, 600_000, 10_000)
+    pop = sp.build_population(msgs, 100_000, 400_000, bufs, coverage=[(0, 600_000)])
+    assert pop.buffers == ((390_000, 400_000),)              # 구간 범위로 잘랐다(앞 경계 100초에는 없음)
+    m = make(pop)
+    assert m["boundary_buffers"] == [[390_000, 400_000]]
+    assert manifest_schema().check(m) == []
+    assert sp.verify_manifest(m, msgs).ok                     # 완충을 넘기지 않아도 매니페스트로 재현
+    assert sp.verify_manifest(m, msgs, bufs).ok               # 같은 완충을 넘기면 같다
+    # 그 뒤 앞 이웃이 게임으로 바뀜 → 지금 구간표 완충은 다르다: 넘기면 '다르다' 로 알리지만, 안 넘기면 재현은 된다
+    recs2 = [dict(recs[0], category="game")] + recs[1:]
+    v = sp.verify_manifest(m, msgs, record_buffers(recs2, 600_000, 10_000))
+    assert not v.ok and any("경계 완충" in p for p in v.problems)
+    assert sp.verify_manifest(m, msgs, lambda rule: record_buffers(recs, 600_000, 10_000, rule=rule)).ok
+    # 매니페스트의 완충을 고치면 실패
+    bad = copy.deepcopy(m)
+    bad["boundary_buffers"] = []
+    assert not sp.verify_manifest(bad, msgs).ok
+    bad = copy.deepcopy(m)
+    del bad["boundary_buffers"]
+    assert not sp.verify_manifest(bad, msgs).ok and manifest_schema().check(bad) != []
+    bad = copy.deepcopy(m)
+    bad["boundary_buffers"] = [[390_000, 410_000]]            # 범위로 자르지 않은 모양
+    assert not sp.verify_manifest(bad, msgs).ok
+    # v1 매니페스트에는 그 칸이 없어야 한다
+    m1 = make(sp.build_population(msgs, 100_000, 400_000, bufs), algorithm=sp.ALGORITHM_V1)
+    assert "boundary_buffers" not in m1
+    assert manifest_schema().check(dict(m1, boundary_buffers=[])) != []
+
+
+def test_clip_buffers():
+    assert sp.clip_buffers([(0, 50), (40, 70), (90, 200), (300, 400)], 30, 150) == ((30, 70), (90, 150))
+    assert sp.clip_buffers([(0, 30), (150, 160)], 30, 150) == ()
+    assert sp.clip_buffers([(10, 20), (20, 30)], 0, 100) == ((10, 30),)     # 맞닿은 것은 합친다
+
+
+def test_item_heads_prefers_same_series_sample_label():
+    pop = sp.build_population(synth(300), 0, 600_000)
+    m = make(pop)
+    a, b = m["items"][0]["chat_id"], m["items"][1]["chat_id"]
+    rs = [{"id": "r1", "entity_id": "e1", "body": {"chat_id": a, "entry": "from_utterance"}},
+          {"id": "r2", "entity_id": "e2", "body": {"chat_id": a, "entry": "from_sample",
+                                                    "sample_ref": {"sample_set_id": m["sample_set_id"], "order": 1}}},
+          {"id": "r3", "entity_id": "e3", "body": {"chat_id": b, "entry": "from_utterance"}},
+          {"id": "r4", "entity_id": "e4", "body": {"chat_id": cid(77_000), "entry": "from_utterance"}},
+          {"body": {"chat_id": b, "entry": "from_sample"}}]                    # id 없음 → 넣지 않음
+    heads = sp.item_heads(m, rs)
+    assert heads[a]["id"] == "r2" and heads[b]["id"] == "r3" and cid(77_000) not in heads
+    assert sp.head_is_this_series(m, heads[a]) and not sp.head_is_this_series(m, heads[b])
+
+
+def test_other_series_sample_label_counts_as_judged():
+    """분할·병합 뒤 새 계열(06 2-6): 원 구간 계열에서 판정한 채팅이 새 표본에 남으면 그 판정이 그 채팅의 라벨이다
+    (작업대 reaction_for_chat 과 같은 규칙, D-10 4). 우선순위: 같은 계열 > 다른 계열 > ② 반응."""
+    pop = sp.build_population(synth(300), 0, 600_000)
+    m = make(pop)
+    a, b, c = (m["items"][i]["chat_id"] for i in range(3))
+    old = {"sample_set_id": "S-aaaaaaaa-d1-r1", "order": 1}
+    rs = [{"id": "r1", "entity_id": "e1", "body": {"chat_id": a, "entry": "from_sample", "sample_ref": old}},
+          {"id": "r2", "entity_id": "e2", "body": {"chat_id": b, "entry": "from_utterance"}},
+          {"id": "r3", "entity_id": "e3", "body": {"chat_id": b, "entry": "from_sample", "sample_ref": old}},
+          {"id": "r4", "entity_id": "e4", "body": {"chat_id": c, "entry": "from_sample", "sample_ref": old}},
+          {"id": "r5", "entity_id": "e5", "body": {"chat_id": c, "entry": "from_sample",
+                                                    "sample_ref": {"sample_set_id": m["sample_set_id"], "order": 3}}}]
+    states, out = sp.item_states(m, rs[:1])
+    assert states[a] == sp.JUDGED and out == ()
+    heads = sp.item_heads(m, rs)
+    assert heads[a]["id"] == "r1" and not sp.head_is_this_series(m, heads[a])
+    assert heads[b]["id"] == "r3"                       # 다른 계열 ③ 판정 > ② 반응
+    assert heads[c]["id"] == "r5" and sp.head_is_this_series(m, heads[c])
+    # 순서를 바꿔도 같다
+    heads2 = sp.item_heads(m, list(reversed(rs)))
+    assert (heads2[b]["id"], heads2[c]["id"]) == ("r3", "r5")
+    assert not sp.head_is_this_series(m, None)
 
 
 def test_layer_rules_clean():

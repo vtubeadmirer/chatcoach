@@ -270,7 +270,22 @@ def likely_allowed(linked: CandidateGrade | None) -> bool:
 
 
 # ---------------------------------------------------------------------------------- 영상 확인(7-2) 완료 판정
-HEARD_MIN_COVERAGE = 0.9     # '소리로 들었다' 로 인정하는 덮은 비율(review_player 와 같은 시작값)
+HEARD_MIN_COVERAGE = 0.9     # '소리로 들었다' 로 인정하는 덮은 비율의 코드 기본값(D-10 6: 기준서 값이 없을 때만)
+HEARD_MIN_COVERAGE_RANGE = (0.5, 1.0)   # guide-config recheck.heard_min_coverage 의 허용 범위(스키마와 같다)
+
+
+def heard_min_coverage(values: Mapping[str, Any] | None) -> float:
+    """기준서 시작값(guide-config values 또는 project.json guides[].thresholds)의 recheck.heard_min_coverage.
+
+    D-10 6: 값이 있으면 그것을, 없거나(v0.1 시작값 파일에는 없다) 범위(0.5~1.0) 밖·숫자가 아니면 코드 기본값
+    HEARD_MIN_COVERAGE 를 쓴다. 편집기·review_player·작업대 마커·내보내기가 모두 이 함수로 같은 값을 얻는다.
+    """
+    rc = values.get("recheck") if isinstance(values, Mapping) else None
+    v = rc.get("heard_min_coverage") if isinstance(rc, Mapping) else None
+    lo, hi = HEARD_MIN_COVERAGE_RANGE
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and lo <= v <= hi:
+        return float(v)
+    return HEARD_MIN_COVERAGE
 
 
 def check_heard(check_body: Mapping[str, Any] | None, min_coverage: float = HEARD_MIN_COVERAGE) -> bool:

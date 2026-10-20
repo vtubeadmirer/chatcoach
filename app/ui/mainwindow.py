@@ -192,7 +192,9 @@ class MainWindow(QMainWindow):
         self.workbench = wb
         self.stack.addWidget(wb)
         self.stack.setCurrentWidget(wb)
-        wb.statusChanged.connect(lambda t: self.statusBar().showMessage(t))
+        # 상태 줄 하나(11 4-2 의 9): 작업대의 상태 칩을 이 창 상태 줄로 옮기고, 잠깐 문장(저장 중… 등)만 왼쪽에 보인다
+        wb.attach_status_bar(self.statusBar())
+        wb.messageShown.connect(lambda t: self.statusBar().showMessage(t))
         self.m_view.clear()
         self.m_view.addAction(wb.analysis_action)
         self.m_view.menuAction().setVisible(wb.analysis_action.isVisible())
@@ -245,7 +247,7 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 — 닫는 길은 막지 않는다
             LOG.exception("저장하지 않은 변경 처리 실패")
         self.workbench = None
-        wb.close_workbench(reason)
+        wb.close_workbench(reason)           # 상태 칩도 이 창 상태 줄에서 뗀다(detach_status_bar)
         self.stack.removeWidget(wb)
         wb.deleteLater()
         self.m_view.clear()
