@@ -1,4 +1,8 @@
-"""창 골격 (M0: 빈 창). 메뉴·상태바·업데이트 연동만 있다. 라벨링 화면은 M1 부터.
+"""창 골격: 메뉴·상태바·화면 전환(프로젝트 화면 ↔ 작업대)·업데이트 연동.
+
+화면 전환 (02 7-1): 시작은 프로젝트 화면(최근 목록·폴더에서 열기, app/ui/project_view.py). 프로젝트를 열면
+작업대(app/ui/workbench.py)로 바꾼다. [파일 → 프로젝트 닫기] 나 다른 프로젝트 열기는 작업대를 닫고(플레이어·워커·잠금
+정리) 새로 만든다. 지금은 라벨링 세션이 없어 session_kind=None 으로 작업대를 연다('분석 보기' 표시는 visibility 가 정함).
 
 업데이트 연동 흐름 (04 6장): 시작 30초 뒤 백그라운드 확인 → 상태바 3상태 → '새 버전' 버튼 → 대화상자 →
 준비(진행률·취소) → 교체 전 조건 → 적용(시작 표식 확인) → 앱 종료. 확인 시각은 updater 가 결과 뒤에 쓴다.
@@ -9,15 +13,16 @@ import logging
 import os
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import (QApplication, QLabel, QMainWindow, QMessageBox, QProgressDialog, QPushButton,
-                               QVBoxLayout, QWidget)
+                               QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import __version__, updater
 from ..appspec import AppSpec
 from ..i18n import tr
 from ..workers import UpdateCheckWorker, UpdateStageWorker
+from .project_view import ProjectView, load_recent
 from .update_dialog import UpdateDialog, open_trusted_url
 
 LOG = logging.getLogger("chatcoach")
@@ -47,7 +52,7 @@ class MainWindow(QMainWindow):
         title = QLabel(f"{spec.name} {__version__}")
         title.setObjectName("panelTitle")
         lay.addWidget(title)
-        info = QLabel(tr("M0 빈 껍데기 — 라벨링 기능은 아직 없습니다. 메뉴 [업데이트] 에서 새 버전 확인을 시험할 수 있습니다.\n"
+        info = QLabel(tr("프로젝트를 열면 작업대(영상·타임라인·채팅)가 열립니다. 메뉴 [업데이트] 에서 새 버전을 확인할 수 있습니다.\n"
                          "채널 {0} · 데이터 폴더 {1}").format(installed.channel, data_root))
         info.setWordWrap(True)
         lay.addWidget(info)
@@ -60,14 +65,27 @@ class MainWindow(QMainWindow):
         self.banner.setWordWrap(True)
         self.banner.setVisible(False)
         lay.addWidget(self.banner)
-        lay.addStretch(1)
-        self.setCentralWidget(central)
+        # ---- 프로젝트 화면 · 작업대 전환
+        self.settings = QSettings(os.path.join(data_root, "settings.ini"), QSettings.Format.IniFormat)
+        self.project_view = ProjectView(self.settings, self)
+        self.project_view.projectOpened.connect(self.show_workbench)
+        self.project_view.before_open = self._before_open
+        lay.addWidget(self.project_view, 1)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(central)
+        self.home_page = central
+        self.workbench = None
+        self.session = None      # app.session.SessionContext. 세션 선택 화면이 아직 없어 None(라벨 기록을 열지 않음)
+        self.setCentralWidget(self.stack)
 
         m_file = self.menuBar().addMenu(tr("파일(&F)"))
+        self._build_project_menu(m_file)
         a_quit = QAction(tr("종료(&X)"), self)
         a_quit.setShortcut("Ctrl+Q")
         a_quit.triggered.connect(self.close)
         m_file.addAction(a_quit)
+        self.m_view = self.menuBar().addMenu(tr("보기(&V)"))
+        self.m_view.menuAction().setVisible(False)
         m_upd = self.menuBar().addMenu(tr("업데이트(&U)"))
         a_check = QAction(tr("지금 확인(&C)"), self)
         a_check.triggered.connect(lambda: self.check_updates(force=True))
@@ -103,6 +121,104 @@ class MainWindow(QMainWindow):
                 LOG.info("시작 인자 %s (자동 모드라 대화상자 생략)", flag)
             else:
                 QTimer.singleShot(400, lambda f=flag: self.notify_startup_flag(f))
+
+    # ---------------------------------------------------------------- 프로젝트 · 화면 전환
+    def _build_project_menu(self, m_file) -> None:
+        a_open = QAction(tr("프로젝트 열기(&O)…"), self)
+        a_open.setShortcut("Ctrl+O")
+        a_open.triggered.connect(self.project_view.choose_and_open)
+        m_file.addAction(a_open)
+        self.m_recent = m_file.addMenu(tr("최근 프로젝트(&R)"))
+        self.m_recent.aboutToShow.connect(self._fill_recent_menu)
+        self._fill_recent_menu()
+        self.a_close_project = QAction(tr("프로젝트 닫기(&W)"), self)
+        self.a_close_project.triggered.connect(self.show_home)
+        self.a_close_project.setEnabled(False)
+        m_file.addAction(self.a_close_project)
+        m_file.addSeparator()
+
+    def _fill_recent_menu(self) -> None:
+        self.m_recent.clear()
+        items = load_recent(self.settings)
+        for p in items:
+            a = self.m_recent.addAction(os.path.basename(p.rstrip("\\/")) or p)
+            a.setToolTip(p)
+            a.triggered.connect(lambda _c=False, p=p: self.project_view.open_path(p))
+        if not items:
+            a = self.m_recent.addAction(tr("(없음)"))
+            a.setEnabled(False)
+
+    def show_workbench(self, outcome) -> None:
+        """연 프로젝트로 작업대를 새로 만들어 보인다. 이전 작업대는 닫는다. 잠금(outcome.lock)은 작업대가 넘겨받는다."""
+        from .workbench import Workbench
+        self._close_workbench()
+        wb = Workbench(self, session=self.session)   # 세션이 있으면 작업대가 app.store 로 라벨 기록을 연다
+        self.workbench = wb
+        self.stack.addWidget(wb)
+        self.stack.setCurrentWidget(wb)
+        wb.statusChanged.connect(lambda t: self.statusBar().showMessage(t))
+        self.m_view.clear()
+        self.m_view.addAction(wb.analysis_action)
+        self.m_view.menuAction().setVisible(wb.analysis_action.isVisible())
+        self.a_close_project.setEnabled(True)
+        data = outcome.project.data or {}
+        title = (data.get("broadcast") or {}).get("title") or data.get("slug") or ""
+        base = f"{self.spec.name} {__version__}"
+        self.setWindowTitle(f"{base} — {title}" if title else base)
+        if self.width() < 1200:
+            # 화면(작업 표시줄 뺀 영역)보다 크게 만들지 않는다 — 1366x768 화면에서 창 테두리만큼 잘리던 문제
+            avail = self.screen().availableGeometry() if self.screen() is not None else None
+            frame_w = max(0, self.frameGeometry().width() - self.width())
+            frame_h = max(0, self.frameGeometry().height() - self.height())
+            w, h = 1366, 768
+            if avail is not None and avail.width() > 0:
+                w, h = min(w, avail.width() - frame_w), min(h, avail.height() - frame_h)
+            self.resize(w, h)
+            if avail is not None and not avail.contains(self.frameGeometry()):
+                self.move(avail.topLeft())
+        wb.open_project(outcome)
+        wb.setFocus()
+
+    def _before_open(self, path: str) -> None:
+        """열려는 폴더가 지금 작업대의 프로젝트면 작업대를 먼저 닫아 잠금(locks/open.lock)을 푼다.
+
+        닫지 않으면 open_checked 가 그 잠금 때문에 tryLock 에 실패해 다시 연 프로젝트가 늘 읽기 전용이 된다
+        (그 뒤 세션이 있으면 store 만 잠금을 새로 잡아 쓰기 가능 — 둘이 어긋난다). 다른 프로젝트면 그대로 둔다
+        (열기가 실패해도 지금 작업대를 잃지 않게). 비교는 project_view 의 경로 정규화와 같다.
+        """
+        from .project_view import _norm
+        wb = self.workbench
+        proj = getattr(wb, "project", None) if wb is not None else None
+        if proj is None:
+            return
+        target = os.path.abspath(path)
+        if os.path.basename(target).lower() == "project.json":
+            target = os.path.dirname(target)
+        if _norm(target) == _norm(proj.root):
+            self.show_home()
+
+    def _close_workbench(self) -> None:
+        wb = self.workbench
+        if wb is None:
+            return
+        self.workbench = None
+        wb.close_workbench()
+        self.stack.removeWidget(wb)
+        wb.deleteLater()
+        self.m_view.clear()
+        self.m_view.menuAction().setVisible(False)
+
+    def show_home(self) -> None:
+        self._close_workbench()
+        self.stack.setCurrentWidget(self.home_page)
+        self.a_close_project.setEnabled(False)
+        self.setWindowTitle(f"{self.spec.name} {__version__}")
+        self.project_view.refresh()
+        self.statusBar().showMessage(tr("준비"))
+
+    def closeEvent(self, ev):  # noqa: N802
+        self._close_workbench()
+        super().closeEvent(ev)
 
     # ---------------------------------------------------------------- 확인
     def check_updates(self, force: bool) -> None:
