@@ -4,6 +4,11 @@
       [--language ko] [--no-vad] [--no-words] [--beam-size 5] [--models-dir D] [--measure-vram] [--no-fallback]
   compare <a.asr.json> <b.asr.json>        두 결과의 문자 차이 비율(숫자만)
   model-hash [--model large-v3-turbo]      모델을 받아(없으면) model.bin sha256 을 출력
+  transcript <txt> --out <json> [--single] [--skip-comments]
+                                           손 받아쓰기 txt → compare 용 json (engine.transcript)
+  score --labels <csv> --link <json> [--start-ms N --end-ms N] [--messages F | --project P] [--out report.json]
+                                           손라벨 ↔ link 결과 채점 (engine.score)
+  link --project <P> --out <json> …        engine.link 의 main 을 그대로 부른다(인자도 그대로)
 
 표준 출력에는 요약 숫자만 낸다. 전사 문장은 --out 파일에만 쓴다.
 """
@@ -22,8 +27,25 @@ def _utf8():
             pass
 
 
+_PASSTHROUGH = {
+    # 하위 명령 → (모듈, 설명). 인자를 그 모듈의 main 에 그대로 넘긴다(도움말도 그쪽 것).
+    "transcript": ("transcript", "손 받아쓰기 txt → compare 용 json"),
+    "score": ("score", "손라벨 csv ↔ link 결과 채점"),
+    "link": ("link", "채팅 ↔ 발화 연결 시험판(engine.link)"),
+}
+
+
+def _passthrough(cmd: str, rest: list[str]) -> int:
+    import importlib
+    mod = importlib.import_module(f"{__package__ or 'engine'}.{_PASSTHROUGH[cmd][0]}")
+    return mod.main(rest)
+
+
 def main(argv: list[str] | None = None) -> int:
     _utf8()
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] in _PASSTHROUGH:
+        return _passthrough(args[0], args[1:])
     ap = argparse.ArgumentParser(prog="python -m engine")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -50,7 +72,10 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--model", default="large-v3-turbo")
     m.add_argument("--models-dir")
 
-    ns = ap.parse_args(argv)
+    for name, (_, desc) in _PASSTHROUGH.items():   # 도움말 목록에만 보인다. 실제 처리는 위의 _passthrough
+        sub.add_parser(name, help=desc + " (python -m engine " + name + " -h)", add_help=False)
+
+    ns = ap.parse_args(args)
 
     if ns.cmd == "asr":
         from .asr import transcribe, validate_asr, write_asr_json

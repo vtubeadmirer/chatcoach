@@ -1,0 +1,71 @@
+{
+  "schema": "chatcoach/guide-config",
+  "schema_version": 1,
+  "guide_version": "0.1",
+  "guide_doc": "docs/labeling-guide/v0.1.md",
+  "guide_doc_sha256": "a9987b1dfa5fb40a39c6c233272c5ff865eac9e81abf146094bbc6f42175a901",
+  "effective_date": "2026-10-18",
+  "change_log": [],
+  "values": {
+    "segment": {
+      "silence_keep_max_sec": 30,
+      "song_interlude_merge_max_sec": 60,
+      "long_silence_review_sec": 120,
+      "boundary_buffer_sec": 10,
+      "min_length_sec": 30
+    },
+    "reaction": {
+      "time_window_sec": 20,
+      "direct_min_strong": 1,
+      "likely_min_medium": 2,
+      "similar_chat_window_sec": null
+    },
+    "evidence_strength": {
+      "nickname_called": "strong",
+      "text_repeated": "strong",
+      "direct_reference": "strong",
+      "answer_form": "medium",
+      "unique_content": "medium",
+      "within_time_window": "medium",
+      "same_topic": "weak"
+    },
+    "continuation": {
+      "short_max_sec": 60,
+      "extended_min_other_chats": 3
+    },
+    "sample": {
+      "per_segment": 100,
+      "census_max": 100,
+      "max_extend_ratio": 0.5
+    },
+    "missed": {
+      "min_visible_sec": 10,
+      "max_chat_rate_per_10s": null,
+      "visible_lines": null,
+      "prior_handling_window_sec": 120
+    },
+    "recheck": {
+      "pre_roll_sec": 10,
+      "post_roll_sec": 30,
+      "min_views_direct_likely": 2
+    },
+    "relabel": {
+      "fraction_min": 0.2,
+      "fraction_max": 0.3,
+      "min_interval_days": 3,
+      "unit": "segment",
+      "block_minutes": null,
+      "random_share": 0.15,
+      "hard_share": 0.1,
+      "enforce_interval": false
+    },
+    "pilot": {
+      "target_direct_reaction_count": 30
+    },
+    "origin": {
+      "match_time_tolerance_sec": null,
+      "text_similarity_min": null,
+      "ambiguous_margin": null
+    }
+  }
+}

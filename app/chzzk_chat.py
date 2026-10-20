@@ -57,8 +57,10 @@ TEXT_MAX = 4000
 MASK_MAX_STARS = 7
 NICKNAME_MASKS = ("first_char", "hidden")
 
+# 12 = 구독권 선물(받은 사람 알림). chzzkpy ChatType.SUBSCRIPTION_GIFT = 12, 실측 extras.giftType 로 확인
+# (docs/measurements/2026-10-21-chzzk-types.md). 15 는 뜻이 확인되지 않아 other 로 둔다.
 KIND_BY_CODE = {1: "text", 2: "image", 3: "sticker", 4: "video", 5: "rich",
-                10: "donation", 11: "subscription", 30: "system"}
+                10: "donation", 11: "subscription", 12: "subscription", 30: "system"}
 ROLE_BY_CODE = {"streamer": "streamer",
                 "streaming_channel_manager": "manager", "streaming_chat_manager": "manager",
                 "common_user": "viewer"}

@@ -39,7 +39,7 @@ jobs:
         run: python -m pip install --require-hashes -r requirements.lock
 
       - name: 문법 검사
-        run: python -m compileall -q main.py app tools tests
+        run: python -m compileall -q main.py app engine tools tests
 
       - name: 버전 파일 동기화 확인
         run: python tools/sync_version.py --check
