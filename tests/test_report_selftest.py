@@ -1,13 +1,14 @@
 """문제 보고(비밀 값 가리기 · build_report) 와 자체 점검(main.py --selftest, 소스 실행).
 
 - redact: ClipSlicer 의 비밀 값(토큰·서명 쿼리·Authorization·Cookie·Bearer·access/refresh_token)에 더해
-  네이버 로그인 쿠키(NID_AUT·NID_SES), 40자 이상 16진수, 사용자 홈 경로를 가린다.
+  네이버 로그인 쿠키(NID_AUT·NID_SES), 32자 이상 16진수, 사용자 홈 경로를 가린다.
 - build_report: 'ChatCoach ' 로 시작, 최근 로그 N줄, 폴더 경로를 넣지 않는다.
 - --selftest: 결과 JSON 의 점검 항목 집합, 실패 허용은 ffmpeg·ffprobe·libmpv 뿐, --data-dir 존중,
   --expect-version 이 틀리면 version 실패와 exit 1.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -43,9 +44,10 @@ def test_redact_naver_cookies():
 def test_redact_long_hex_ids():
     h40 = "0123456789abcdef0123456789ABCDEF01234567"
     h64 = "f" * 64
-    s = redact(f"userIdHash={h40} channel {h64} short=0123456789abcdef0123456789abcdef0123456")
-    assert h40 not in s and h64 not in s and s.count("<hex>") == 2
-    assert "0123456789abcdef0123456789abcdef0123456" in s          # 39자는 그대로
+    h32 = hashlib.sha1(b"fixture-1").hexdigest()[:32]               # 32자 userIdHash 꼴(합성)
+    s = redact(f"userIdHash={h40} channel {h64} uid={h32} short=0123456789abcdef0123456789abcde")
+    assert h40 not in s and h64 not in s and h32 not in s and s.count("<hex>") == 3
+    assert "0123456789abcdef0123456789abcde" in s                  # 31자는 그대로
 
 
 def test_redact_user_home_paths():

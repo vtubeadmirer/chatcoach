@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 .venv/
+# 엔진 전용 venv (tools/setup_engine.ps1). .venv/ 규칙은 이 이름을 덮지 않는다
+.venv-engine/
 venv/
 *.egg-info/
 .pytest_cache/

@@ -2,7 +2,7 @@
 """회전 로그 + 처리되지 않은 예외 대화상자 + 개인정보 가림 필터.
 
 로그 위치: paths.data_root()\\logs\\chatcoach.log (1MB × 3개 회전). 폴백은 paths 가 이미 처리한다.
-가림(redact): 토큰·쿠키·인증 값, 네이버 로그인 쿠키(NID_AUT·NID_SES), 40자 이상 16진수(userIdHash 류),
+가림(redact): 토큰·쿠키·인증 값, 네이버 로그인 쿠키(NID_AUT·NID_SES), 32자 이상 16진수(userIdHash 류),
 사용자 홈 경로(C:\\Users\\<이름>\\ → %USERPROFILE%\\). 파일·콘솔로 나가는 모든 레코드에 적용된다 (S-20).
 문제 보고(report.py)도 같은 redact 를 쓴다.
 """
@@ -37,8 +37,8 @@ SECRET_PATTERNS = [
     # --- ChatCoach 추가 ---
     # 네이버 로그인 쿠키 값. 'cookie:' 머리 없이 따로 찍힌 경우 (NID_AUT=…, "NID_SES": "…")
     (re.compile(r"(?i)(\bNID_(?:AUT|SES)\b[\"']?\s*[=:]\s*[\"']?)[^;\s\"',&}]+"), r"\1***"),
-    # 40자 이상 16진수 (userIdHash 류 식별자)
-    (re.compile(r"\b[0-9a-fA-F]{40,}\b"), "<hex>"),
+    # 32자 이상 16진수 (userIdHash 32자 · sha1 40자 · sha256 64자 식별자)
+    (re.compile(r"\b[0-9a-fA-F]{32,}\b"), "<hex>"),
     # 사용자 홈 경로: C:\Users\<이름>\ → %USERPROFILE%\ (구분자가 / 이거나 \\ 로 겹친 repr 표기도).
     # 이름 뒤에 구분자가 오면 공백 포함 이름 전체를, 아니면 공백 앞까지만 가린다.
     (re.compile(r"(?i)\b[A-Z]:[\\/]+Users[\\/]+(?:" + _NAME + r"+(?=[\\/])|[^\\/:*?\"<>|\r\n\s'\",;)\]]+)"),
