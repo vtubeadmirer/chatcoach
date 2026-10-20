@@ -54,10 +54,22 @@ class LinkConfig:
     similar_window_ms_default: int = 20000   # guide-config similar_chat_window_sec 가 null(미정)일 때 엔진이 쓰는 값
     similar_min: float = 0.5                 # 비슷한 채팅: bigram Dice 하한
     on_topic_lookback_ms: int = 60000        # '이미 그 주제를 말하던 중' 을 볼 채팅 앞 시간
+    # 2026-10-21 v0.2: 채팅 내용어 가운데 이 비율(약 3분의 1) 이상을 앞 발화가 이미 말했을 때만 '이미 그 주제' 로 본다.
+    # 이전(0 에 해당)에는 낱말 하나만 겹쳐도 켜져, 대화가 이어지는 동안 거의 늘 '높음' 을 막았다.
+    on_topic_min_ratio: float = 0.33
     prior_lookback_ms: int = 120000          # '채팅에만 있던 내용' 을 확인할 채팅 앞 시간(missed.prior_handling_window_sec 와 같은 값)
     repeat_min_chars: int = 4
     repeat_min_containment: float = 0.6
     repeat_min_run_ratio: float = 0.6
+    # 2026-10-21 v0.2: STT 조각은 2초 안팎이라 긴 채팅을 읽으면 여러 조각에 걸친다. 후보 조각 시작부터
+    # merge_follow_ms 안에 시작하는 뒤 조각을 이어 붙인 글로 문구 되풀이·고유 내용을 본다(0 이면 조각 하나만).
+    merge_follow_ms: int = 6000
+    repeat_abs_run_chars: int | None = 7       # features.text_repeated 의 2번 조건 (None 이면 끔)
+    repeat_partial_run_chars: int | None = 5   # 3번 조건 (None 이면 끔)
+    repeat_partial_run_ratio: float = 0.5
+    repeat_partial_min_containment: float = 0.5
+    # 강한 증거가 이 채팅에만 있으면(비슷한 채팅들은 같은 발화와 되풀이가 아님) 비슷한 채팅이 있어도 직접으로 본다
+    strong_unique_resolves_similar: bool = True
     same_topic_min_dice: float = 0.2
     nick_max_ratio: float = 0.3
     direct_reference_needs_link: bool = True  # 직접 지칭 표현 + 채팅과 내용 연결이 있어야 증거로 본다
@@ -222,17 +234,35 @@ def load_project(project_dir: str, *, use_identities: bool = True, offset_ms: in
 
 # ── 증거 계산 ────────────────────────────────────────────────────────────
 
+def repeated_in(chat_text: str, utt_text: str, cfg: LinkConfig) -> bool:
+    """LinkConfig 의 시작값으로 features.text_repeated 를 부른다(엔진 안 한 곳에서만 값을 넘긴다)."""
+    return F.text_repeated(chat_text, utt_text, min_chars=cfg.repeat_min_chars,
+                           min_containment=cfg.repeat_min_containment, min_run_ratio=cfg.repeat_min_run_ratio,
+                           abs_run_chars=cfg.repeat_abs_run_chars, partial_run_chars=cfg.repeat_partial_run_chars,
+                           partial_run_ratio=cfg.repeat_partial_run_ratio,
+                           partial_min_containment=cfg.repeat_partial_min_containment)
+
+
 def evidence_for(chat: Chat, utt: Utterance, chat_video_ms: int, *, nicknames: Sequence[str] | None,
-                 prior_texts: Sequence[str], cfg: LinkConfig, utt_vod_ms: int) -> dict:
-    """채팅–발화 짝 하나의 증거 7항목. 값은 {'present': bool|None, 'at_ms': VOD ms|None}."""
+                 prior_texts: Sequence[str], cfg: LinkConfig, utt_vod_ms: int,
+                 merged_text: str | None = None) -> dict:
+    """채팅–발화 짝 하나의 증거 7항목. 값은 {'present': bool|None, 'at_ms': VOD ms|None}.
+
+    merged_text: 이 조각과 바로 뒤 조각들을 이어 붙인 글(문구 되풀이·고유 내용·내용어 공유에 쓴다). 없으면 조각 글.
+    답의 형태·직접 지칭·호명은 첫 조각(반응을 시작한 말)으로 본다.
+    """
     c, u = chat.text, utt.text
+    um = merged_text if merged_text else u
     topic = F.same_topic(c, u, min_dice=cfg.same_topic_min_dice)
-    repeated = F.text_repeated(c, u, min_chars=cfg.repeat_min_chars, min_containment=cfg.repeat_min_containment,
-                               min_run_ratio=cfg.repeat_min_run_ratio)
+    repeated = repeated_in(c, um, cfg)
+    if repeated and um is not u and not repeated_in(c, u, cfg):
+        # 이어 붙인 글로만 되풀이가 보이면, 겹친 덩어리가 이 조각 안에서 시작할 때만 이 조각의 증거로 센다.
+        # 그러지 않으면 실제로 읽기 몇 초 앞 조각이 반응 시각으로 잡힌다(2026-10-21 개발용 측정).
+        repeated = F.run_starts_in_head(c, um, u)
     answer = F.answer_form(c, u)
     terms = F.direct_reference_terms(u)
     # 직접 지칭 표현은 발화만 보면 어느 채팅인지 모른다 → 내용어 공유·되풀이·답의 형태 중 하나가 함께 있어야 센다
-    linked = repeated or answer or bool(F.shared_content(c, u))
+    linked = repeated or answer or bool(F.shared_content(c, um))
     direct_ref = bool(terms) and (not cfg.direct_reference_needs_link or linked)
     nick = F.nickname_called(nicknames, u, max_ratio=cfg.nick_max_ratio)
     vals = {
@@ -240,15 +270,16 @@ def evidence_for(chat: Chat, utt: Utterance, chat_video_ms: int, *, nicknames: S
         "text_repeated": repeated,
         "direct_reference": direct_ref,
         "answer_form": answer,
-        "unique_content": bool(F.unique_content(c, u, prior_texts)),
+        "unique_content": bool(F.unique_content(c, um, prior_texts)),
         "within_time_window": rules.within_time_window(chat_video_ms, utt.start_ms, cfg.rule),
         "same_topic": topic,
     }
     return {k: {"present": v, "at_ms": utt_vod_ms if v else None} for k, v in vals.items()}
 
 
-def _pick_grade(gc: rules.GradeConditions) -> str | None:
-    """엔진의 등급 선택(앱은 고르지 않는다). 직접(비슷한 채팅이 있으면 호명일 때만) > (동점·비슷한 채팅 → 불명확) > 높음 > 관련성만."""
+def _pick_grade(gc: rules.GradeConditions, *, strong_unique: bool = False) -> str | None:
+    """엔진의 등급 선택(앱은 고르지 않는다). 직접(비슷한 채팅이 있으면 호명이거나 되풀이가 이 채팅에만 맞을 때만)
+    > (동점·비슷한 채팅 → 불명확) > 높음 > 관련성만."""
     if gc.result == "unconfirmed":
         return None
     best = gc.best()
@@ -257,7 +288,8 @@ def _pick_grade(gc: rules.GradeConditions) -> str | None:
     if best.tier == "direct":
         # 비슷한 채팅이 같은 시간대에 있으면 문구 되풀이·직접 지칭은 어느 채팅인지 가르지 못한다(예시 4).
         # 닉네임 호명만 채팅 하나를 가리킨다.
-        if "similar_chat_nearby" in gc.reasons and "nickname_called" not in best.present:
+        if ("similar_chat_nearby" in gc.reasons and "nickname_called" not in best.present
+                and not strong_unique):
             return "unclear"
         return "direct"
     if gc.tied:
@@ -338,9 +370,16 @@ def link(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms: int | None = 
         prior = [u for u in utts[p0:lo] if u.end_ms > v - cfg.prior_lookback_ms]
         recent = [u for u in prior if u.start_ms >= v - cfg.on_topic_lookback_ms]
         # '이미 그 주제' 는 약한 증거(same_topic)보다 엄하게: 채팅의 내용어를 앞 발화가 이미 말했을 때만
-        on_topic = any(F.shared_content(ch.text, u.text) for u in recent)
+        ctoks = F.content_tokens(ch.text)
+        if ctoks and recent:
+            spoken = "".join(F.compact(u.text) for u in recent)
+            hit = sum(1 for t in ctoks if t in spoken)
+            on_topic = hit > 0 and hit / len(ctoks) >= cfg.on_topic_min_ratio
+        else:
+            on_topic = False
         # 같은 시간대 비슷한 다른 시청자 채팅
         similar_ids: list[str] = []
+        similar_idx: list[int] = []
         if not low[ci]:
             a = bisect.bisect_left(c_times, ch.t_ms - sw)
             b = bisect.bisect_right(c_times, ch.t_ms + sw)
@@ -352,6 +391,7 @@ def link(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms: int | None = 
                     continue
                 if F.dice(ngr[ci], ngr[j]) >= cfg.similar_min:
                     similar_ids.append(o.chat_id)
+                    similar_idx.append(j)
         no_similar = not similar_ids
         nick_list = None if inp.nicknames is None else inp.nicknames.get(ch.viewer_id, [])
         if nick_list is None:
@@ -359,14 +399,22 @@ def link(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms: int | None = 
 
         cands, cand_meta = [], []
         prior_texts = [u.text for u in prior]
-        for u in window:
+        for k_off, u in enumerate(window):
             uv = video_to_chat_ms(u.start_ms, cal, fs)
-            ev = evidence_for(ch, u, v, nicknames=nick_list, prior_texts=prior_texts, cfg=cfg, utt_vod_ms=uv)
+            merged = u.text
+            if cfg.merge_follow_ms > 0:
+                parts, j = [u.text], lo + k_off + 1
+                while j < len(utts) and utts[j].start_ms <= u.start_ms + cfg.merge_follow_ms:
+                    parts.append(utts[j].text)
+                    j += 1
+                merged = " ".join(parts)
+            ev = evidence_for(ch, u, v, nicknames=nick_list, prior_texts=prior_texts, cfg=cfg, utt_vod_ms=uv,
+                              merged_text=merged)
             # 시간 창 말고 다른 증거가 하나도 없는 발화는 후보로 올리지 않는다(시간 근접만으로 연결하지 않음)
             if not any(ev[k]["present"] for k in EVIDENCE_KEYS if k != "within_time_window"):
                 continue
             cands.append({"evidence": ev})
-            cand_meta.append((u, uv))
+            cand_meta.append((u, uv, merged))
         st["window_utterances_total"] += len(window)
         st["candidates_total"] += len(cands)
         st["chats_with_window_utterance"] += bool(window)
@@ -378,11 +426,19 @@ def link(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms: int | None = 
 
         gc = rules.grade_conditions(cands, cfg.rule, no_similar_chat_nearby=no_similar,
                                     streamer_already_on_topic=on_topic)
-        grade = _pick_grade(gc)
+        # 강한 증거(문구 되풀이)가 이 채팅에만 있는가: 비슷한 채팅들이 같은 발화(이어 붙인 글)와 되풀이가 아니면
+        # 그 발화는 이 채팅을 읽은 것으로 가를 수 있다. 같은 질문이 둘 다 되풀이되면(안내서 예시 4) 여전히 불명확.
+        strong_unique = False
+        gb = gc.best()
+        if (cfg.strong_unique_resolves_similar and similar_idx and gb is not None and gb.tier == "direct"
+                and "text_repeated" in gb.present):
+            bmerged = cand_meta[gb.index][2]
+            strong_unique = not any(repeated_in(chats[j].text, bmerged, cfg) for j in similar_idx)
+        grade = _pick_grade(gc, strong_unique=strong_unique)
         conf, margin = _confidence(grade, gc)
         best = gc.best() if grade else None
         cand_out = []
-        for cg, (u, uv), cd in zip(gc.per_candidate, cand_meta, cands):
+        for cg, (u, uv, _m), cd in zip(gc.per_candidate, cand_meta, cands):
             for k in EVIDENCE_KEYS:
                 if cd["evidence"][k]["present"]:
                     st["evidence_present"][k] += 1
@@ -395,10 +451,10 @@ def link(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms: int | None = 
             })
         react = _reaction_candidate(grade, gc)
         if best is not None:
-            bu, buv = cand_meta[best.index]
+            bu, buv, _bm = cand_meta[best.index]
             rationale = _rationale(buv, best, cfg.rule, grade, gc)
             # 반응 시각은 첫 반응 후보(직접일 때 가장 앞 직접 후보), 점수·근거는 점수 최댓값 후보
-            ru, ruv = cand_meta[react.index]
+            ru, ruv, _rm = cand_meta[react.index]
             r_time, u_start, u_end = ruv, ruv, video_to_chat_ms(ru.end_ms, cal, fs)
             score = best.score
         else:

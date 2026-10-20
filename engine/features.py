@@ -187,37 +187,79 @@ def shared_content(chat: str, utterance: str) -> set[str]:
 
 def longest_common_substring(a: str, b: str) -> int:
     """두 문자열의 가장 긴 공통 연속 부분 문자열 길이."""
+    return len(longest_common_run(a, b))
+
+
+def longest_common_run(a: str, b: str) -> str:
+    """두 문자열의 가장 긴 공통 연속 부분 문자열(같은 길이면 a 에서 먼저 끝나는 것)."""
     if not a or not b:
-        return 0
-    best = 0
+        return ""
+    best, best_end = 0, 0
     prev = [0] * (len(b) + 1)
-    for ca in a:
+    for i, ca in enumerate(a, 1):
         cur = [0] * (len(b) + 1)
         for j, cb in enumerate(b, 1):
             if ca == cb:
                 cur[j] = prev[j - 1] + 1
                 if cur[j] > best:
-                    best = cur[j]
+                    best, best_end = cur[j], i
         prev = cur
-    return best
+    return a[best_end - best:best_end]
 
 
 def text_repeated(chat: str, utterance: str, *, min_chars: int = 4, min_containment: float = 0.6,
-                  min_run_ratio: float = 0.6, max_chars: int = 200) -> bool:
-    """채팅 문구를 읽거나 거의 그대로 되풀이했는가.
+                  min_run_ratio: float = 0.6, max_chars: int = 200, abs_run_chars: int | None = 7,
+                  partial_run_chars: int | None = 5, partial_run_ratio: float = 0.5,
+                  partial_min_containment: float = 0.5) -> bool:
+    """채팅 문구를 읽거나 거의 그대로 되풀이했는가. 아래 셋 중 하나면 된다.
 
-    두 조건을 모두 본다: 채팅 bigram 의 min_containment 이상이 발화에 있고, 채팅 길이의 min_run_ratio 이상이
-    발화에 한 덩어리로 이어져 나온다. 답이 질문의 낱말을 흩어서 되받는 경우('라면 뭐 좋아해요?' → '… 라면 좋아해요')를
-    되풀이로 보지 않으려는 것이다. 정규화 뒤 min_chars 글자보다 짧은 채팅과 내용어가 없는 채팅(인사만 등)은
-    판정하지 않는다(False).
+    1. 전체 읽기: 채팅 bigram 의 min_containment 이상이 발화에 있고, 채팅 길이의 min_run_ratio 이상이
+       발화에 한 덩어리로 이어져 나온다. 답이 질문의 낱말을 흩어서 되받는 경우('라면 뭐 좋아해요?' → '… 라면 좋아해요')를
+       되풀이로 보지 않으려는 것이다.
+    2. 긴 덩어리 읽기: 공백을 뺀 abs_run_chars 글자 이상이 한 덩어리로 같다. 긴 채팅의 앞부분만 읽는 경우
+       (긴 채팅의 앞 열댓 자)를 잡는다. 7음절이 우연히 이어서 같을 일은 드물다고 본다.
+    3. 짧은 채팅의 대부분 읽기: partial_run_chars 글자 이상이 이어서 같고, 그것이 채팅 길이의 partial_run_ratio
+       이상이며, bigram 의 partial_min_containment 이상이 발화에 있다('그래그래다괜찮아질거야' → '그래 다 괜찮아질거야').
+
+    정규화 뒤 min_chars 글자보다 짧은 채팅과 내용어가 없는 채팅(인사만 등)은 판정하지 않는다(False).
+    2·3 을 끄려면 abs_run_chars·partial_run_chars 를 None 으로 준다(2026-10-21 이전 동작).
+    시작값의 근거: docs/measurements/2026-10-21-score-v0.md 3장(개발용 19분, 과적합 주의).
     """
     c = compact(chat)[:max_chars]
     if len(c) < min_chars or not content_tokens(chat):
         return False                      # 인사·감탄만 있는 채팅은 되풀이해도 그 채팅을 읽었다고 보기 어렵다
     u = compact(utterance)
-    if containment(char_ngrams(c), char_ngrams(u)) < min_containment:
+    if not u:
         return False
-    return longest_common_substring(c, u) >= min_run_ratio * len(c)
+    run_s = longest_common_run(c, u)
+    run = len(run_s)
+    cont = containment(char_ngrams(c), char_ngrams(u))
+    if cont >= min_containment and run >= min_run_ratio * len(c):
+        return True
+    # 2·3 은 겹친 덩어리 안에 채팅의 내용어가 있어야 한다('감사합니다' 같은 인사말만 겹친 것은 읽은 증거가 아니다)
+    if not any(t in run_s for t in content_tokens(chat)):
+        return False
+    if abs_run_chars is not None and run >= abs_run_chars:
+        return True
+    if (partial_run_chars is not None and run >= partial_run_chars and run >= partial_run_ratio * len(c)
+            and cont >= partial_min_containment):
+        return True
+    return False
+
+
+def run_starts_in_head(chat: str, merged: str, head: str) -> bool:
+    """chat 과 merged 의 가장 긴 공통 덩어리가 merged 의 앞부분 head(첫 조각) 안에서 시작하는가.
+
+    여러 STT 조각을 이어 붙여 되풀이를 볼 때, 실제로 읽기 시작한 조각에만 증거를 붙이려고 쓴다.
+    head 가 merged 의 앞부분이 아니면 False.
+    """
+    c, m, h = compact(chat), compact(merged), compact(head)
+    if not c or not m or not h or not m.startswith(h):
+        return False
+    run = longest_common_run(c, m)
+    if not run:
+        return False
+    return m.find(run) < len(h)
 
 
 def unique_content(chat: str, utterance: str, prior_utterances: Iterable[str] = ()) -> set[str]:
