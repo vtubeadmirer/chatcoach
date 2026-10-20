@@ -5,17 +5,27 @@
 
 사용:
   .venv\\Scripts\\python tools\\gui_smoke.py --project <프로젝트 폴더> [--video <영상 파일>] [--offscreen]
-        [--screenshot <png>] [--store-copy] [--timeout 초]
+        [--screenshot <png>] [--store-copy] [--labeling-flow] [--timeout 초]
 
-단계: 창 → 프로젝트 열기(파일 메뉴와 같은 길: ProjectView.open_path) → 채팅 싣기 → 타임라인 밀도 →
-      영상 로드(project.json 에 저장하지 않음) → 정확 탐색 → 채팅 활성화(−3초 탐색 + 하이라이트) → 재생 1.5초 →
-      타임라인 확대 → 채팅 필터 → (--store-copy: project.json·guide 만 담은 임시 사본에서 라벨 저장·되돌리기,
-      보호 구역·채팅은 복사하지 않음) → 스크린샷 → 닫기(잠금 해제·
-      project.json 그대로).
+단계: 창 → 프로젝트 열기(파일 메뉴와 같은 길: ProjectView.open_path, 세션 선택 화면은 '보기 전용') → 채팅 싣기 →
+      타임라인 밀도 → 영상 로드(project.json 에 저장하지 않음) → 정확 탐색 → 채팅 활성화(−3초 탐색 + 하이라이트) →
+      재생 1.5초 → 타임라인 확대 → 채팅 필터 → (--store-copy: project.json·guide 만 담은 임시 사본에서 라벨 저장·되돌리기,
+      보호 구역·채팅은 복사하지 않음) → (--labeling-flow: 아래) → 스크린샷 → 닫기(잠금 해제·project.json 그대로).
+
+--labeling-flow (08 D-09, 02 7-3·7-4): 한글 임시 폴더에 project.json · guide/ · chat/messages.jsonl 만 복사한 사본을
+  메인 창으로 연다 → 세션 선택 화면(SessionDialog)에서 새 1차 세션 → store(QLockFile) →
+  ① 구간: B 로 경계 하나, 구간 2개(저스트채팅 · 게임) 저장, 구간 완료 표시 →
+  ② 반응: 영상 범위 안 채팅 1건에 M → 편집기: 강한 증거(닉네임 호명)·직접 반응, 7-2 범위를 2배속으로 두 번 들음(재확인) → 저장,
+     반응 완료 표시 →
+  ③ 표본: 저스트채팅 구간 표본 뽑기(sha256-tau-v1) · 재현 검증 → 1건 판정(반응 미확인) →
+  내보내기 zip(사본 밖 임시 폴더) → 사본을 다시 열어(이어 하기 세션) 현재 유효 라벨(resolve)이 같은지 → 사본을 지운다.
+  영상(--video)이 없으면 재확인을 건너뛰어 반응은 '미완료' 로 남는다(그래도 PASS 기준은 같다: 저장·표시가 맞는지).
 
 지키는 것
-- 원본 프로젝트에는 쓰지 않는다: 영상 연결은 persist=False, 세션이 없어 라벨 기록도 열지 않는다. 열기 잠금
-  (locks/open.lock)만 잡았다 푼다. 끝에 project.json 수정 시각과 크기가 그대로인지 확인한다.
+- 원본 프로젝트에는 쓰지 않는다: 영상 연결은 persist=False, 세션 없이(보기 전용) 열어 라벨 기록도 열지 않는다.
+  열기 잠금(locks/open.lock)만 잡았다 푼다. 끝에 project.json 수정 시각과 크기가 그대로인지 확인한다.
+- 사본(--store-copy·--labeling-flow)은 끝나면 지우고, 남으면 FAIL 과 경로를 찍는다. 보호 구역(chat/protected·
+  derived·origin)·기존 라벨·영상은 복사하지 않는다.
 - 설정·machine.json 은 임시 데이터 폴더(--data-dir, 기본 %TEMP%\\chatcoach_smoke)에 둔다.
 - 출력은 숫자와 통과 여부만. 채팅 본문·닉네임·제목은 찍지 않는다(02 10장).
 - 스크린샷은 저장소 밖 <저장소 옆>\\chatcoach-data\\screens\\ 안에만 저장한다. 다른 곳을 주면 거부한다.
@@ -44,6 +54,8 @@ def parse_args(argv=None):
     ap.add_argument("--offscreen", action="store_true", help="화면 없이 (QT_QPA_PLATFORM=offscreen)")
     ap.add_argument("--screenshot", help=f"창 스크린샷 png (반드시 {SCREENS_DIR} 안)")
     ap.add_argument("--store-copy", action="store_true", help="프로젝트를 임시 폴더로 복사해 라벨 저장·되돌리기도 시험")
+    ap.add_argument("--labeling-flow", action="store_true",
+                    help="사본(project.json·guide·messages.jsonl)에서 세션→구간→반응→표본→내보내기→다시 열기")
     ap.add_argument("--data-dir", help="임시 데이터 폴더 (기본 %%TEMP%%\\chatcoach_smoke)")
     ap.add_argument("--timeout", type=float, default=60.0, help="단계 하나의 대기 상한(초)")
     return ap.parse_args(argv)
@@ -73,6 +85,23 @@ def copy_for_store_test(src: str, dst: str) -> list[str]:
     return done
 
 
+# --labeling-flow 가 복사하는 것: 위 둘 + 채팅(chat/messages.jsonl). 수집 기록·원문 페이지·솔트·원 닉네임(chat/protected)·
+# 파생 자료(derived: 전사문·엔진 결과)·기존 라벨·표본·영상은 옮기지 않는다.
+FLOW_COPY_FILES = STORE_COPY_FILES + (os.path.join("chat", "messages.jsonl"),)
+
+
+def copy_for_flow(src: str, dst: str) -> list[str]:
+    """라벨링 흐름용 사본: project.json · guide/ · chat/messages.jsonl 만. 복사한 상대 경로 목록."""
+    done = copy_for_store_test(src, dst)
+    rel = os.path.join("chat", "messages.jsonl")
+    p = os.path.join(src, rel)
+    if os.path.isfile(p):
+        os.makedirs(os.path.join(dst, "chat"), exist_ok=True)
+        shutil.copy2(p, os.path.join(dst, rel))
+        done.append(rel.replace(os.sep, "/"))
+    return done
+
+
 def remove_tree_checked(path: str) -> list[str]:
     """path 를 지우고, 지우지 못한 파일 목록을 돌려준다(빈 목록 = 다 지움). 실패를 조용히 넘기지 않는다."""
     failed: list[str] = []
@@ -87,6 +116,12 @@ def remove_tree_checked(path: str) -> list[str]:
     if os.path.exists(path) and not failed:
         failed.append(path)
     return failed
+
+
+def _hms(ms: int) -> str:
+    """근거 칸에 넣는 VOD 시각 'h:mm:ss' (안내서: 근거에 시각)."""
+    from app.core.timecode import fmt_time
+    return fmt_time(max(0, int(ms)), ms_digits=False, always_hours=True)
 
 
 def _inside(path: str, folder: str) -> bool:
@@ -161,6 +196,9 @@ class Smoke:
         installed = updater.load_installed(SPEC)
         self.win = MainWindow(SPEC, installed, self.data_root, "", None, [], set())
         self.win.check_updates = lambda force=False: None      # 스모크 중에는 네트워크 확인을 하지 않는다
+        # 원본 프로젝트는 세션 선택 화면에서 '보기 전용' 을 고른 것과 같게 연다(라벨 기록을 열지 않는다)
+        self.chosen: list = []
+        self.win.session_chooser = lambda outcome: self.chosen.append(outcome.project.root) or None
         self.win.show()
         self.pump(50)
         return self.check("window", self.win.isVisible(), t0, f"{self.win.width()}x{self.win.height()}")
@@ -181,8 +219,11 @@ class Smoke:
             pv.choose_and_open()
         ok = self.wb is not None and self.win.stack.currentWidget() is self.wb
         ro = self.wb.project.read_only if ok else None
-        return self.check("open_project", ok and ro is False, t0,
-                          f"menu={'Ctrl+O' if acts else 'direct'} read_only={ro} warnings={len(self.wb.notes) if ok else '-'}")
+        asked = len(self.chosen) == 1
+        view_only = ok and self.wb.session is None and self.wb.store is None
+        return self.check("open_project", ok and ro is False and asked and view_only, t0,
+                          f"menu={'Ctrl+O' if acts else 'direct'} read_only={ro} session_asked={asked} "
+                          f"view_only={view_only} warnings={len(self.wb.notes) if ok else '-'}")
 
     def step_chat(self) -> bool:
         t0 = time.perf_counter()
@@ -386,13 +427,261 @@ class Smoke:
             detail += f" 임시 사본을 다 지우지 못함({len(leftover)}개, {tmp}) — 직접 지우세요"
         return self.check("store_copy", ok, t0, detail)
 
-    def step_shot(self) -> bool:
+    # ---------------------------------------------------------------- --labeling-flow
+    def _flow_session(self, root: str, data: dict, key: str):
+        """세션 선택 화면을 진짜로 만들어(모달 없이) key('new:primary' · 'resume:<sid>')를 고르고 SessionContext 를 받는다."""
+        from app.ui.session_dialog import SessionDialog
+        dlg = SessionDialog(self.win, data_root=self.data_root)
+        try:
+            dlg.load_context(root, data)
+            if not dlg.select_labeler(self.FLOW_LABELER):
+                raise RuntimeError("명부에 시험 라벨러가 없습니다")
+            if not dlg.choose(key):
+                raise RuntimeError(f"세션 화면에서 고를 수 없습니다: {key.split(':')[0]}")
+            dlg._choose_open()
+            ctx = dlg.context()
+        finally:
+            dlg.deleteLater()
+        if ctx is None:
+            raise RuntimeError("세션을 만들지 못했습니다")
+        return ctx
+
+    FLOW_LABELER = "L99"
+
+    def _flow_open(self, dst: str, key: str):
+        """메인 창의 열기 길(ProjectView.open_path → 세션 선택 → 작업대 → store)로 사본을 연다."""
+        holder = {}
+
+        def chooser(outcome):
+            holder["ctx"] = self._flow_session(outcome.project.root, outcome.project.data, key)
+            return holder["ctx"]
+        old = self.win.session_chooser
+        self.win.session_chooser = chooser
+        try:
+            out = self.win.project_view.open_path(dst)
+        finally:
+            self.win.session_chooser = old
+        ok = out is not None and out.ok and self.wb is not None and self.wait(
+            lambda: self.wb.store is not None and not ({"chat", "store", "media_check"} & set(self.wb._jobs)))
+        return ok, holder.get("ctx")
+
+    def _signature(self, st) -> list:
+        from app.ui.workbench import HEAD_KINDS
+        eff = st.effective()
+        return sorted((r["kind"], r["entity_id"], r["id"]) for k in HEAD_KINDS for r in eff.items(k))
+
+    def _flow_chat(self, lo: int, hi: int):
+        """[lo, hi] VOD 안의 일반 채팅(kind=text) 하나: 가운데에 가장 가까운 것. (chat_id, t_ms) 또는 None."""
+        data = self.wb._editor_chats()
+        from app.ui.chat_panel import KIND_CODES
+        text_code = KIND_CODES.get("text")
+        mid = (lo + hi) // 2
+        best = None
+        for i in range(data.n):
+            t = data.times[i]
+            if lo <= t <= hi and data.kinds[i] == text_code:
+                if best is None or abs(t - mid) < abs(best[1] - mid):
+                    best = (data.chat_ids[i], int(t))
+        return best
+
+    def step_labeling_flow(self) -> bool:
         t0 = time.perf_counter()
-        p = self.args.screenshot
-        if not p:
-            return self.check("screenshot", True, t0, "skip (--screenshot 없음)")
-        if not _inside(p, SCREENS_DIR):
-            return self.check("screenshot", False, t0, f"거부: {SCREENS_DIR} 밖")
+        if not self.args.labeling_flow:
+            return self.check("labeling_flow", True, t0, "skip (--labeling-flow 없음)")
+        from app import session as sess
+        from app.core import phase as ph
+        tmp = tempfile.mkdtemp(prefix="chatcoach_smoke_flow_")
+        dst = os.path.join(tmp, "한글 사본", "프로젝트")
+        out_zip = os.path.join(tmp, "내보내기", "labels.zip")
+        ok_all = True
+        try:
+            done = copy_for_flow(self.args.project, dst)
+            if not sess.load_labelers(self.data_root).get(self.FLOW_LABELER):
+                sess.add_labeler(self.data_root, self.FLOW_LABELER)
+            # ---- 1. 열기: 세션 화면 → store
+            t1 = time.perf_counter()
+            ok, ctx = self._flow_open(dst, "new:primary")
+            wb = self.wb
+            ok = ok and ctx is not None and wb.session is ctx and not wb.store.read_only
+            ok_all &= self.check("flow_open", ok, t1,
+                                 f"copied={len(done)} session_kind={ctx.session_kind if ctx else '-'} "
+                                 f"store_ro={wb.store.read_only if wb and wb.store else '-'} chats={wb.chat_data.count}")
+            if not ok:
+                return False
+            if self.args.video and os.path.isfile(self.args.video) and wb.media_path is None:
+                wb.connect_media(self.args.video, persist=False)
+            if self.args.video:
+                self.wait(lambda: wb._file_duration > 0, 30)
+            fdur = wb._file_duration
+            # ---- 2. ① 구간 2개
+            t1 = time.perf_counter()
+            gate_before = wb.gates()[ph.REACTIONS].allowed
+            ok = wb.set_mode(ph.SEGMENTS) and wb.segment_form is not None
+            f = wb.segment_form
+            vdur = max(1, wb._vod_duration)
+            cut = min(vdur - 60_000, wb.file_to_vod(fdur)) if fdur else vdur // 2
+            wb.seek_vod(cut)
+            ok = ok and wb.add_boundary_here() and len(f.model.segments) == 2
+            a, b = f.model.segments
+            f.select_segment(a.id)
+            ok = ok and f.set_category("just_chatting") and f.set_confidence("certain") and \
+                f.set_rationale(f"{_hms(0)} smoke 저스트채팅")
+            f.select_segment(b.id)
+            ok = ok and f.set_category("game") and f.set_confidence("probably") and \
+                f.set_rationale(f"{_hms(cut)} smoke 게임")
+            ts = time.perf_counter()
+            recs = f.save()
+            seg_ms = (time.perf_counter() - ts) * 1000
+            tl_segs = len(getattr(wb.timeline, "_segments", []))
+            ok = ok and recs is not None and len(recs) == 2 and wb.mark_phase_done() is not None
+            ok = ok and not gate_before and wb.gates()[ph.REACTIONS].allowed and tl_segs == 2
+            ok_all &= self.check("flow_segments", ok, t1,
+                                 f"saved={len(recs or [])} save_ms={seg_ms:.1f} timeline_segments={tl_segs} "
+                                 f"reactions_locked_before={not gate_before}")
+            if not ok:
+                return False
+            # ---- 3. ② 반응 1건 (강한 증거 · 7-2 재확인)
+            t1 = time.perf_counter()
+            ok = wb.set_mode(ph.REACTIONS)
+            lo = wb.file_to_vod(60_000) if fdur else 60_000
+            hi = min(cut - 60_000, wb.file_to_vod(fdur - 60_000) if fdur else cut - 60_000)
+            pick = self._flow_chat(max(0, lo), hi)
+            if not ok or pick is None:
+                return self.check("flow_reaction", False, t1, "영상 범위 안 저스트채팅 채팅 없음")
+            chat_id, t_chat = pick
+            wb.chat.select_chat(chat_id)
+            wb.seek_vod(t_chat + 1_000)
+            if fdur:
+                self.wait(lambda: abs(wb.vod_position() - (t_chat + 1_000)) <= 200, 10)
+            wb.mark_reaction()
+            ed = wb.editor
+            ok = wb.is_editing() and ed.target_chat_id() == chat_id and ed.grade() is None
+            ed.utt_start.setText(f"{(t_chat + 1_000) / 1000:.3f}")
+            ed.utt_end.setText(f"{(t_chat + 3_000) / 1000:.3f}")
+            ed._on_utt_times()
+            ed.heard.setText("smoke")
+            ed._on_heard_edited("smoke")
+            ed.evidence.boxes["nickname_called"].setChecked(True)
+            ed.set_grade("direct")
+            ed.set_confidence("certain")
+            ed.rationale.setText(f"{_hms(t_chat + 1_000)} smoke 호명")
+            passes, covs = 0, []
+            if fdur:
+                rv = wb.review
+                rv.set_speed(2.0)
+                for k in range(2):                       # 7-2: 처음 확인 + 다시 듣기
+                    ed.listen_again()
+                    if k == 0 and self.args.screenshot and _inside(self.args.screenshot, SCREENS_DIR):
+                        self.pump(1500)                  # 범위 반복 재생 중인 편집 상태 화면
+                        root_, ext = os.path.splitext(self.args.screenshot)
+                        self._grab(root_ + "_flow_edit" + (ext or ".png"))
+                    got = self.wait(lambda: rv.current_coverage() >= 0.97, 90)
+                    covs.append(rv.current_coverage())
+                    passes += 1 if got else 0
+                rv.stop_loop()
+                wb.player.pause()
+                rv.set_speed(1.0)
+            ts = time.perf_counter()
+            res = ed.save()
+            r_ms = (time.perf_counter() - ts) * 1000
+            marks = list(getattr(wb.timeline, "markers", lambda n: [])("labels"))
+            complete = bool(res and res.get("complete"))
+            want_kind = "reaction" if complete else "recheck"
+            ok = ok and res is not None and not wb.is_editing() and marks and marks[0][1] == want_kind
+            ok = ok and (complete if fdur else True)
+            ok = ok and wb.mark_phase_done() is not None
+            ok_all &= self.check("flow_reaction", ok, t1,
+                                 f"lines={len((res or {}).get('utterances') or []) + 1 + len((res or {}).get('video_checks') or [])} "
+                                 f"passes={passes} coverage={'/'.join(f'{c:.2f}' for c in covs) or '-'} "
+                                 f"complete={complete} save_ms={r_ms:.1f} marker={marks[0][1] if marks else '-'}")
+            if not ok:
+                return False
+            # ---- 4. ③ 표본 뽑기 · 재현 검증 · 1건 판정
+            t1 = time.perf_counter()
+            ok = wb.set_mode(ph.SAMPLES)
+            q = wb.queue
+            wb.draw_sample()
+            ok = ok and self.wait(lambda: "sample_draw" not in wb._jobs and q.manifest is not None, 60)
+            man = q.manifest or {}
+            tv = time.perf_counter()
+            ver = q.run_verify()
+            v_ms = (time.perf_counter() - tv) * 1000
+            ok = ok and ver is not None and ver.ok and len(os.listdir(os.path.join(dst, "samples"))) == 1
+            ok_all &= self.check("flow_sample_draw", ok, t1,
+                                 f"eligible={(man.get('eligible') or {}).get('size')} items={len(man.get('items') or [])} "
+                                 f"census={man.get('census')} buffer_excluded={(man.get('excluded') or {}).get('buffer')} "
+                                 f"verify={'ok' if ver and ver.ok else 'fail'} verify_ms={v_ms:.0f}")
+            if not ok:
+                return False
+            t1 = time.perf_counter()
+            q.set_confidence("certain")
+            it = q.current_item()
+            q.rationale.setText(f"{_hms(it['t_ms'] if it else 0)} smoke 답 없음")
+            rec = q.judge_unconfirmed()
+            pr = q.progress()
+            ok = rec is not None and pr is not None and pr.done == 1
+            ok_all &= self.check("flow_sample_judge", ok, t1,
+                                 f"progress={pr.done if pr else '-'}/{pr.denominator_text() if pr else '-'}")
+            if self.args.screenshot and _inside(self.args.screenshot, SCREENS_DIR):
+                root_, ext = os.path.splitext(self.args.screenshot)
+                self._grab(root_ + "_flow" + (ext or ".png"))
+            # ---- 5. 내보내기
+            t1 = time.perf_counter()
+            os.makedirs(os.path.dirname(out_zip), exist_ok=True)
+            er = wb.export_labels(out_zip)
+            import json as _json
+            import zipfile
+            with zipfile.ZipFile(out_zip) as z:
+                names = set(z.namelist())
+                rows = [_json.loads(x) for x in z.read("labels.jsonl").decode("utf-8").splitlines() if x.strip()]
+            eff = wb.store.effective()
+            want = sorted((r["kind"], r["entity_id"], r["id"]) for k in ("segment", "reaction") for r in eff.items(k))
+            got = sorted((r["label_kind"], r["entity_id"], r["label_id"]) for r in rows
+                         if r["label_kind"] in ("segment", "reaction"))
+            bad_rows = [w for w in er.warnings if "export-row" in w]
+            ok = {"labels.jsonl", "segments.csv", "reactions.csv", "manifest.json"} <= names and got == want and \
+                not bad_rows and er.by_kind.get("segment") == 2 and er.by_kind.get("reaction") == 2
+            ok_all &= self.check("flow_export", ok, t1,
+                                 f"rows={len(rows)} by_kind={dict((k, v) for k, v in er.by_kind.items() if v)} "
+                                 f"zip_bytes={os.path.getsize(out_zip)} rows_match_effective={got == want}")
+            # ---- 6. 다시 열기 (이어 하기 세션) → 같은 현재 유효 라벨
+            t1 = time.perf_counter()
+            before = self._signature(wb.store)
+            sid = ctx.session_id
+            ok2, ctx2 = self._flow_open(dst, "resume:" + sid)
+            wb2 = self.wb
+            after = self._signature(wb2.store) if ok2 else None
+            ok = ok2 and ctx2 is not None and ctx2.session_id == sid and after == before and \
+                wb2.gates()[ph.SAMPLES].allowed
+            ok_all &= self.check("flow_reopen", ok, t1, f"labels={len(before)} same={after == before} "
+                                                        f"samples_gate={wb2.gates()[ph.SAMPLES].allowed if ok2 else '-'}")
+            # 사본 닫기: session.close 줄
+            self.win.show_home()
+            self.pump(50)
+            import glob as _glob
+            files = _glob.glob(os.path.join(dst, "labels", f"{sid}.*.jsonl"))
+            last = ""
+            if files:
+                with open(files[0], encoding="utf-8") as fh:
+                    last = _json.loads(fh.read().splitlines()[-1]).get("kind", "")
+            ok_all &= self.check("flow_close", last == "session.close", time.perf_counter(), f"last_line={last}")
+            return ok_all
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc(limit=4)
+            return self.check("labeling_flow", False, t0, type(e).__name__)
+        finally:
+            if self.wb is not None and getattr(self.wb, "project", None) is not None and \
+                    _inside(self.wb.project.root, tmp):
+                self.win.show_home()
+                self.pump(50)
+            leftover = remove_tree_checked(tmp)
+            if leftover:
+                self.check("flow_cleanup", False, t0, f"임시 사본을 다 지우지 못함({len(leftover)}개, {tmp}) — 직접 지우세요")
+            else:
+                self.check("flow_cleanup", True, time.perf_counter(),
+                           f"사본 지움 (흐름 전체 {time.perf_counter() - t0:.1f}초)")
+
+    def _grab(self, p: str) -> tuple[bool, int, str]:
         os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
         offscreen = self.app.platformName() in ("offscreen", "minimal")
         if offscreen:
@@ -409,6 +698,16 @@ class Smoke:
             note = " (화면 캡처: 창 위에 다른 창이 있으면 같이 찍힘)"
         saved = pix.save(p, "PNG")
         size = os.path.getsize(p) if saved and os.path.isfile(p) else 0
+        return saved, size, note
+
+    def step_shot(self) -> bool:
+        t0 = time.perf_counter()
+        p = self.args.screenshot
+        if not p:
+            return self.check("screenshot", True, t0, "skip (--screenshot 없음)")
+        if not _inside(p, SCREENS_DIR):
+            return self.check("screenshot", False, t0, f"거부: {SCREENS_DIR} 밖")
+        saved, size, note = self._grab(p)
         return self.check("screenshot", saved and size > 1000, t0, f"bytes={size}{note}")
 
     def step_close(self) -> bool:
@@ -429,7 +728,7 @@ class Smoke:
         self.setup()
         steps = [self.step_window, self.step_open, self.step_chat, self.step_timeline, self.step_video, self.step_waveform,
                  self.step_seek, self.step_chat_activate, self.step_play, self.step_zoom, self.step_filter,
-                 self.step_store_copy, self.step_shot, self.step_close]
+                 self.step_store_copy, self.step_shot, self.step_labeling_flow, self.step_close]
         t_all = time.perf_counter()
         for st in steps:
             try:

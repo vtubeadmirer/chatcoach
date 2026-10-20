@@ -12,6 +12,11 @@ a = Analysis(
         ('bin\\ffmpeg', 'ffmpeg'),
         # 라벨링 안내서는 v0.1 파일 하나만 (폴더째가 아니라 — 검토본·개정안은 번들하지 않는다)
         ('docs\\labeling-guide\\v0.1.md', 'docs\\labeling-guide'),
+        # 실행 중에 읽는 스키마: store(app/store.py SCHEMA_REL, 없으면 읽기 전용으로 연다)와
+        # 내보내기(app/export.py SCHEMA_REL, 없으면 [라벨 내보내기] 가 실패한다).
+        # project.json 검사는 app/core/validate.py 안의 사본으로 하므로 project.schema.json 은 번들하지 않는다.
+        ('schemas\\label-event.schema.json', 'schemas'),
+        ('schemas\\export-row.schema.json', 'schemas'),
         ('VERSION', '.'),
     ],
     # mpv(python-mpv)는 main.py 가 직접 import 하지 않고 selftest·player 가 importlib 로 늦게 부른다 → 명시

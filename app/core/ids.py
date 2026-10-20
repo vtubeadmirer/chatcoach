@@ -3,6 +3,7 @@
 - chat_id  : sl-chat-id-v1. 수집 순서·페이지 경계와 상관없이 같은 값이 나오고, 다른 언어로도 계산할 수 있다.
 - viewer_id: hmac-sha256-v1. 프로젝트 솔트로 userIdHash 를 가린다. 방송 사이에서는 같은 시청자를 잇지 못한다.
 - fetch_id : 수집 한 번의 이름. 파일 이름에 쓰이므로 정규식을 통과한 값만 경로로 쓴다.
+- session_id: 세션 ID·기록 파일 이름 정규식(SESSION_ID_RE·SESSION_FILE_RE). app.session 이 쓴다.
 """
 from __future__ import annotations
 
@@ -17,6 +18,13 @@ VIEWER_ID_RE = re.compile(r"\A(vw_[a-z2-7]{12}|anon)\Z")
 FETCH_ID_RE = re.compile(r"\AF[0-9]{8}-[a-z0-9]{4}\Z")
 VIDEO_NO_RE = re.compile(r"\A[0-9]{1,12}\Z")
 ANON = "anon"
+# 세션 ID '<labeler_id>-<종류 코드>-<yyyymmdd>-<4자>' (03 13-1). 종류 코드 P·RS·R2·AD·OR·AN (AN = analysis, 08 D-09 4).
+# label-event.schema.json 의 $defs.sessionId 와 같은 정규식이다. 둘을 같이 고친다.
+SESSION_KIND_CODE_RE = r"(?:P|RS|R2|AD|OR|AN)"
+SESSION_ID_RE = re.compile(r"\A([A-Z][A-Z0-9]{1,7})-(P|RS|R2|AD|OR|AN)-([0-9]{8})-([a-z0-9]{4})\Z")
+# 기록 파일 이름 '<session_id>.<machine4>.jsonl' (03 13-2)
+SESSION_FILE_RE = re.compile(
+    r"\A([A-Z][A-Z0-9]{1,7}-" + SESSION_KIND_CODE_RE + r"-[0-9]{8}-[a-z0-9]{4})\.([a-z2-7]{4})\.jsonl\Z")
 
 
 def _s(v) -> str:

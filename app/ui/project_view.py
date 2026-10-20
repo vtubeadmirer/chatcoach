@@ -116,7 +116,9 @@ def open_checked(path: str, lock_factory: Callable[[str], object] | None = defau
                 out.lock = lk
             else:
                 proj.read_only = True
-                proj.problems.append(tr("다른 창이나 PC 가 이 프로젝트를 열고 있습니다 (locks/open.lock)"))
+                # 03 13-5: 누가 쥐었는지(같은 PC 의 다른 창 / 다른 PC)에 따라 푸는 길을 안내한다. 잠금을 자동으로 지우지 않는다.
+                from ..store import lock_failure_help, lock_holder_info
+                proj.problems.append(tr(lock_failure_help(lock_holder_info(lk))))
         except OSError as e:
             proj.read_only = True
             proj.problems.append(tr("잠금 파일을 만들지 못했습니다: {0}").format(type(e).__name__))

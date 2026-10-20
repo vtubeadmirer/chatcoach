@@ -25,7 +25,7 @@ def chat(n, t, text):
 
 def test_partial_read_of_long_chat_counts():
     c = "오늘 저녁에 떡볶이 먹으러 가자고 했는데 친구가 갑자기 약속을 취소했어"
-    assert F.text_repeated(c, "오늘 저녁에 떡볶이 먹으러 가자고")                 # 앞부분 한 덩어리
+    assert F.text_repeated(c, "오늘 저녁에 떡볶이 먹으러 가자고")           # 앞부분 한 덩어리
     assert not F.text_repeated(c, "오늘 저녁에 떡볶이 먹으러 가자고", abs_run_chars=None, partial_run_chars=None)
 
 

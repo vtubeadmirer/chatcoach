@@ -286,7 +286,7 @@
         "assigned_session_kinds": {
           "type": "array",
           "minItems": 1,
-          "items": {"enum": ["primary", "relabel_same", "relabel_second", "adjudication", "origin_review"]},
+          "items": {"enum": ["primary", "relabel_same", "relabel_second", "adjudication", "origin_review", "analysis"]},
           "description": "이 라벨러가 만들 수 있는 세션 종류. 라벨러 패키지를 만들 때 지정한다."
         }
       }

@@ -3,7 +3,7 @@
 수집 폴더는 실제와 같은 모양이 되도록 app.chzzk_chat.collect 에 합성 API 를 주입해 만든다
 (tools/fetch_chat.py 를 프로젝트 없이 돌린 것과 같다: chat/, chat/protected/salt.json 만 있음).
 
-합성 데이터만 쓴다: 닉네임 '시청자N', userIdHash = sha1('fixture-N'), video_no 100001.
+합성 데이터만 쓴다: 닉네임 '시청자N', userIdHash = sha1('fixture-N'), video_no 0 (S-21: 0 만 합성값).
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from app.core import ids
 from app.core.validate import canonical_json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VNO = "100001"
+VNO = "0"
 FID = "F20261020-adpt"
 SALT = bytes(range(32))
 MACHINE4 = "t3st"

@@ -1,7 +1,7 @@
 """프로젝트 폴더 쓰기 통로 — 세션 기록 파일 열기·라벨 추가·철회 (docs/design/03-data-model.md 6-3·6-4·8-1·8-2·10·12·13, 02 6-3).
 
-입출력 층이다. Qt 위젯을 import 하지 않는다. 잠금(locks/open.lock)은 lock_factory 로 주입받고, 주지 않으면
-PySide6.QtCore.QLockFile 을 처음 쓸 때 늦게 import 한다(QtCore 만, 위젯 없음).
+입출력 층이다. Qt 를 import 하지 않는다. 잠금(locks/open.lock)은 lock_factory 로 **반드시** 주입받는다
+(08 D-09 8: 기본값으로 QtCore 를 늦게 들여 층 규칙을 우회하지 않는다). 앱에서는 ui 층이 QLockFile 을 넘긴다.
 
 여는 순서 (ProjectStore.open)
 1. project.json 을 app.project.open_project 로 읽고 검증한다. 실패하면 읽기 전용.
@@ -13,6 +13,10 @@ PySide6.QtCore.QLockFile 을 처음 쓸 때 늦게 import 한다(QtCore 만, 위
    경고 한 번. 중간 줄이 깨졌거나 스키마에 맞지 않거나 v 가 새 형식이거나 seq 가 끊기면 읽기 전용.
 5. 자기 파일이 없으면 첫 줄 session.open 을 쓴다. 같은 세션의 다른 PC 파일이 있으면 그 메타를 그대로 되풀이한다.
    run_info 를 주면 run.start 줄을 이어 쓴다.
+
+닫기 (close, 08 D-09 6)
+  쓸 수 있게 연 store 면 session.close 줄(reason·run_ms·lines_written)을 쓰고 잠금을 푼다. 줄 쓰기가 실패해도
+  잠금은 푼다(로그만). 같은 세션을 다시 열면 그 뒤에 run.start 등이 이어진다.
 
 라벨 한 건 저장 (append_label, 02 6-3)
   초안(kind·body·entity_id·supersedes·x) → 봉투(v·id·seq·created_at·session_id·labeler_id·app_version)와
@@ -49,14 +53,16 @@ log = logging.getLogger(__name__)
 
 RECORD_V = 1                         # 이 앱이 쓰고 읽는 기록 형식 버전(봉투 v)
 MAX_LINE_BYTES = 1 << 20             # 8-1 의 5: 한 줄 최대 1MB
-SAVE_TARGET_MS = 30.0                # 02 9장: 라벨 저장(되읽기 포함) 목표
+SAVE_TARGET_MS = 50.0                # 08 D-09 3: 라벨 저장(되읽기 포함) 목표 50ms (fsync 는 줄마다 유지)
 STALE_LOCK_MS = 0                    # QLockFile staleLockTime. 0 = 시간으로는 오래됐다고 보지 않는다(아래 _acquire_lock)
 SCHEMA_REL = ("schemas", "label-event.schema.json")
 SCHEMA_MAX_BYTES = 1 << 20
 
 LABEL_KINDS = ("segment", "utterance", "reaction", "continuation", "video_check",
                "missed_candidate", "origin", "adjudication")
-OPS_KINDS = ("run.start", "phase.mark", "view.exposed", "warning")   # session.open 은 store 만 쓴다
+OPS_KINDS = ("run.start", "phase.mark", "view.exposed", "warning")   # session.open·session.close 는 store 만 쓴다
+CLOSE_REASONS = ("user", "app_exit", "switch_project", "error")         # session.close body.reason (스키마와 같음)
+LOCK_FILE_REL = ("locks", "open.lock")
 ENTITY_KINDS = LABEL_KINDS + ("retract",)
 AUTO_FIELDS = frozenset({"v", "id", "seq", "session_id", "labeler_id", "created_at", "app_version",
                          "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"})
@@ -326,7 +332,12 @@ class ProjectStore:
         self.partial_files: list[str] = []           # 8-2 의 3: 잘린 마지막 줄을 옮겨 둔 파일
         self.last_append_ms: float | None = None     # 마지막 저장에 걸린 시간(되읽기 포함)
         self.closed = False
+        self.lock_busy = False                       # 다른 창·PC 가 잠금을 쥐고 있어 읽기 전용이 됨
+        self.lock_holder: dict | None = None         # 그때 잠금 파일에 적힌 {pid, host, app} (아는 것만)
+        self.lock_help: str | None = None            # 잠금을 푸는 안내 문구(03 13-5). lock_failure_help() 결과
         self._clock = clock
+        self._t_open = time.perf_counter()
+        self._lines_written = 0
         self._uuid = uuid_factory
         self._app_version = app_version
         self._schema: LabelSchema | None = None
@@ -345,18 +356,21 @@ class ProjectStore:
 
     # ------------------------------------------------------------------ 열기
     @classmethod
-    def open(cls, path: str, session: SessionContext, lock_factory: Callable[[str], Any] | None = None, *,
+    def open(cls, path: str, session: SessionContext, lock_factory: Callable[[str], Any], *,
              clock: Callable[[], datetime] | None = None, uuid_factory: Callable[[], str] | None = None,
              app_version: str | None = None, data_root: str | None = None, run_info: dict | None = None,
              schema: LabelSchema | None = None) -> "ProjectStore":
         """프로젝트를 이 세션으로 연다. 쓸 수 없는 사정이 있으면 예외 대신 read_only=True 와 사유로 연다.
 
-        - lock_factory(lock_path) → tryLock(timeout)·unlock() 을 가진 객체. 기본 QtCore.QLockFile.
+        - lock_factory(lock_path) → tryLock(timeout)·unlock() 을 가진 객체(앱에서는 QtCore.QLockFile). **필수**다.
+          None 이나 부를 수 없는 값이면 TypeError (08 D-09 8). 잠금을 못 잡으면 lock_busy·lock_holder·lock_help 를 채운다.
         - session.machine_id 가 없으면 data_root(없으면 app.paths.data_root())의 machine.json 에서 읽는다.
           그 machine_id 의 machine4 가 session.machine4 와 다르면 ValueError(다른 PC 의 파일 이름에 쓰지 않는다).
         - run_info 를 주면 run.start 줄을 쓴다(body 모양은 스키마 runStartBody).
         잘못된 인자(세션 종류가 기존 기록과 다름, 기준서 버전 바꾸기 등)는 ValueError.
         """
+        if lock_factory is None or not callable(lock_factory):
+            raise TypeError("lock_factory 는 필수입니다(08 D-09 8). 앱에서는 QLockFile 을 넘기세요")
         if app_version is None:
             from . import __version__ as app_version  # noqa: N811
         proj = projmod.open_project(path, machine4=session.machine4)
@@ -420,22 +434,24 @@ class ProjectStore:
         오래된 잠금으로 보고 가져온다. 시간을 주면(기본 30초) 몇 시간째 라벨링 중인 살아 있는 창의 잠금도
         그 시간이 지나면 빼앗긴다 — QLockFile 은 잠금 파일을 갱신하지 않기 때문이다.
         """
-        lock_path = os.path.join(self.root, "locks", "open.lock")
+        lock_path = os.path.join(self.root, *LOCK_FILE_REL)
         try:
             os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-            if lock_factory is None:
-                lock_factory = _default_lock_factory()
             lk = lock_factory(lock_path)
             if hasattr(lk, "setStaleLockTime"):
                 lk.setStaleLockTime(STALE_LOCK_MS)
             ok = bool(lk.tryLock(0))
-        except (OSError, ImportError) as e:
+        except OSError as e:
             self._set_ro(f"프로젝트 잠금(locks/open.lock)을 만들 수 없습니다: {type(e).__name__}")
             return
         if ok:
             self._lock = lk
             return
-        self._set_ro("다른 창이나 PC 가 이 프로젝트를 쓰고 있습니다" + _lock_holder(lk))
+        holder = lock_holder_info(lk)
+        self.lock_busy = True
+        self.lock_holder = holder
+        self.lock_help = lock_failure_help(holder)
+        self._set_ro("다른 창이나 PC 가 이 프로젝트를 쓰고 있습니다" + _holder_text(holder))
 
     def _release_lock(self) -> None:
         lk, self._lock = self._lock, None
@@ -714,7 +730,7 @@ class ProjectStore:
         assert own is not None
         os.makedirs(os.path.dirname(own.path), exist_ok=True)
         jsonl.append(own.path, rec)
-        # 되읽기: 파일 끝 len(line) 바이트가 방금 쓴 줄과 같아야 한다(파일 전체를 다시 읽지 않는다 — 30ms 목표)
+        # 되읽기: 파일 끝 len(line) 바이트가 방금 쓴 줄과 같아야 한다(파일 전체를 다시 읽지 않는다 — 50ms 목표)
         try:
             with builtins.open(own.path, "rb") as f:
                 f.seek(-len(line), os.SEEK_END)
@@ -726,6 +742,7 @@ class ProjectStore:
             self._set_ro("방금 쓴 줄을 되읽어 확인하지 못했습니다")
             raise WriteVerifyError("방금 쓴 줄을 되읽어 확인하지 못했습니다. 세션을 읽기 전용으로 바꿨습니다.")
         own.records.append(rec)
+        self._lines_written += 1
         self._index(rec)
         return rec
 
@@ -944,16 +961,28 @@ class ProjectStore:
         return view
 
     # ------------------------------------------------------------------ 닫기
-    def close(self) -> None:
-        """잠금을 풀고 닫는다. 그 뒤로는 쓸 수 없다. 여러 번 불러도 된다.
+    def close(self, reason: str = "user") -> None:
+        """session.close 줄을 쓰고 잠금을 풀어 닫는다(08 D-09 6). 그 뒤로는 쓸 수 없다. 여러 번 불러도 된다.
 
-        session.close 줄은 쓰지 않는다: label-event 스키마의 kind 목록에 없어, 쓰면 다음에 열 때 이 앱이
-        그 세션을 '스키마 위반' 으로 읽기 전용으로 연다(보고서 '설계와 다르게 한 곳' 참고).
+        reason: 'user'(프로젝트 닫기) · 'app_exit'(앱 종료) · 'switch_project'(다른 프로젝트 열기) · 'error'.
+        읽기 전용으로 연 store 면 줄을 쓰지 않는다(잠금도 없다). 줄 쓰기가 실패해도 잠금은 푼다 — 남은 잠금이
+        다음 열기를 막는 것이 줄 하나를 잃는 것보다 나쁘다. 실패는 로그(사유 이름만)에 남긴다.
         """
         if self.closed:
             return
-        self.closed = True
-        self._release_lock()
+        if reason not in CLOSE_REASONS:
+            raise ValueError(f"닫는 까닭은 {list(CLOSE_REASONS)} 중 하나여야 합니다")
+        try:
+            if not self.read_only and self._own is not None and self._own.records:
+                body = {"reason": reason,
+                        "run_ms": max(0, int((time.perf_counter() - self._t_open) * 1000)),
+                        "lines_written": self._lines_written}
+                self._append_record(self._envelope("session.close", body))
+        except Exception as e:  # noqa: BLE001 — 닫기는 실패해도 잠금을 푼다
+            log.warning("session.close 줄을 쓰지 못했습니다: %s", type(e).__name__)
+        finally:
+            self.closed = True
+            self._release_lock()
 
     def __enter__(self) -> "ProjectStore":
         return self
@@ -1005,31 +1034,64 @@ def _guide(data: dict, version) -> dict | None:
     return None
 
 
-def _default_lock_factory():
-    """기본 잠금 = PySide6.QtCore.QLockFile (QtCore 만, 위젯 아님).
+def lock_holder_info(lk) -> dict | None:
+    """잠금 객체의 getLockInfo() 결과 → {pid, host, app} (아는 것만). 모르면 None.
 
-    입출력 층은 PySide6 를 import 문으로 들이지 않는다(tests/test_layers.py). 잠금은 원래 호출하는 쪽(ui·session)이
-    주입하는 것이 원칙이고(02 3-2), 이 기본값은 주입을 잊었을 때 잠금 없이 쓰지 않게 하려는 안전장치라
-    처음 쓸 때 importlib 로 늦게 부른다. PySide6 가 없으면 ImportError → open 이 읽기 전용으로 연다.
+    PySide6 의 QLockFile.getLockInfo() 는 판에 따라 (pid, host, app) 이나 (성공 여부, pid, host, app) 를 준다.
+    0 보다 큰 정수(bool 제외)는 pid, 문자열은 앞에서부터 host·app 으로 본다.
     """
-    import importlib
-    return importlib.import_module("PySide6.QtCore").QLockFile
-
-
-def _lock_holder(lk) -> str:
-    """QLockFile.getLockInfo() 결과에서 호스트·프로그램 이름(PySide6 는 (pid, host, app) 튜플)."""
     try:
         info = lk.getLockInfo() if hasattr(lk, "getLockInfo") else None
     except Exception:  # noqa: BLE001
         info = None
     if not isinstance(info, (tuple, list)):
-        return ""
+        return None
+    ints = [x for x in info if _is_int(x) and x > 0]
     strs = [x for x in info if isinstance(x, str) and x]
-    if len(strs) >= 2:
-        return f" (호스트 {strs[0]}, 프로그램 {strs[1]})"
+    out: dict = {}
+    if ints:
+        out["pid"] = ints[0]
     if strs:
-        return f" (호스트 {strs[0]})"
-    return ""
+        out["host"] = strs[0]
+    if len(strs) >= 2:
+        out["app"] = strs[1]
+    return out or None
+
+
+def _holder_text(holder: dict | None) -> str:
+    if not holder or "host" not in holder:
+        return ""
+    if "app" in holder:
+        return f" (호스트 {holder['host']}, 프로그램 {holder['app']})"
+    return f" (호스트 {holder['host']})"
+
+
+def this_host() -> str:
+    """이 PC 의 호스트 이름(잠금 파일에 적히는 값과 비교용). 모르면 빈 문자열."""
+    try:
+        import socket
+        return socket.gethostname() or ""
+    except OSError:
+        return ""
+
+
+def lock_failure_help(holder: dict | None, *, host: str | None = None) -> str:
+    """잠금을 못 잡았을 때 사람에게 보일 안내(03 13-5). store 는 잠금을 자동으로 지우지 않는다.
+
+    staleLockTime 이 0 이라(살아 있는 창의 잠금을 시간으로 빼앗지 않으려고) 다른 PC 에서 꺼진 창의 잠금은 저절로
+    풀리지 않는다. 그 경우에만 사람이 locks\\open.lock 을 지우게 안내한다. 같은 PC 면 그 창을 닫으면 된다
+    (같은 PC 의 죽은 프로세스 잠금은 QLockFile 이 pid 로 알아서 푼다). host 는 이 PC 이름(테스트용, 기본 this_host()).
+    """
+    me = (host if host is not None else this_host()).casefold()
+    who = (holder or {}).get("host")
+    lock_rel = "\\".join(LOCK_FILE_REL)
+    if who and me and who.casefold() == me:
+        return "이 PC 의 다른 ChatCoach 창이 이 프로젝트를 열고 있습니다. 그 창에서 프로젝트를 닫은 뒤 다시 여세요."
+    where = f"다른 PC({who})" if who else "다른 창이나 PC"
+    return (f"{where} 가 이 프로젝트를 열고 있습니다. 그 PC 에서 프로젝트를 닫으면 풀립니다. "
+            f"그 PC 의 앱이 이미 꺼졌거나 비정상 종료해 잠금만 남았다면, 아무 창도 이 프로젝트를 쓰지 않는 것을 "
+            f"확인한 뒤 프로젝트 폴더의 {lock_rel} 파일을 지우고 다시 여세요. 쓰는 중인 창이 있는데 지우면 두 창이 "
+            f"같이 쓰게 됩니다(기록 파일은 PC 마다 따로라 라벨 줄은 덮이지 않지만, 판 연결이 갈라질 수 있습니다).")
 
 
 open_store = ProjectStore.open

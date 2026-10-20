@@ -287,6 +287,7 @@ erDiagram
 | `relabel_second` | `R2` | 두 번째 사람 독립 라벨(7-3) |
 | `adjudication` | `AD` | 조정(검토자, v1) |
 | `origin_review` | `OR` | 채팅 출처 판정(검토자, v1) |
+| `analysis` | `AN` | 분석 보기: 엔진 결과와 **잠긴 1차 세션** 라벨을 나란히 본다. 라벨을 만들지 않고 운영 기록만 쓴다. 이 세션을 연 라벨러의 라벨링 세션은 일치도 보고서에 노출로 표시된다([08](08-decisions-2026-10-20.md) D-09 4·5, `app/core/visibility.py`) |
 
 ### 5-10. 그 밖의 값
 
@@ -409,6 +410,7 @@ flowchart LR
 | `run.start` | 앱을 켜고 세션을 열 때마다 | `utc_offset_min`, `tz_name`, `clock_skew_ms`, `clock_source`, `data_dir_mode`, `media_vfr`, `compat_mode`, `update_check_state`, `checked_at`, `latest_seen_version` |
 | `phase.mark` | 단계 완료(또는 다시 열기) 표시 | `phase`(`segments`·`reactions`·`samples`·`missed`·`origin`), `scope`(`all` 또는 구간 entity_id 목록), `done` |
 | `view.exposed` | 숨겨 둔 자료를 열어 봤을 때 | `what`(`nickname_raw`·`asr_text`·`other_session_labels`·`ai_results`·`origin_info`·`raw_chat_page`), `chat_id`, `entity_id`, `during_entity_id` |
+| `session.close` | 세션을 닫을 때(프로젝트 닫기·다른 프로젝트 열기·앱 종료) 마지막 줄. 읽기 전용으로 열었으면 쓰지 않는다(08 D-09 6) | `reason`(`user`·`switch_project`·`app_exit`·`error`, 필수), `run_ms`(단조 시계), `lines_written` |
 | `warning` | 앱 경고와 처리 | `code`(`audio_not_heard`·`recheck_missing`·`grade_rule_override`·`rationale_without_time`·`repeat_before_chat`·`calibration_unverified`·`relabel_too_early`·`segment_too_short`·`long_silence_signal`·`clock_skew`·`other`), `action`(`shown`·`dismissed`·`resolved`), `entity_id` |
 
 `warning` 은 '들은 범위 경고를 습관적으로 닫는' 패턴을 안내서 8장 점검에 쓰기 위한 기록이다.
@@ -483,7 +485,9 @@ flowchart LR
 | 불명확이면 `unclear_cause` 필수 | 스키마 |
 | 조건 충족 상태와 다르게 고르면(`grade_vs_conditions = deviates`) 사유 필수 | 스키마 |
 | **연결한 후보(`linked_utterance_id`)의 강한 증거가 0개인데 직접 반응** → 저장 거부 | 앱(강도는 기준서 시작값에서 오므로 스키마로 쓸 수 없음). 안내서가 "강한 증거 없이는 직접 반응을 주지 않는다" 고 못 박았으므로 사유를 받고 허용하지 않는다. |
-| 그 밖의 등급 규칙과 다른 확정 | 앱: 경고 + `override_reason` |
+| **연결한 후보가 '높음' 단계(중간 증거 2개 이상 · 비슷한 채팅 없음 확인 · 이미 그 주제 아님) 미만인데 연결 가능성 높음** → 저장 거부 | 앱. 조건을 넘는 등급은 고를 수 없다(01 1-3 규칙 7·3-1, 안내서 4-2). 직접 단계 후보에 '높음' 을 고르는 것은 낮춰 고른 것이라 아래 줄 |
+| 그 밖의 등급 규칙과 다른 확정(조건보다 낮춰 고름) | 앱: 경고 + `override_reason` |
+| 불명확 | 후보 발화가 1개 이상이면 늘 고를 수 있다(01 3-1). `grade_vs_conditions = consistent` (`eligible_grades` 에는 넣지 않음) |
 | 확인 범위를 소리로 듣지 않고 저장 | 앱: 경고(`audio_not_heard`) |
 | 근거에 시각이 없음 | 앱: 경고(`rationale_without_time`) |
 | 대상 채팅이 저스트채팅 구간 밖이거나 `kind ≠ text` | 앱: 저장 거부 |
@@ -759,7 +763,7 @@ flowchart LR
 | 라벨 고치기 | 같은 `entity_id`, `supersedes` = 현재 판 id 인 새 줄 |
 | 라벨 지우기 | `retract` 줄(`entity_id` = 대상, `supersedes` = 현재 판) |
 | 지운 것 되살리기 | `retract` 줄을 `supersedes` 로 가리키는 새 판 |
-| 직전 실수 되돌리기(Ctrl+Z) | 방금 고친 것이면 그 전 판의 내용으로 새 판, 방금 만든 것이면 `retract(undo)` — 키 한 번으로 한 줄 |
+| 직전 실수 되돌리기(Ctrl+Z) | 방금 고친 것이면 그 전 판의 내용으로 새 판, 방금 만든 것이면 `retract(undo)` — 키 한 번으로 한 줄. 반응 편집기 저장 한 번(②·③ 단계 Ctrl+Z)은 그 저장에서 쓴 줄(발화·반응·이어짐·영상 확인)을 거꾸로 같은 규칙으로 되돌린다 |
 | 재확인에서 판단이 바뀜 | `video_check(recheck)` + 새 판(`changed_on_recheck = true`, `first_judgment` 자동 복사) |
 | 잠긴 세션의 라벨이 틀림 | 조정 세션의 `adjudication` |
 | 다른 라벨러의 라벨에 동의하지 않음 | `adjudication` (남의 세션 판을 `supersedes` 할 수 없다) |
@@ -851,20 +855,21 @@ flowchart TD
 
 '열지 않음' 은 화면에서 숨기는 것이 아니라 store 가 그 파일을 디스크에서 읽지 않는다는 뜻이다. 정책은 `app/core/visibility.py` 한 곳의 표(`files_to_open`·`can_show`)로 두고, UI 와 store 는 그 표만 묻는다([02](02-architecture.md) 3-2·3-3, [05](05-security.md)).
 
-| 자료 | primary | relabel_same | relabel_second | adjudication | origin_review |
-|---|---|---|---|---|---|
-| `locks/open.lock` | 잡기 | 잡기 | 잡기 | 잡기 | 잡기 |
-| 자기 세션 `labels/` | 읽기·쓰기 | 읽기·쓰기 | 읽기·쓰기 | 읽기·쓰기 | 읽기·쓰기 |
-| 다른 세션 `labels/` | 열지 않음 | 열지 않음 | 열지 않음 | 잠긴 세션만 읽기 | 열지 않음 |
-| `project.json` | 읽기(보정·영상만 쓰기) | 읽기 | 읽기 | 읽기 | 읽기 |
-| `chat/messages.jsonl` | 읽기 | 읽기 | 읽기 | 읽기 | 읽기 |
-| `samples/` | 읽기·추출 | 열지 않음(계획이 채팅 목록 제공) | 열지 않음 | 읽기 | 열지 않음 |
-| `relabel/<plan>` | — | 자기 계획만 | 자기 계획만 | 읽기 | — |
-| `chat/protected/identities` | 토글(수집 PC, 기록) | 토글 | 토글 | 토글 | 열지 않음(viewer_id 로 대조) |
-| `derived/asr*` | 토글(기록) | 토글 | 토글 | 읽기 | 열지 않음 |
-| `origin/`, 출처 라벨 | 열지 않음 | 열지 않음 | 열지 않음 | 읽기 | 읽기·쓰기 |
-| `<앱>\data\ai\` | 열지 않음 | 열지 않음 | 열지 않음 | 봉인·봉인 해제 뒤 읽기(6-14) | 열지 않음 |
-| `<앱>\data\reports\` | 열지 않음 | 열지 않음 | 열지 않음 | 읽기·쓰기 | 열지 않음 |
+| 자료 | primary | relabel_same | relabel_second | adjudication | origin_review | analysis (08 D-09 4·5) |
+|---|---|---|---|---|---|---|
+| `locks/open.lock` | 잡기 | 잡기 | 잡기 | 잡기 | 잡기 | 잡기 |
+| 자기 세션 `labels/` | 읽기·쓰기 | 읽기·쓰기 | 읽기·쓰기 | 읽기·쓰기 | 읽기·쓰기 | 운영 기록만 쓰기(라벨 없음) |
+| 다른 세션 `labels/` | 열지 않음 | 열지 않음 | 열지 않음 | 잠긴 세션만 읽기 | 열지 않음 | 잠긴 1차 세션만 읽기 |
+| `project.json` | 읽기(보정·영상만 쓰기) | 읽기 | 읽기 | 읽기 | 읽기 | 읽기 |
+| `chat/messages.jsonl` | 읽기 | 읽기 | 읽기 | 읽기 | 읽기 | 읽기 |
+| `samples/` | 읽기·추출 | 열지 않음(계획이 채팅 목록 제공) | 열지 않음 | 읽기 | 열지 않음 | 읽기 |
+| `relabel/<plan>` | — | 자기 계획만 | 자기 계획만 | 읽기 | — | 읽기 |
+| `chat/protected/identities` | 토글(수집 PC, 기록) | 토글 | 토글 | 토글 | 열지 않음(viewer_id 로 대조) | 토글 |
+| `derived/asr*` | 토글(기록) | 토글 | 토글 | 읽기 | 열지 않음 | 읽기 |
+| 엔진 결과(`derived/link-*`) | 열지 않음 | 열지 않음 | 열지 않음 | 열지 않음 | 열지 않음 | 읽기 ('분석 보기') |
+| `origin/`, 출처 라벨 | 열지 않음 | 열지 않음 | 열지 않음 | 읽기 | 읽기·쓰기 | 읽기 |
+| `<앱>\data\ai\` | 열지 않음 | 열지 않음 | 열지 않음 | 봉인·봉인 해제 뒤 읽기(6-14) | 열지 않음 | 열지 않음 |
+| `<앱>\data\reports\` | 열지 않음 | 열지 않음 | 열지 않음 | 읽기·쓰기 | 열지 않음 | 읽기 |
 
 '잡기' 는 프로젝트를 열 때 `locks/open.lock` 을 잡고, 못 잡으면 프로젝트 전체를 읽기 전용으로 연다는 뜻이다(13-5). '토글' 은 기본 숨김이고, 켜면 `view.exposed` 줄이 남는다. 블라인드 해제를 막지는 않지만, 일치도 계산에서 노출된 세션을 따로 볼 수 있다.
 

@@ -788,3 +788,37 @@ class SegmentTimeline:
         outside.sort(key=lambda s: (s.start_ms, s.end_ms))
         return cls(duration_ms, new_id, min_gap_ms=min_gap_ms, undo_limit=undo_limit,
                    _segments=filled, _outside=outside)
+
+
+# ---------------------------------------------------------------------------- 기록 구간표의 경계 완충 (모델 없이)
+def record_buffers(segments: Iterable[Mapping], duration_ms: int, buffer_ms: int) -> list[tuple[int, int]]:
+    """현재 유효 구간 레코드(또는 body·{start_ms, end_ms} dict) 목록의 경계마다 [b − 완충, b + 완충) (안내서 3장).
+
+    모든 시작·끝을 경계로 본다(SegmentTimeline.buffer_ranges 와 같은 규칙). 0 과 duration_ms(영상 처음·끝)는 전환이
+    아니라 빼고, duration_ms 가 0(모름)이면 끝 쪽은 자르지 않는다. 겹치거나 맞닿은 완충은 하나로 합친다.
+    작업대 표본 뽑기·재현 검증과 내보내기(eval.in_boundary_buffer)가 같이 쓴다.
+    """
+    bs: set[int] = set()
+    for s in segments or ():
+        b = s.get("body") if isinstance(s.get("body"), Mapping) else s
+        for k in ("start_ms", "end_ms"):
+            v = b.get(k)
+            if isinstance(v, int) and not isinstance(v, bool):
+                bs.add(v)
+    out: list[tuple[int, int]] = []
+    if buffer_ms <= 0:
+        return out
+    for b in sorted(bs):
+        if b <= 0 or (duration_ms and b >= duration_ms):
+            continue
+        lo, hi = max(0, b - buffer_ms), (min(duration_ms, b + buffer_ms) if duration_ms else b + buffer_ms)
+        if out and lo <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], hi))
+        else:
+            out.append((lo, hi))
+    return out
+
+
+def in_ranges(t_ms: int, ranges: Sequence[tuple[int, int]]) -> bool:
+    """t 가 반열린 구간 [a, b) 목록 중 하나 안인가."""
+    return any(a <= t_ms < b for a, b in ranges)

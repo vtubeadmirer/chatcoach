@@ -489,4 +489,5 @@ PROJECT_SPEC: dict = {'type': 'object',
                                                                                          'relabel_same',
                                                                                          'relabel_second',
                                                                                          'adjudication',
-                                                                                         'origin_review']}}}}}}
+                                                                                         'origin_review',
+                                                                                         'analysis']}}}}}}

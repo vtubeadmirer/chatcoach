@@ -314,16 +314,24 @@ def test_click_drag_emits_seek_with_snap(qapp):
 
 
 def test_wheel_zoom_at_mouse_and_scroll(qapp):
+    """08 D-09 7: 휠 = 가로 스크롤, Ctrl+휠 = 마우스 위치 기준 확대 (ClipSlicer 습관)."""
     from PySide6.QtCore import Qt
     w = make(qapp)
     t_under = w.x_to_t(250)
-    _wheel(w, 250, 120)                                   # 휠 = 마우스 위치 기준 확대
+    _wheel(w, 250, 120, mods=Qt.ControlModifier)          # Ctrl+휠 = 마우스 위치 기준 확대
     assert math.isclose(w.zoom_factor(), 1.25, rel_tol=1e-6)
     assert abs(w.x_to_t(250) - t_under) <= 1
-    _wheel(w, 250, -120, mods=Qt.ControlModifier)         # Ctrl+휠도 확대·축소
+    _wheel(w, 250, -120, mods=Qt.ControlModifier)         # Ctrl+휠 아래 = 축소
+    assert math.isclose(w.zoom_factor(), 1.0, rel_tol=1e-6)
+    _wheel(w, 250, 120)                                   # 전체 보기에서는 수정자 없는 휠이 확대하지 않는다
     assert math.isclose(w.zoom_factor(), 1.0, rel_tol=1e-6)
     w.set_view(100_000, 200_000)
-    _wheel(w, 500, -120, mods=Qt.ShiftModifier)           # Shift+휠 = 가로 스크롤 (뒤로)
+    _wheel(w, 500, -120)                                  # 휠 = 가로 스크롤 (아래로 → 뒤로)
+    assert w.view_range() == (115_000, 215_000)
+    _wheel(w, 500, 120)                                   # 위로 → 앞으로
+    assert w.view_range() == (100_000, 200_000)
+    _wheel(w, 500, -120, mods=Qt.ShiftModifier)           # Shift+휠도 가로 스크롤
     assert w.view_range() == (115_000, 215_000)
     _wheel(w, 500, 0, dx=120)                             # 가로 휠(터치패드) = 스크롤
     assert w.view_range() == (100_000, 200_000)
+    assert math.isclose(w.zoom_factor(), 6.0, rel_tol=1e-6)   # 스크롤은 확대 배율을 바꾸지 않는다

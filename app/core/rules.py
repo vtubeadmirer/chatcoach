@@ -243,15 +243,55 @@ def grade_conditions(candidates: Sequence[Any], cfg: RuleConfig = V0_1, *,
 
 
 def grade_vs_conditions(grade: str | None, gc: GradeConditions) -> str:
-    """고른 등급과 조건 충족 상태의 관계(03 5-10). store 가 저장 때 부른다."""
+    """고른 등급과 조건 충족 상태의 관계(03 5-10). store 가 저장 때 부른다.
+
+    '불명확' 은 후보가 1개 이상이면 늘 고를 수 있다(01 3-1 표 '후보 수 ≥1 → 선택 가능', 안내서 4-2 '소리가 안 들림 등').
+    그래서 결과가 graded 이면 unclear 는 consistent 다. eligible_grades 자체는 바꾸지 않는다(엔진이 같은 값을 쓴다).
+    """
     if gc.result == "unconfirmed" or grade is None:
         return "not_applicable"
+    if grade == "unclear":
+        return "consistent"
     return "consistent" if grade in gc.eligible_grades else "deviates"
 
 
 def direct_allowed(linked: CandidateGrade | None) -> bool:
     """연결한 후보의 강한 증거가 0개면 직접 반응을 저장하지 않는다(03 6-7 저장 규칙)."""
     return linked is not None and linked.strong > 0
+
+
+def likely_allowed(linked: CandidateGrade | None) -> bool:
+    """'연결 가능성 높음' 은 연결한 후보가 높음 단계 이상(직접 또는 높음)일 때만 고를 수 있다.
+
+    안내서 4-2('강 0 + 중 2 이상 + 같은 시간대 비슷한 다른 채팅 없음'), 01 1-3 규칙 7·3-1('조건을 넘는 등급은 고를 수 없다').
+    직접 단계 후보에 '높음' 을 고르는 것은 낮춰 고른 것이라 허용(사유 필요)이다.
+    """
+    return linked is not None and linked.tier in ("direct", "likely")
+
+
+# ---------------------------------------------------------------------------------- 영상 확인(7-2) 완료 판정
+HEARD_MIN_COVERAGE = 0.9     # '소리로 들었다' 로 인정하는 덮은 비율(review_player 와 같은 시작값)
+
+
+def check_heard(check_body: Mapping[str, Any] | None, min_coverage: float = HEARD_MIN_COVERAGE) -> bool:
+    """video_check body 하나가 '들었다' 고 인정되는가: audio_heard 이고 coverage_ratio ≥ min_coverage."""
+    if not isinstance(check_body, Mapping) or check_body.get("audio_heard") is not True:
+        return False
+    cov = check_body.get("coverage_ratio")
+    return isinstance(cov, (int, float)) and not isinstance(cov, bool) and cov >= min_coverage - 1e-9
+
+
+def heard_count(check_bodies: Sequence[Mapping[str, Any]] | None, min_coverage: float = HEARD_MIN_COVERAGE) -> int:
+    """'들었다' 고 인정된 회차 수. 편집기·작업대 마커·내보내기가 같은 규칙을 쓴다(안내서 7-2, 03 6-9)."""
+    return sum(1 for b in check_bodies or () if check_heard(b, min_coverage))
+
+
+def recheck_complete(grade: str | None, check_bodies: Sequence[Mapping[str, Any]] | None, *, min_views: int = 2,
+                     min_coverage: float = HEARD_MIN_COVERAGE) -> bool:
+    """직접·높음 반응의 7-2 재확인이 끝났는가(들었다고 인정된 회차 ≥ min_views). 다른 등급은 늘 True."""
+    if grade not in ("direct", "likely"):
+        return True
+    return heard_count(check_bodies, min_coverage) >= min_views
 
 
 def within_time_window(chat_ms: int, utterance_start_ms: int, cfg: RuleConfig = V0_1) -> bool:

@@ -318,8 +318,16 @@ def test_shortcuts_are_registered(qapp, tmp_path):
     wb = make_wb(qapp, proj)
     try:
         keys = {s.key().toString() for s in wb.shortcuts}
-        for k in ("Space", "Left", "Right", ",", ".", "Ctrl+F", "J", "L", "K"):
-            assert k in keys
+        # 02 7-6 표의 작업대 몫 전부 (D-09 2)
+        for k in ("Space", "K", "Left", "Right", "Shift+Left", "Shift+Right", "Ctrl+Left", "Ctrl+Right", "J", "L",
+                  "[", "]", "R", "M", "B", "Ctrl+Z", "Ctrl+=", "Ctrl+-", "Ctrl+0", "Ctrl+F", ",", "."):
+            assert k in keys, k
+        assert len(keys) == len(wb.shortcuts)                 # 같은 키를 두 번 걸지 않았다
+        assert not wb.shortcut_map["Ctrl+Z"].isEnabled()      # 둘러보기에서는 Ctrl+Z 를 잡지 않는다
+        wb.frame_key(1)                                       # 영상이 없으면 ← → 는 0.1초
+        assert wb.vod_position() == wbm.VFR_STEP_MS
+        wb.frame_key(-1)
+        assert wb.vod_position() == 0
         wb.step(wbm.STEP_MS)
         assert wb.vod_position() == wbm.STEP_MS
         wb.step(-10 * wbm.STEP_MS)
@@ -523,9 +531,12 @@ def test_mainwindow_switches_screens(qapp, tmp_path, monkeypatch):
     inst = updater.InstalledInfo(version="0.0.0", channel="source", built_at=None, app_dir=str(tmp_path),
                                  code_dir=str(tmp_path), frozen=False)
     win = mw.MainWindow(SPEC, inst, str(tmp_path / "data"), str(tmp_path / "log.txt"), None, [], set())
+    asked = []
+    win.session_chooser = lambda out: asked.append(out.project.root) or None    # 세션 선택 화면 → 보기 전용
     try:
         assert win.stack.currentWidget() is win.home_page
         out = win.project_view.open_path(proj.root)
+        assert asked == [proj.root]                           # 프로젝트를 열면 세션을 묻는다 (D-09 1)
         assert out.ok and win.workbench is not None and win.stack.currentWidget() is win.workbench
         assert win.workbench.wait_jobs(10_000)
         assert len(win.workbench.chat.records) == N_CHATS
@@ -671,17 +682,19 @@ def test_reopening_same_project_from_main_window_is_writable(qapp, tmp_path, mon
     inst = updater.InstalledInfo(version="0.0.0", channel="source", built_at=None, app_dir=str(tmp_path),
                                  code_dir=str(tmp_path), frozen=False)
     win = mw.MainWindow(SPEC, inst, str(tmp_path / "data"), str(tmp_path / "log.txt"), None, [], set())
+    chosen = {"s": None}
+    win.session_chooser = lambda out: chosen["s"]
     try:
         first = win.project_view.open_path(proj.root)
         assert not first.read_only
-        win.session = _session()                                       # 세션이 있으면 store 도 같은 잠금 상태여야 한다
+        chosen["s"] = _session()                                       # 세션이 있으면 store 도 같은 잠금 상태여야 한다
         second = win.project_view.open_path(proj.root)
         assert not second.read_only, second.project.problems
         assert not win.workbench.project.read_only
         assert win.workbench.wait_jobs(15_000)
         assert win.workbench.store is not None and not win.workbench.store.read_only
         # 다른 프로젝트를 열 때는 앞 작업대를 미리 닫지 않는다(열기가 실패해도 작업대를 잃지 않게)
-        win.session = None
+        chosen["s"] = None
         bad = win.project_view.open_path(str(tmp_path / "없는 폴더"))
         assert not bad.ok and win.workbench is not None
         third = win.project_view.open_path(other.root)

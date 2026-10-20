@@ -12,8 +12,8 @@ ClipSlicer 의 고정 높이 THUMB_H=64 · 순번 색 seg_color(i) · 썸네일 
 성능 규칙 (02 9장): 정적 트랙은 QPixmap 한 장에 그려 두고 데이터나 보이는 범위·크기가 바뀔 때만 다시 만든다.
 재생 위치가 바뀌면 캐시 그림을 그대로 붙이고 재생 위치 선·호버 선만 그린다(옛 선·새 선 둘레만 다시 그림).
 
-휠: 수정자 없음 · Ctrl · Alt = 마우스 위치 기준 확대·축소, Shift 또는 가로 휠(터치패드) = 가로 스크롤.
-(ClipSlicer 는 수정자 없는 휠이 스크롤이었다. 작업 지시 '휠 확대(마우스 위치 기준)' 에 따라 바꿨다.)
+휠 (08 D-09 7, ClipSlicer 습관): 수정자 없음 · Shift · 가로 휠(터치패드) = 가로 스크롤,
+Ctrl+휠 · Alt+휠 = 마우스 위치 기준 확대·축소.
 클릭·끌기 = seekRequested. 마커·구간 경계 SNAP_PX 안이면 그 자리에 붙는다(Shift 를 누르면 자석 끔).
 """
 from __future__ import annotations
@@ -854,19 +854,19 @@ class Timeline(QWidget):
         self.update()
 
     def wheelEvent(self, e):
-        """휠 = 마우스 위치 기준 확대·축소 (Ctrl·Alt 도 같음). Shift+휠 · 가로 휠 = 가로 스크롤."""
+        """ClipSlicer 습관 (08 D-09 7): 휠 = 가로 스크롤, Ctrl+휠(또는 Alt+휠) = 마우스 위치 기준 확대·축소.
+        Shift+휠 · 가로 휠(터치패드)도 가로 스크롤이다. 위로 굴리면 앞(이른 시각)으로 간다."""
         if self._duration <= 0:
             return
         d = e.angleDelta()
         dx, dy = d.x(), d.y()
         mods = e.modifiers()
-        if mods & Qt.ShiftModifier or (dy == 0 and dx != 0 and not (mods & Qt.AltModifier)):
-            steps = (dy or dx) / 120.0
-            self.scroll_to(self.view_start - steps * self.view_len * 0.15)
-        else:
-            steps = (dy or dx) / 120.0           # Alt+휠은 가로 값으로 오는 경우가 있다 (ClipSlicer)
+        steps = (dy or dx) / 120.0               # Alt+휠은 가로 값으로 오는 경우가 있다 (ClipSlicer)
+        if mods & (Qt.ControlModifier | Qt.AltModifier):
             if steps:
                 self.zoom(1.25 ** steps, self.x_to_t(e.position().x()))
+        elif steps:
+            self.scroll_to(self.view_start - steps * self.view_len * 0.15)
         e.accept()
 
     def leaveEvent(self, _e):

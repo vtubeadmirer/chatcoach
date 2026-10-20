@@ -1,8 +1,11 @@
 """창 골격: 메뉴·상태바·화면 전환(프로젝트 화면 ↔ 작업대)·업데이트 연동.
 
 화면 전환 (02 7-1): 시작은 프로젝트 화면(최근 목록·폴더에서 열기, app/ui/project_view.py). 프로젝트를 열면
-작업대(app/ui/workbench.py)로 바꾼다. [파일 → 프로젝트 닫기] 나 다른 프로젝트 열기는 작업대를 닫고(플레이어·워커·잠금
-정리) 새로 만든다. 지금은 라벨링 세션이 없어 session_kind=None 으로 작업대를 연다('분석 보기' 표시는 visibility 가 정함).
+세션 선택 화면(app/ui/session_dialog.py, 08 D-09 1)을 띄우고, 고른 SessionContext 로 작업대(app/ui/workbench.py)를
+만든다. 작업대가 store.open(lock_factory=QLockFile, 열 때 잡은 잠금을 넘김)으로 라벨 기록을 연다. 고르지 않으면(보기 전용·
+취소) 세션 없이 연다 — 라벨 저장·분석 보기가 꺼진다. [파일 → 프로젝트 닫기] 나 다른 프로젝트 열기는 작업대를 닫고
+(플레이어·워커·session.close 줄·잠금 정리) 새로 만든다. session.close 의 reason: 프로젝트 닫기 'user',
+다른 프로젝트 열기 'switch_project', 앱 종료 'app_exit'.
 
 업데이트 연동 흐름 (04 6장): 시작 30초 뒤 백그라운드 확인 → 상태바 3상태 → '새 버전' 버튼 → 대화상자 →
 준비(진행률·취소) → 교체 전 조건 → 적용(시작 표식 확인) → 앱 종료. 확인 시각은 updater 가 결과 뒤에 쓴다.
@@ -75,7 +78,9 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(central)
         self.home_page = central
         self.workbench = None
-        self.session = None      # app.session.SessionContext. 세션 선택 화면이 아직 없어 None(라벨 기록을 열지 않음)
+        self.session = None      # app.session.SessionContext — 지금 작업대의 세션(보기 전용이면 None)
+        # 세션 고르기: outcome → SessionContext | None. None 이면 세션 선택 화면(모달). 시험은 바꿔 끼운다.
+        self.session_chooser = None
         self.setCentralWidget(self.stack)
 
         m_file = self.menuBar().addMenu(tr("파일(&F)"))
@@ -86,7 +91,8 @@ class MainWindow(QMainWindow):
         m_file.addAction(a_quit)
         self.m_view = self.menuBar().addMenu(tr("보기(&V)"))
         self.m_view.menuAction().setVisible(False)
-        m_upd = self.menuBar().addMenu(tr("업데이트(&U)"))
+        # 니모닉은 &D: Alt+U 는 구간 폼의 '판단 불가' 단축키라 메뉴와 겹치면 둘 다 동작하지 않는다(애매한 단축키)
+        m_upd = self.menuBar().addMenu(tr("업데이트(&D)"))
         a_check = QAction(tr("지금 확인(&C)"), self)
         a_check.triggered.connect(lambda: self.check_updates(force=True))
         m_upd.addAction(a_check)
@@ -135,6 +141,10 @@ class MainWindow(QMainWindow):
         self.a_close_project.triggered.connect(self.show_home)
         self.a_close_project.setEnabled(False)
         m_file.addAction(self.a_close_project)
+        self.a_export = QAction(tr("라벨 내보내기(&E)…"), self)
+        self.a_export.triggered.connect(lambda: self.workbench.choose_and_export() if self.workbench else None)
+        self.a_export.setEnabled(False)
+        m_file.addAction(self.a_export)
         m_file.addSeparator()
 
     def _fill_recent_menu(self) -> None:
@@ -148,10 +158,36 @@ class MainWindow(QMainWindow):
             a = self.m_recent.addAction(tr("(없음)"))
             a.setEnabled(False)
 
+    def choose_session(self, outcome):
+        """세션 선택 화면(08 D-09 1). 고른 SessionContext, 보기 전용·취소면 None. session_chooser 가 있으면 그것을 쓴다."""
+        if self.session_chooser is not None:
+            return self.session_chooser(outcome)
+        from .session_dialog import SessionDialog
+        data = outcome.project.data or {}
+        title = (data.get("broadcast") or {}).get("title") or data.get("slug") or None
+        last = self.settings.value("session/last_labeler", "")
+        dlg = SessionDialog(self, data_root=self.data_root, default_labeler=last if isinstance(last, str) and last else None)
+        dlg.load_context(outcome.project.root, data, project_title=title, read_only=outcome.read_only,
+                         read_only_reasons=list(outcome.project.problems))
+        dlg.exec()
+        ctx = dlg.context()
+        dlg.deleteLater()
+        if ctx is not None:
+            self.settings.setValue("session/last_labeler", ctx.labeler_id)
+            self.settings.sync()
+        return ctx
+
     def show_workbench(self, outcome) -> None:
-        """연 프로젝트로 작업대를 새로 만들어 보인다. 이전 작업대는 닫는다. 잠금(outcome.lock)은 작업대가 넘겨받는다."""
+        """연 프로젝트로 세션을 고르고 작업대를 새로 만들어 보인다. 이전 작업대는 닫는다(reason 'switch_project').
+        잠금(outcome.lock)은 작업대가 넘겨받아 store 에 준다."""
         from .workbench import Workbench
-        self._close_workbench()
+        had = self.workbench is not None
+        self._close_workbench("switch_project" if had else "user")   # 저장 안 한 구간 변경은 그 안에서 묻는다
+        try:
+            self.session = self.choose_session(outcome)
+        except Exception:  # noqa: BLE001 — 세션 화면이 실패해도 보기 전용으로는 연다
+            LOG.exception("세션 선택 화면 실패 — 보기 전용으로 엽니다")
+            self.session = None
         wb = Workbench(self, session=self.session)   # 세션이 있으면 작업대가 app.store 로 라벨 기록을 연다
         self.workbench = wb
         self.stack.addWidget(wb)
@@ -161,6 +197,7 @@ class MainWindow(QMainWindow):
         self.m_view.addAction(wb.analysis_action)
         self.m_view.menuAction().setVisible(wb.analysis_action.isVisible())
         self.a_close_project.setEnabled(True)
+        self.a_export.setEnabled(self.session is not None)
         data = outcome.project.data or {}
         title = (data.get("broadcast") or {}).get("title") or data.get("slug") or ""
         base = f"{self.spec.name} {__version__}"
@@ -195,21 +232,29 @@ class MainWindow(QMainWindow):
         if os.path.basename(target).lower() == "project.json":
             target = os.path.dirname(target)
         if _norm(target) == _norm(proj.root):
+            self._close_workbench("switch_project")
             self.show_home()
 
-    def _close_workbench(self) -> None:
+    def _close_workbench(self, reason: str = "user") -> None:
+        """작업대를 닫는다. 저장하지 않은 구간 변경이 있으면 저장·버리기를 묻고(취소 없음), store 는 reason 으로 닫는다."""
         wb = self.workbench
         if wb is None:
             return
+        try:
+            wb.resolve_unsaved(allow_cancel=False)
+        except Exception:  # noqa: BLE001 — 닫는 길은 막지 않는다
+            LOG.exception("저장하지 않은 변경 처리 실패")
         self.workbench = None
-        wb.close_workbench()
+        wb.close_workbench(reason)
         self.stack.removeWidget(wb)
         wb.deleteLater()
         self.m_view.clear()
         self.m_view.menuAction().setVisible(False)
+        self.a_export.setEnabled(False)
 
     def show_home(self) -> None:
-        self._close_workbench()
+        self._close_workbench("user")
+        self.session = None
         self.stack.setCurrentWidget(self.home_page)
         self.a_close_project.setEnabled(False)
         self.setWindowTitle(f"{self.spec.name} {__version__}")
@@ -217,7 +262,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(tr("준비"))
 
     def closeEvent(self, ev):  # noqa: N802
-        self._close_workbench()
+        self._close_workbench("app_exit")
         super().closeEvent(ev)
 
     # ---------------------------------------------------------------- 확인

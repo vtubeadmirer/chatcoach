@@ -39,6 +39,9 @@ def qapp():
     yield QApplication.instance() or QApplication([])
 
 
+MASKS = tuple("시" + "*" * k for k in range(1, 8))      # 가린 닉네임 합성값 (S-21: '시' + 별 1~7개)
+
+
 def _synth(n: int, seed: int = 7) -> list[dict]:
     """8시간에 고르게 퍼진 n 건. 시청자 n/8 명, 후원·구독 약 1%. (t_ms, chat_id) 순."""
     rnd = random.Random(seed)
@@ -52,7 +55,7 @@ def _synth(n: int, seed: int = 7) -> list[dict]:
         out.append({"chat_id": f"{i:08d}", "t_ms": t, "server_time_ms": 1_700_000_000_000 + t,
                     "type_code": 10 if kind == "donation" else (11 if kind == "subscription" else 1),
                     "kind": kind, "status": "NORMAL", "viewer_id": rnd.choice(viewers), "is_anonymous": False,
-                    "nickname_masked": "가" + "*" * rnd.randint(1, 7), "role": "viewer",
+                    "nickname_masked": MASKS[rnd.randint(0, 6)], "role": "viewer",
                     "text": " ".join(rnd.choice(_WORDS) for _ in range(rnd.randint(1, 8))),
                     "raw_ref": {"fetch_id": "F1", "page": i // 200, "index": i % 200}})
     return out

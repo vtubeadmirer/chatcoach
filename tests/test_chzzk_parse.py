@@ -90,7 +90,7 @@ def fetch_rec(tmp_path):
 
 # --------------------------------------------------------------------------- 주소
 def test_parse_video_no():
-    assert cc.parse_video_no("15632692") == "15632692"
+    assert cc.parse_video_no("123") == "123"
     assert cc.parse_video_no(" https://chzzk.naver.com/video/123?t=5 ") == "123"
     assert cc.parse_video_no("chzzk.naver.com/video/77") == "77"
     assert cc.parse_video_no("https://m.chzzk.naver.com/video/9/") == "9"
@@ -339,7 +339,7 @@ def test_profile_and_extras_parse_errors():
 # --------------------------------------------------------------------------- 저장·보호 구역
 def test_protected_zone_separation(tmp_path):
     cs = [chat(i, 100 * i) for i in range(1, 8)]
-    cs.append(chat(1, 900, nick="시청자1새이름"))   # 같은 사람, 바뀐 닉네임
+    cs.append(chat(1, 900, nick="시청자901"))   # 같은 사람, 바뀐 닉네임
     run(tmp_path, FakeApi(cs, size=3))
     raw_msgs = (tmp_path / "chat" / "messages.jsonl").read_text(encoding="utf-8")
     fetch_txt = (tmp_path / "chat" / f"fetch-{FID}.json").read_text(encoding="utf-8")
@@ -350,7 +350,7 @@ def test_protected_zone_separation(tmp_path):
             assert secret in ident_txt
     idents = jsonl.read(str(tmp_path / "chat" / "protected" / "identities.jsonl")).records
     one = [x for x in idents if x["user_id_hash"] == uh(1)][0]
-    assert [n["nickname"] for n in one["nicknames"]] == ["시청자1", "시청자1새이름"]
+    assert [n["nickname"] for n in one["nicknames"]] == ["시청자1", "시청자901"]
     assert one["nicknames"][1]["first_seen_ms"] == 900
     assert one["viewer_id"] == ids.viewer_id(SALT, uh(1))
     # 원문 페이지

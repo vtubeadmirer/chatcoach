@@ -142,12 +142,14 @@ def test_open_write_reopen_in_korean_folder(proj_dir):
 
     st2 = open_store(proj_dir, uuid_factory=uuids_from(100))
     assert not st2.read_only, st2.read_only_reasons
-    assert [x["kind"] for x in st2.records()] == ["session.open", "segment"]   # session.open 을 다시 쓰지 않는다
+    # session.open 을 다시 쓰지 않는다. 닫을 때 session.close 가 남는다(08 D-09 6)
+    assert [x["kind"] for x in st2.records()] == ["session.open", "segment", "session.close"]
     r2 = st2.append_label({"kind": "segment", "body": seg_body(60000, 120000, "game")})
-    assert r2["seq"] == 3
+    assert r2["seq"] == 4
     st2.close()
     st3 = open_store(proj_dir)
-    assert len(st3.records()) == 3 and not st3.read_only
+    assert [x["kind"] for x in st3.records()] == ["session.open", "segment", "session.close", "segment",
+                                                  "session.close"] and not st3.read_only
     st3.close()
 
 
@@ -213,18 +215,49 @@ def test_lock_conflict_opens_read_only(proj_dir):
 
 
 def test_real_qlockfile_conflict(proj_dir):
-    pytest.importorskip("PySide6.QtCore")
-    a = open_store(proj_dir, lock=None)
+    qtcore = pytest.importorskip("PySide6.QtCore")
+    lock = qtcore.QLockFile                    # 잠금은 호출하는 쪽이 주입한다(08 D-09 8)
+    a = open_store(proj_dir, lock=lock)
     assert not a.read_only, a.read_only_reasons
     assert os.path.exists(os.path.join(proj_dir, "locks", "open.lock"))
-    b = open_store(proj_dir, lock=None)
+    b = open_store(proj_dir, lock=lock)
     assert b.read_only and "다른 창이나 PC" in b.read_only_reason
+    assert b.lock_busy and b.lock_help
     b.close()
     a.close()
     assert not os.path.exists(os.path.join(proj_dir, "locks", "open.lock"))
-    c = open_store(proj_dir, lock=None)
+    c = open_store(proj_dir, lock=lock)
     assert not c.read_only
     c.close()
+
+
+@pytest.mark.parametrize("bad", [None, "QLockFile", 0])
+def test_lock_factory_is_required(proj_dir, bad):
+    with pytest.raises(TypeError):
+        store.ProjectStore.open(proj_dir, ctx(), bad, clock=Clock(), app_version="0.0.1")
+    with pytest.raises(TypeError):
+        store.ProjectStore.open(proj_dir, ctx())          # pylint: disable=no-value-for-parameter
+    assert not os.path.exists(os.path.join(proj_dir, "labels", ctx().file_name))
+
+
+def test_store_has_no_qt_import():
+    src = open(store.__file__, encoding="utf-8").read()
+    assert "importlib" not in src and "import PySide6" not in src and "from PySide6" not in src
+
+
+def test_lock_failure_help_other_pc_and_same_pc(proj_dir):
+    a = open_store(proj_dir)
+    b = open_store(proj_dir, ctx(MID_B, "L02-P-20261021-cd34", labeler="L02"))
+    assert b.lock_busy and b.lock_holder == {"pid": 1234, "host": "SYNTH-HOST", "app": "chatcoach"}
+    other = store.lock_failure_help(b.lock_holder, host="ANOTHER-HOST")
+    assert "SYNTH-HOST" in other and "locks\\open.lock" in other and "지우" in other
+    same = store.lock_failure_help(b.lock_holder, host="synth-host")
+    assert "이 PC" in same and "open.lock" not in same          # 같은 PC 면 지우라고 하지 않는다
+    assert "open.lock" in store.lock_failure_help(None, host="X")
+    assert not a.lock_busy and a.lock_help is None
+    b.close()
+    a.close()
+    assert os.path.exists(os.path.join(proj_dir, "locks")) and not FakeLock.held
 
 
 def test_stale_lock_time_is_set(proj_dir):
@@ -264,10 +297,10 @@ def test_append_after_truncated_last_line(proj_dir):
     with open(part, "rb") as f:
         assert f.read() == b'{"v":1,"id":"trunc'
     r = st2.append_label({"kind": "segment", "body": seg_body(60000, 90000)})
-    assert r["seq"] == 3
+    assert r["seq"] == 4                       # 1 open · 2 segment · 3 session.close · 4
     st2.close()
     res = jsonl.read(st.path)
-    assert res.ok and not res.truncated_tail and [x["seq"] for x in res.records] == [1, 2, 3]
+    assert res.ok and not res.truncated_tail and [x["seq"] for x in res.records] == [1, 2, 3, 4, 5]
     st3 = open_store(proj_dir)
     assert not st3.read_only and not st3.partial_files
     st3.close()
@@ -281,7 +314,7 @@ def test_truncated_tail_in_read_only_store_is_left_alone(proj_dir):
     FakeLock.held.add(os.path.join(proj_dir, "locks", "open.lock"))
     ro = open_store(proj_dir)
     assert ro.read_only and not ro.partial_files
-    assert len(ro.records()) == 1
+    assert [r["kind"] for r in ro.records()] == ["session.open", "session.close"]
     with open(st.path, "rb") as f:
         assert f.read().endswith(b'{"v":1')       # 읽기 전용이면 파일을 건드리지 않는다
 
@@ -493,7 +526,7 @@ def test_same_session_two_machines_merge(proj_dir):
     rb = b.append_label({"kind": "segment", "body": seg_body(0, 40000), "entity_id": ra["entity_id"],
                          "supersedes": ra["id"]})
     assert rb["seq"] == 2                         # seq 는 파일마다
-    assert len(b.records()) == 4
+    assert len(b.records()) == 5                  # A: open·segment·close, B: open·segment
     b.close()
     a2 = open_store(proj_dir, ctx(MID_A))
     assert a2.head(ra["entity_id"])["id"] == rb["id"]
@@ -568,10 +601,10 @@ def test_schema_invalid_line_on_disk_is_read_only(proj_dir):
     st = open_store(proj_dir)
     st.close()
     rec = json.loads(open(st.path, "rb").read().split(b"\n")[0])
-    rec.update(seq=2, id="22222222-0000-4000-8000-000000000002", kind="session.close", body={})
+    rec.update(seq=3, id="22222222-0000-4000-8000-000000000002", kind="session.close", body={})  # reason 없음
     jsonl.append(st.path, rec)
     ro = open_store(proj_dir)
-    assert ro.read_only and "2번째 기록" in ro.read_only_reason
+    assert ro.read_only and "3번째 기록" in ro.read_only_reason
     ro.close()
 
 
@@ -579,8 +612,8 @@ def test_seq_gap_is_read_only(proj_dir):
     st = open_store(proj_dir)
     st.close()
     rec = json.loads(open(st.path, "rb").read().split(b"\n")[0])
-    rec.update(seq=3, id="22222222-0000-4000-8000-000000000002", kind="phase.mark",
-               body={"phase": "segments", "scope": "all", "done": True})
+    rec.update(seq=4, id="22222222-0000-4000-8000-000000000002", kind="phase.mark",
+               body={"phase": "segments", "scope": "all", "done": True})       # 1 open · 2 close · (3 없음) · 4
     jsonl.append(st.path, rec)
     ro = open_store(proj_dir)
     assert ro.read_only and "seq" in ro.read_only_reason
@@ -595,7 +628,7 @@ def test_bom_file_reads(proj_dir):
     with open(st.path, "wb") as f:
         f.write(b"\xef\xbb\xbf" + raw)
     st2 = open_store(proj_dir)
-    assert not st2.read_only and len(st2.records()) == 2
+    assert not st2.read_only and len(st2.records()) == 3
     st2.close()
 
 

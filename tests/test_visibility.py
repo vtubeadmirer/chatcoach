@@ -94,11 +94,17 @@ def test_adjudication_ai_only_after_unseal():
     assert not V.can_show(V.ENGINE_RESULTS, V.COMPARISON, V.ADJUDICATION)
 
 
-# --------------------------------------------------------------------------- 분석 세션 (D-08 새 값 후보)
+# --------------------------------------------------------------------------- 분석 세션 (08 D-09 4·5)
 def test_analysis_session_sees_engine_and_labels_but_writes_no_labels():
     fs = V.files_to_open(V.ANALYSIS, V.REACTIONS)
     assert fs.can_read("engine_results") and fs.can_read("other_labels") and fs.can_read("derived_asr")
-    assert fs.may_read_other_session(locked=False)
+    # D-09 5: 다른 세션 라벨은 잠긴 1차 세션 것만
+    assert fs.other_labels == V.LOCKED_PRIMARY
+    assert fs.may_read_other_session(locked=True, other_kind=V.PRIMARY)
+    assert not fs.may_read_other_session(locked=False, other_kind=V.PRIMARY)
+    assert not fs.may_read_other_session(locked=True)                       # 종류를 모르면 막는다
+    for k in (V.RELABEL_SAME, V.RELABEL_SECOND, V.ADJUDICATION, V.ORIGIN_REVIEW, V.ANALYSIS):
+        assert not fs.may_read_other_session(locked=True, other_kind=k)
     assert fs.writable_label_kinds == frozenset()
     for k in ("segment", "reaction", "utterance", "retract", "adjudication", "origin"):
         assert not fs.can_write_label(k)

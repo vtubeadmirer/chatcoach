@@ -11,7 +11,7 @@
     "seq": {"type": "integer", "minimum": 1, "description": "파일 안 순번. 1부터 1씩 늘어난다. 순서 판단은 벽시계(created_at)가 아니라 (파일, seq) 와 supersedes 연결로 한다."},
     "kind": {
       "enum": [
-        "session.open", "run.start", "phase.mark", "view.exposed", "warning",
+        "session.open", "run.start", "phase.mark", "view.exposed", "warning", "session.close",
         "segment", "utterance", "reaction", "continuation", "video_check",
         "missed_candidate", "origin", "adjudication", "retract"
       ],
@@ -37,6 +37,7 @@
     {"properties": {"kind": {"const": "phase.mark"}, "body": {"$ref": "#/$defs/phaseMarkBody"}}},
     {"properties": {"kind": {"const": "view.exposed"}, "body": {"$ref": "#/$defs/viewExposedBody"}}},
     {"properties": {"kind": {"const": "warning"}, "body": {"$ref": "#/$defs/warningBody"}}},
+    {"properties": {"kind": {"const": "session.close"}, "body": {"$ref": "#/$defs/sessionCloseBody"}}},
     {"properties": {"kind": {"const": "segment"}, "body": {"$ref": "#/$defs/segmentBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]},
     {"properties": {"kind": {"const": "utterance"}, "body": {"$ref": "#/$defs/utteranceBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]},
     {"properties": {"kind": {"const": "reaction"}, "body": {"$ref": "#/$defs/reactionBody"}}, "required": ["entity_id", "supersedes", "guide_version", "guide_sha12", "thresholds_sha12", "media_rev", "calibration_rev"]},
@@ -63,8 +64,8 @@
     "labelerId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}$", "description": "라벨러 짧은 코드. 예: L01"},
     "sessionId": {
       "type": "string",
-      "pattern": "^[A-Z][A-Z0-9]{1,7}-(P|RS|R2|AD|OR)-[0-9]{8}-[a-z0-9]{4}$",
-      "description": "세션(회차) ID: '<labeler_id>-<종류 코드>-<만든 날 yyyymmdd>-<무작위 4자>'. 종류 코드 P=primary, RS=relabel_same, R2=relabel_second, AD=adjudication, OR=origin_review. 파일 이름은 '<session_id>.<machine4>.jsonl'."
+      "pattern": "^[A-Z][A-Z0-9]{1,7}-(P|RS|R2|AD|OR|AN)-[0-9]{8}-[a-z0-9]{4}$",
+      "description": "세션(회차) ID: '<labeler_id>-<종류 코드>-<만든 날 yyyymmdd>-<무작위 4자>'. 종류 코드 P=primary, RS=relabel_same, R2=relabel_second, AD=adjudication, OR=origin_review, AN=analysis. 파일 이름은 '<session_id>.<machine4>.jsonl'."
     },
     "chatId": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$", "description": "채팅 ID(sl-chat-id-v1). chat-message.schema.json 참고."},
     "ms": {"type": "integer", "minimum": -3600000, "maximum": 172800000, "description": "VOD 시각(ms 정수, playerMessageTime 축). 영상 파일 위치 = 이 값 + calibration offset_ms."},
@@ -75,7 +76,7 @@
     "grade": {"enum": ["direct", "likely", "related_only", "unclear"], "description": "반응 등급(안내서 4-2): 직접 반응 / 연결 가능성 높음 / 관련성만 있음 / 불명확."},
     "nullableGrade": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/grade"}]},
     "reasonCode": {"enum": ["A", "B", "C", "D", "E", "F", "G"], "description": "놓친 채팅 후보가 아닌 사유(안내서 6장): A 구간 밖(경계 완충 포함) / B 기회 부족 / C 대화 가치 낮음 / D 이미 다룸 / E 반복·도배 / F 후원·시스템 / G 판단 불가."},
-    "sessionKind": {"enum": ["primary", "relabel_same", "relabel_second", "adjudication", "origin_review"], "description": "1차 / 같은 사람 재라벨 / 두 번째 사람 독립 라벨 / 조정 / 출처 판정."},
+    "sessionKind": {"enum": ["primary", "relabel_same", "relabel_second", "adjudication", "origin_review", "analysis"], "description": "1차 / 같은 사람 재라벨 / 두 번째 사람 독립 라벨 / 조정 / 출처 판정 / 분석(엔진 결과와 잠긴 1차 라벨을 보는 세션, 라벨을 만들지 않음. 08 D-09 4·5)."},
     "labelKind": {"enum": ["segment", "utterance", "reaction", "continuation", "video_check", "missed_candidate", "origin"]},
     "range": {
       "type": "array",
@@ -246,6 +247,17 @@
         "note": {"type": "string", "maxLength": 300}
       }
     },
+    "sessionCloseBody": {
+      "type": "object",
+      "description": "세션을 닫을 때(프로젝트 닫기·앱 종료·다른 프로젝트 열기) 쓰는 마지막 줄. 세션 길이와 정상 종료를 알 수 있게 한다(08 D-09 6). 같은 세션을 다시 열면 그 뒤에 run.start 등이 이어진다. 이 줄이 없이 끝난 실행은 비정상 종료로 본다.",
+      "required": ["reason"],
+      "additionalProperties": false,
+      "properties": {
+        "reason": {"enum": ["user", "app_exit", "switch_project", "error"], "description": "닫은 까닭: 사용자가 프로젝트를 닫음 / 앱 종료 / 다른 프로젝트를 엶 / 오류로 닫음."},
+        "run_ms": {"type": "integer", "minimum": 0, "description": "이 실행에서 store 를 연 뒤 닫을 때까지의 시간(단조 시계, ms). 벽시계가 틀린 PC 에서도 세션 길이를 잴 수 있게."},
+        "lines_written": {"type": "integer", "minimum": 0, "description": "이 실행에서 이 파일에 쓴 줄 수(이 줄 제외)."}
+      }
+    },
     "viewExposedBody": {
       "type": "object",
       "description": "숨겨 둔 자료를 열어 봤다는 기록. 일치도 계산에서 이 세션을 따로 볼 수 있게 한다.",
@@ -359,7 +371,7 @@
               "required": ["version_id", "result", "grade", "confidence", "rationale"],
               "additionalProperties": false,
               "properties": {
-                "version_id": {"$ref": "#/$defs/uuid", "description": "처음 판단이 담긴 판 id."},
+                "version_id": {"oneOf": [{"$ref": "#/$defs/uuid"}, {"type": "null"}], "description": "처음 판단이 담긴 판 id. 한 번의 편집 안에서 첫 회차와 재확인 회차 사이에 판단이 바뀌었으면 그 판이 없어 null(처음 판단은 그 편집의 첫 video_check.judgment 와 같다)."},
                 "result": {"enum": ["graded", "unconfirmed"]},
                 "grade": {"$ref": "#/$defs/nullableGrade"},
                 "confidence": {"$ref": "#/$defs/confidence"},
