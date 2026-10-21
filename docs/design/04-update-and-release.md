@@ -437,7 +437,7 @@ ClipSlicer `find_app_dir` 의 'os.walk 로 처음 찾은 exe' 방식은 쓰지 �
 1. `data\update\updating.lock` 에 `{pid, from, to, started_at}` 를 쓴다. ClipSlicer 는 스크립트가 시작하면서 잠금을 써서, 그 사이에 exe 를 다시 켜면 검사를 통과하고 파일을 잠갔다.
 2. `replace.ps1` 을 `_update\<id>\` 에 쓴다. 내용은 `app/appspec.py` 의 값(보존 경로, exe 이름)으로 생성한다. PowerShell 5.1 이 한글 주석을 읽도록 UTF-8 BOM 을 **바이트로 직접** 붙인다. `utf-8-sig` 코덱은 업데이트 도중 로드에 실패한 전례가 있다(ClipSlicer 0.9.5).
 3. `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File <replace.ps1> -AppPid <pid> -App <앱 폴더> -New <새 폴더> -Id <id> [-Lite]` 를 실행한다. 출력은 bytes 로 받아 UTF-8, 안 되면 cp949 순서로 디코딩한다(0.9.8 사고).
-4. `_update\<id>\started` 가 10초 안에 생기는지 본다. 없으면 앱을 끄지 않고 '이 PC 에서는 자동 교체가 막혀 있습니다' 와 수동 업데이트 안내를 보인다. `Get-ExecutionPolicy -List` 결과를 로그에 남긴다 (S-17). 정책(GPO·AppLocker·Constrained Language Mode·백신)이 스크립트를 막은 경우를 앱이 살아 있을 때 잡는다.
+4. `_update\<id>\started` 가 10초 안에 생기는지 본다. 없으면 앱을 끄지 않고 '이 PC 에서는 자동 교체가 막혀 있습니다' 와 수동 업데이트 안내를 보인다. `Get-ExecutionPolicy -List` 결과를 로그에 남긴다 (S-17). 정책(GPO·AppLocker·Constrained Language Mode·백신)이 스크립트를 막은 경우를 앱이 살아 있을 때 잡는다. 포기할 때는 `_update\<id>\abandoned` 를 쓰고, 아직 살아 있는 스크립트 프로세스를 끝낸 뒤 잠금을 지운다. 늦게 뜬 스크립트는 2·3단계 뒤 `abandoned` 가 있거나 잠금이 없으면 아무것도 바꾸지 않고(결과·재실행 없이) 끝난다. '막혀 있습니다' 를 들은 교체·되돌리기가 나중에 일어나지 않게 하려는 것이다.
 5. 표식이 있으면 앱을 종료한다.
 
 스크립트가 하는 일:
@@ -460,6 +460,7 @@ ClipSlicer `find_app_dir` 의 'os.walk 로 처음 찾은 exe' 방식은 쓰지 �
 - `/XF libmpv-2.dll` 은 이름으로 맞춘다. 같은 이름의 파일이 다른 곳에 없다는 전제다 (확인 필요).
 - ClipSlicer 의 '같은 폴더 보조 프로세스 `Stop-Process -Force`' 는 넣지 않는다. 라벨링 도구에는 보조 프로세스가 없고, 접두사 오매칭(`C:\Tools\ClipSlicer` 가 `C:\Tools\ClipSlicer-old\x.exe` 도 매칭)으로 무관한 프로그램을 죽일 위험이 있었다.
 - 스크립트 안에서는 되도록 .NET 정적 호출 대신 내장 cmdlet 을 쓴다(Constrained Language Mode 호환). 실제 차단 사례가 나오기 전까지는 그 이상 하지 않는다.
+- robocopy 는 `%SystemRoot%\System32\robocopy.exe` 를 `Start-Process -PassThru` 로 띄우고, 끝날 때까지 30초(`-TouchSec`)마다 잠금 시각을 갱신한다. 백업·교체·복구·되돌리기 미러가 2분을 넘겨도 다시 켠 앱이 '진행 중' 을 '멈춘 업데이트' 로 보지 않게 하려는 것이다. 종료 코드를 읽지 못하면 rc 16 으로 본다. `-CopyExe` 는 시험에서 느린 가짜 복사를 넣는 인자다.
 - 스크립트는 `_update\<id>\` 를 지우지 않는다(자기 자신이 그 안에 있다). 다음 정상 시작 때 앱이 `_update\` 아래 남은 폴더를 이름 형식을 확인한 뒤 지운다. 자체 점검 실패로 보존 중인 1개는 남긴다.
 
 실행 중인 인스턴스: 앱은 폴더당 하나만 뜬다. 다른 폴더의 사본은 이 폴더의 파일을 잠그지 않는다. 120초 대기는 창을 닫는 중인 짧은 겹침을 위한 것이다.
@@ -499,11 +500,12 @@ USB: 교체 중에 뽑으면 반쯤 바뀐 폴더가 남을 수 있다. in-place
 | 교체 실패 → 복구 성공 | `--update-failed` | 이전 버전 | 다시 시도 |
 | 교체 실패 → 복구 실패 | 앱이 켜지면 강한 경고. 안 켜질 수도 있다 | 섞임 | 수동 복구: 전체 zip 을 새 폴더에 풀고 `data\` 를 옮긴다 (8장) |
 | 교체 중 전원 차단·USB 분리 | 다음 실행에서 앱이 켜지면 '지난 업데이트가 중간에 멈췄습니다' | 섞였을 수 있음 | `backup_ok` 가 있으면 [되돌리기]. 없거나 앱이 안 켜지면 수동 복구 |
+| 되돌리기 미러가 두 번 실패 (`rollback_failed`) | `--update-failed` + '되돌리기 실패' 경고, 이어서 [복구] 제안 | 섞였을 수 있음. `backup_ok` 는 남는다 | 같은 사본으로 다시 되돌리기(지금 버전이 사본과 같아도 '복구'). 메뉴도 이 결과가 남아 있는 동안 repair 로 판정한다 |
 | 새 버전이 켜지지만 라벨링에 이상 | 라벨러가 판단 | 새 버전 | 메뉴 [이전 버전으로 되돌리기] |
 
 되돌리기 ('이전 버전으로 되돌리기' 메뉴와 위 표의 제안이 같은 함수를 쓴다):
 
-- 조건: `_backup\` 이 있고, `data\update\backup_ok.json` 이 그 버전을 가리키며, `_backup\_internal\VERSION` 이 현재 버전과 다르다.
+- 조건: `_backup\` 이 있고, `data\update\backup_ok.json` 이 그 버전을 가리키며, `_backup\_internal\VERSION` 이 현재 버전과 다르다. 폴더가 섞였을 수 있으면(멈춘 업데이트, 마지막 결과 `restore_failed`·`rollback_failed`, `updater.repair_needed`) 같아도 된다(복구).
 - 동작: 같은 `replace.ps1` 을 `-New $App\_backup -NoBackup` 으로 실행한다. 교체 전 조건과 시작 표식 대기도 같다.
 - 되돌린 뒤 그 새 버전을 `skip_version` 에 자동으로 넣는다. 그러지 않으면 다음 시작에 다시 권한다. 더 높은 수정 버전이 나오면 다시 알린다.
 - 라벨 파일은 추가만 하므로 버전을 내려도 읽힌다. 단 이전 버전이 모르는 `schema_version` 의 줄은 읽기 전용으로 보인다 ([03-data-model.md](./03-data-model.md)).

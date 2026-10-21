@@ -53,8 +53,10 @@ _CONF_KO = {"certain": "확실함", "probably": "아마도", "undeterminable": "
 # 결정 고르기 칸의 값(문자열): 'pick:<session_id>' · 'new' · 'exclude_from_eval' · 'keep_as_ambiguous'
 _NEW = "new"
 _PICK = "pick"
-# 이 폭보다 좁으면 목록과 고른 건을 위아래로 놓는다(1366x768 의 오른쪽 칸 471·731px 는 위아래)
-NARROW_PX = 900
+# 이 폭보다 좁으면 목록과 고른 건을 위아래로 놓는다(1366x768 의 오른쪽 칸 471·731·870px 는 위아래).
+# 900 이던 때 실제 창 1366 에서 조정 칸이 900px 이 되어 나란히 배치로 바뀌고 오른쪽 밖 48 이 났다(15 5-2 의 2번) —
+# 1200 으로 올려 작업대가 따로 870 이하로 묶지 않아도 노트북 화면에서는 늘 위아래가 되게 한다.
+NARROW_PX = 1200
 
 
 def _split_key(data) -> tuple[str | None, str | None]:

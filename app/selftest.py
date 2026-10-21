@@ -7,6 +7,8 @@
 ② 업데이터가 교체 직전, 준비 폴더의 새 exe 로 --expect-version 과 --data-dir _update\\<id>\\selftest-data 를 붙여서.
    이때 --expect-channel 은 지금 실행 중인 설치본의 채널이다. 그래서 test → test 시험 업데이트도 관문을 통과한다
    (02 11-3 의 열린 질문을 이렇게 닫는다. CI 는 --expect-channel release 를 준다).
+③ 되돌리기(04 6-10) 직전, <앱>\\_backup 의 exe 로 ②와 같은 인자(기대 버전 = 사본 버전)를 붙여서.
+   이때 설치 폴더는 _backup 이므로 이 점검은 설치 폴더에 흔적을 남기지 않는다 (_updater 참고).
 """
 from __future__ import annotations
 
@@ -154,13 +156,26 @@ def _updater() -> str:
     if not updater.update_in_progress(root):
         raise RuntimeError("잠금 파일 판정 실패")
     os.remove(lock)
+    # 되돌리기 관문은 <앱>\_backup 의 exe 로 이 점검을 돈다. 그때 _backup 안에 흔적(_update\)을 남기면
+    # 되돌리기 미러가 그것을 <앱>\_update 로 옮기려 하므로, 원래 없던 폴더는 만든 뒤 치운다 (04 6-10)
     upd = os.path.join(install_root(), "_update")
+    existed = os.path.isdir(upd)
     os.makedirs(upd, exist_ok=True)
-    d = tempfile.mkdtemp(prefix=updater.STAGE_PREFIX, dir=upd)
-    shutil.rmtree(d)
-    if len(updater.render_replacer()) < 1000:
+    try:
+        d = tempfile.mkdtemp(prefix=updater.STAGE_PREFIX, dir=upd)
+        shutil.rmtree(d)
+    finally:
+        if not existed:
+            try:
+                os.rmdir(upd)          # 비어 있을 때만 지워진다
+            except OSError:
+                pass
+    script = updater.render_replacer()
+    if len(script) < 1000:
         raise RuntimeError("교체 스크립트 생성 실패")
-    return f"lock ok, stage dir ok ({upd})"
+    if "[switch]$Rollback" not in script or updater.ROLLBACK_FLAG not in script:
+        raise RuntimeError("교체 스크립트에 되돌리기 분기가 없습니다")
+    return f"lock ok, stage dir ok ({upd}), rollback branch ok"
 
 
 def run(out_path: str, expect_version: str | None = None, expect_channel: str | None = None) -> int:

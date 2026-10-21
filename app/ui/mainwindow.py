@@ -14,45 +14,78 @@
 ④ 놓친 후보는 작업대의 모드다(세션 종류에 따라 모드 줄에 나온다, app.core.phase.modes_for).
 
 업데이트 연동 흐름 (04 6장): 시작 30초 뒤 백그라운드 확인 → 상태바 3상태 → '새 버전' 버튼 → 대화상자 →
-준비(진행률·취소) → 교체 전 조건 → 적용(시작 표식 확인) → 앱 종료. 확인 시각은 updater 가 결과 뒤에 쓴다.
+준비(진행률·취소) → 교체 전 조건 → 교체 직전 data 백업(backup.pre_update_backup, 6-7) → 적용(시작 표식 확인) → 앱 종료.
+확인 시각은 updater 가 결과 뒤에 쓴다. 시작 확인은 on_start=True(필수 업데이트·지원 종료면 주기와 상관없이),
+채널은 숨은 설정 settings.ini [update] channel (stable·beta, 04 6-2).
+
+운영 메뉴 (07 M4):
+- [도움말 → 이전 버전으로 되돌리기…] (04 6-10): updater.rollback_status 로 켜고 끈다. 이번 실행이 _backup 을 지울 차례
+  (main.py 9단계, delete_backup_pending)면 처음부터 끈다. 확인(RollbackDialog) → 워커에서 updater.stage_rollback(관문) →
+  RobocopyApplier.rollback(data 백업 → replace.ps1 -Rollback) → 앱 종료. 업데이트 실패 뒤 제안(updater.rollback_suggestion)도
+  같은 함수(rollback_dialog)를 탄다.
+- [파일 → 프로젝트 백업…] · [파일 → 백업에서 되살리기…] · [파일 → 프로젝트 지우기(휴지통)…] (app/backup.py, app/ui/ops_dialogs.py).
+  지우기는 휴지통으로만 보낸다. 지금 연 프로젝트면 작업대를 닫은 뒤 보낸다.
+- 위쪽 띠: '업데이트 필요'·필수 업데이트(SupportBanner, 04 5-5)와 경로 경고(paths.startup_path_issues ·
+  project_path_issues, S-09·S-49). '업데이트 필요' 면 작업대의 라벨 기록을 읽기 전용으로 연다(store save_block).
+- 세션 메뉴는 작업(run_job_modal · 작업대 워커)이 도는 동안 끈다(15 5-2 의 15번).
 """
 from __future__ import annotations
 
 import logging
 import os
+import shutil
 from datetime import datetime
 
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QGuiApplication
-from PySide6.QtWidgets import (QApplication, QLabel, QMainWindow, QMessageBox, QProgressDialog, QPushButton,
-                               QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QFileDialog, QLabel, QMainWindow, QMessageBox, QProgressDialog,
+                               QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import __version__, updater
 from ..appspec import AppSpec
 from ..i18n import tr
 from ..workers import UpdateCheckWorker, UpdateStageWorker
-from .project_view import ProjectView, load_recent
-from .update_dialog import UpdateDialog, open_trusted_url
+from .project_view import ProjectView, load_recent, remove_recent
+from .update_dialog import RollbackDialog, SupportBanner, UpdateDialog, open_trusted_url, rollback_menu_text
 
 LOG = logging.getLogger("chatcoach")
 # 시험 채널 전용: 환경 변수가 1 이면 새 버전을 찾았을 때 대화상자 없이 바로 준비·적용한다 (04 12-5 손 시험·자동 왕복 시험용).
 # release 채널은 읽지 않는다.
 AUTO_UPDATE_ENV = "CHATCOACH_AUTO_UPDATE"
-MANUAL_GUIDE = ("수동 업데이트: 앱을 끄고 릴리스 페이지에서 전체 zip 을 받아 새 폴더에 푼 뒤, 옛 폴더의 data\\ 를 "
+# 시험 채널 전용: 1 이면 --updated 로 켜진 실행에서 2.5초 뒤 [도움말 → 이전 버전으로 되돌리기] 를 확인 없이 부른다
+# (tools/update_roundtrip.py --rollback, 04 12-5). release 채널은 읽지 않는다.
+AUTO_ROLLBACK_ENV = "CHATCOACH_AUTO_ROLLBACK"
+UPDATE_CHANNEL_KEY = "update/channel"        # 숨은 설정 (04 6-2): stable | beta
+BACKGROUND_JOBS = frozenset({"waveform", "media_check", "media_ref", "engine", "chat_index"})   # 세션 메뉴를 막지 않는 작업대 일
+PATH_ACK_GROUP = "path_ack"                 # 앱·데이터·백업 폴더 경고(confirm)를 '그래도 계속' 한 기록
+MANUAL_GUIDE =("수동 업데이트: 앱을 끄고 릴리스 페이지에서 전체 zip 을 받아 새 폴더에 푼 뒤, 옛 폴더의 data\\ 를 "
                 "새 폴더의 ChatCoach\\ 안으로 복사합니다 (docs/install.md, 04 8장).")
 
 
 class MainWindow(QMainWindow):
     def __init__(self, spec: AppSpec, installed: updater.InstalledInfo, data_root: str, log_file: str,
-                 base_url: str | None, startup_notes: list[str], flags: set[str]):
+                 base_url: str | None, startup_notes: list[str], flags: set[str], *,
+                 abnormal_streak: int = 0, delete_backup_pending: bool = False, path_issues=None):
+        """abnormal_streak: crashguard.note_start 의 연속 비정상 종료 횟수 (되돌리기 제안, 04 6-9).
+        delete_backup_pending: 이번 실행이 지난 교체의 _backup 을 지울 차례인가 (main.py 9단계) — 그러면 되돌리기 메뉴를 끈다.
+        path_issues: paths.startup_path_issues() 결과 (위쪽 경로 띠 · confirm 은 대화상자)."""
         super().__init__()
         self.spec, self.installed, self.data_root, self.log_file = spec, installed, data_root, log_file
         self.base_url = base_url
+        self.flags = set(flags)
+        self.abnormal_streak = int(abnormal_streak or 0)
+        self.delete_backup_pending = bool(delete_backup_pending)
+        self.startup_path_issues = list(path_issues or [])
+        self.project_path_issues: list = []
+        self.retention_line: str | None = None
+        self.session_backup = False   # 세션 끝 기록 복사(S-39 ③). main.py 가 켠다(시험·smoke 는 사용자 백업 폴더에 쓰지 않게)
         self.auto = installed.channel in ("test", "source") and os.environ.get(AUTO_UPDATE_ENV, "") == "1"
+        self.auto_rollback = installed.channel in ("test", "source") and os.environ.get(AUTO_ROLLBACK_ENV, "") == "1"
         self.state_path = os.path.join(data_root, "update", "state.json")
         self._check_worker: UpdateCheckWorker | None = None
         self._stage_worker: UpdateStageWorker | None = None
         self._result: updater.CheckResult | None = None
+        self._rolling_back = False
         self.setWindowTitle(f"{spec.name} {__version__}")
         self.resize(760, 480)
 
@@ -70,10 +103,6 @@ class MainWindow(QMainWindow):
         self.notes_label.setWordWrap(True)
         self.notes_label.setVisible(bool(startup_notes))
         lay.addWidget(self.notes_label)
-        self.banner = QLabel("")
-        self.banner.setWordWrap(True)
-        self.banner.setVisible(False)
-        lay.addWidget(self.banner)
         # ---- 프로젝트 화면 · 작업대 전환
         self.settings = QSettings(os.path.join(data_root, "settings.ini"), QSettings.Format.IniFormat)
         self.project_view = ProjectView(self.settings, self)
@@ -87,10 +116,28 @@ class MainWindow(QMainWindow):
         self.session = None      # app.session.SessionContext — 지금 작업대의 세션(보기 전용이면 None)
         # 세션 고르기: outcome → SessionContext | None. None 이면 세션 선택 화면(모달). 시험은 바꿔 끼운다.
         self.session_chooser = None
-        self.setCentralWidget(self.stack)
+        # 위쪽 띠 두 줄(업데이트 필요 · 경로 경고)은 화면 전환과 상관없이 늘 위에 둔다
+        root = QWidget()
+        rlay = QVBoxLayout(root)
+        rlay.setContentsMargins(0, 0, 0, 0)
+        rlay.setSpacing(0)
+        self.support_banner = SupportBanner(spec, root)
+        self.support_banner.update_requested.connect(self._banner_update)
+        rlay.addWidget(self.support_banner)
+        self.path_banner = QLabel("")
+        self.path_banner.setObjectName("pathBanner")
+        self.path_banner.setWordWrap(True)
+        self.path_banner.setContentsMargins(8, 2, 8, 2)
+        self.path_banner.setVisible(False)
+        rlay.addWidget(self.path_banner)
+        rlay.addWidget(self.stack, 1)
+        self.setCentralWidget(root)
+        self.refresh_support_banner()
+        self.refresh_path_banner()
 
         m_file = self.menuBar().addMenu(tr("파일(&F)"))
         self._build_project_menu(m_file)
+        self._build_ops_menu(m_file)
         a_quit = QAction(tr("종료(&X)"), self)
         a_quit.setShortcut("Ctrl+Q")
         a_quit.triggered.connect(self.close)
@@ -110,6 +157,12 @@ class MainWindow(QMainWindow):
         a_report = QAction(tr("문제 보고 복사(&R)"), self)
         a_report.triggered.connect(self.copy_report)
         m_help.addAction(a_report)
+        self.a_rollback = QAction(tr("이전 버전으로 되돌리기(&B)…"), self)
+        self.a_rollback.triggered.connect(lambda: self.rollback_dialog())
+        m_help.addAction(self.a_rollback)
+        m_help.aboutToShow.connect(self.update_rollback_action)
+        self.m_help = m_help
+        self.update_rollback_action()
         a_about = QAction(tr("정보(&A)"), self)
         a_about.triggered.connect(self.about)
         m_help.addAction(a_about)
@@ -128,12 +181,32 @@ class MainWindow(QMainWindow):
             LOG.info("시험 자동 업데이트 모드 (%s=1): 2초 뒤 확인, 새 버전이면 바로 적용", AUTO_UPDATE_ENV)
             QTimer.singleShot(2_000, lambda: self.check_updates(force=True))
         else:
-            QTimer.singleShot(30_000, lambda: self.check_updates(force=False))   # 04 6-2: 시작 30초 뒤
-        for flag in flags:
-            if self.auto:
+            QTimer.singleShot(30_000, self._startup_check)   # 04 6-2: 시작 30초 뒤
+        if self.auto_rollback and "--updated" in self.flags:
+            LOG.info("시험 자동 되돌리기 모드 (%s=1): 2.5초 뒤 메뉴 되돌리기", AUTO_ROLLBACK_ENV)
+            QTimer.singleShot(2_500, lambda: self.rollback_dialog(confirm=False))
+        if self.auto or self.auto_rollback:
+            for flag in sorted(self.flags):
                 LOG.info("시작 인자 %s (자동 모드라 대화상자 생략)", flag)
-            else:
-                QTimer.singleShot(400, lambda f=flag: self.notify_startup_flag(f))
+        else:
+            QTimer.singleShot(400, self.startup_dialogs)
+
+    def _startup_check(self) -> None:
+        """시작 30초 뒤 확인 (on_start: 필수 업데이트·지원 종료면 주기와 상관없이). 시험이 check_updates 를 옛 서명으로
+        바꿔 끼웠으면 그 서명으로 부른다."""
+        try:
+            self.check_updates(force=False, on_start=True)
+        except TypeError:
+            self.check_updates(force=False)
+
+    def startup_dialogs(self) -> None:
+        """시작 알림을 차례로(겹치지 않게): 시작 인자 알림 → 경로 확인(confirm) → 업데이트 실패 뒤 되돌리기 제안."""
+        for flag in sorted(self.flags):
+            self.notify_startup_flag(flag)
+        if not self.confirm_startup_paths():
+            QTimer.singleShot(0, self.close)
+            return
+        self.maybe_suggest_rollback()
 
     # ---------------------------------------------------------------- 프로젝트 · 화면 전환
     def _build_project_menu(self, m_file) -> None:
@@ -153,6 +226,227 @@ class MainWindow(QMainWindow):
         self.a_export.setEnabled(False)
         m_file.addAction(self.a_export)
         m_file.addSeparator()
+
+    def _build_ops_menu(self, m_file) -> None:
+        """파일 메뉴의 운영 항목 (07 M4): 백업 · 되살리기 · 지우기(휴지통)."""
+        self.a_backup = QAction(tr("프로젝트 백업(&B)…"), self)
+        self.a_backup.triggered.connect(lambda: self.backup_project_dialog())
+        m_file.addAction(self.a_backup)
+        self.a_restore = QAction(tr("백업에서 되살리기(&T)…"), self)
+        self.a_restore.triggered.connect(lambda: self.restore_backup_dialog())
+        m_file.addAction(self.a_restore)
+        self.a_dispose = QAction(tr("프로젝트 지우기(휴지통)(&D)…"), self)
+        self.a_dispose.triggered.connect(lambda: self.dispose_project_dialog())
+        m_file.addAction(self.a_dispose)
+        m_file.addSeparator()
+
+    # ---------------------------------------------------------------- 운영: 백업 · 되살리기 · 지우기
+    def inform(self, title: str, text: str) -> None:
+        """알림 대화상자(시험은 바꿔 끼운다 — 화면 없이 모달이 멈추지 않게)."""
+        QMessageBox.information(self, title, text)
+
+    def warn(self, title: str, text: str) -> None:
+        QMessageBox.warning(self, title, text)
+
+    def _current_project_root(self) -> str | None:
+        proj = getattr(self.workbench, "project", None) if self.workbench is not None else None
+        return proj.root if proj is not None else None
+
+    def _choose_project_dir(self, title: str) -> str | None:
+        d = QFileDialog.getExistingDirectory(self, title, os.path.join(self.data_root, "projects"))
+        if not d:
+            return None
+        d = os.path.normpath(d)
+        if not os.path.isfile(os.path.join(d, "project.json")):
+            self.warn(title, tr("고른 폴더에 project.json 이 없습니다."))
+            return None
+        return d
+
+    def _project_title(self, root: str) -> str:
+        from .. import backup
+        try:
+            data = backup.read_project_json(root)
+        except Exception:  # noqa: BLE001 — 제목은 보여 주기용
+            return os.path.basename(root.rstrip("\\/"))
+        return (data.get("broadcast") or {}).get("title") or data.get("slug") or os.path.basename(root.rstrip("\\/"))
+
+    def known_project_roots(self) -> list[str]:
+        """업데이트·되돌리기 직전 백업에 넣을 프로젝트: 최근 목록 + <data>\\projects\\* (project.json 이 있는 것)."""
+        out: list[str] = []
+        seen: set[str] = set()
+        cands = list(load_recent(self.settings))
+        pdir = os.path.join(self.data_root, "projects")
+        try:
+            cands += [os.path.join(pdir, n) for n in sorted(os.listdir(pdir))]
+        except OSError:
+            pass
+        for p in cands:
+            k = os.path.normcase(os.path.abspath(p))
+            if k in seen or not os.path.isfile(os.path.join(p, "project.json")):
+                continue
+            seen.add(k)
+            out.append(p)
+        return out
+
+    def data_backup(self, from_ver: str, to_ver: str) -> str:
+        """교체·되돌리기 직전 data 백업 (04 6-7). 실패하면 예외 — updater 가 교체를 멈춘다."""
+        from .. import backup
+        return backup.pre_update_backup(self.known_project_roots(), from_ver, to_ver, data_root=self.data_root)
+
+    def backup_project_dialog(self, *, root: str | None = None, run=None):
+        """'파일 → 프로젝트 백업…'. 지금 연 프로젝트(없으면 폴더 고르기). run(dlg) 을 주면 exec() 대신(시험).
+        만든 backup.BackupResult 또는 None."""
+        from .. import backup
+        from ..workers import JobWorker
+        from .ops_dialogs import BackupDialog
+        root = root or self._current_project_root() or self._choose_project_dir(tr("백업할 프로젝트 폴더"))
+        if not root:
+            return None
+        try:
+            pid = backup.project_id_of(root)
+            default_dir = backup.default_backup_dir(pid)
+        except (backup.BackupError, OSError, ValueError) as e:
+            self.warn(tr("프로젝트 백업"), tr("백업할 수 없습니다: {0}").format(e))
+            return None
+        dlg = BackupDialog(self, project_title=self._project_title(root), default_dir=default_dir)
+        try:
+            rc = (run or (lambda d: d.exec()))(dlg)
+            if rc != BackupDialog.Accepted:
+                return None
+            opts = {"include_chat": dlg.include_chat, "include_protected": dlg.include_protected, "out_dir": dlg.out_dir}
+        finally:
+            dlg.deleteLater()
+        box: dict = {}
+
+        def job(_ctx):
+            try:
+                box["res"] = backup.backup_project(root, kind="manual", app_version=__version__, **opts)
+            except (backup.BackupError, OSError, ValueError) as e:
+                box["err"] = str(e) or type(e).__name__
+        w = JobWorker.single("backup", job, name="프로젝트 백업", parent=self)
+        self.run_job_modal(w, title=tr("프로젝트 백업"), label=tr("백업 zip 을 만드는 중…"))
+        w.deleteLater()
+        res = box.get("res")
+        if res is None:
+            self.warn(tr("프로젝트 백업"), tr("백업하지 못했습니다: {0}").format(box.get("err", tr("취소"))))
+            return None
+        msg = tr("백업을 만들었습니다 (파일 {0}개).\n{1}").format(len(res.manifest.get("files") or []), res.path)
+        if res.warnings:
+            msg += "\n\n" + "\n".join("⚠ " + tr(x) for x in res.warnings)
+        self.inform(tr("프로젝트 백업"), msg)
+        return res
+
+    def restore_backup_dialog(self, *, zip_path: str | None = None, dest_parent: str | None = None):
+        """'파일 → 백업에서 되살리기…'. 새 폴더로만 푼다(있는 폴더를 덮지 않는다). backup.RestoreResult 또는 None."""
+        from .. import backup, paths
+        if zip_path is None:
+            start = paths.backup_root()
+            zip_path, _f = QFileDialog.getOpenFileName(self, tr("되살릴 백업 zip"), start, tr("백업 (*.zip)"))
+            if not zip_path:
+                return None
+        problems = backup.verify_backup(zip_path)
+        if problems:
+            self.warn(tr("백업에서 되살리기"),
+                      tr("이 백업은 검사를 통과하지 못했습니다:\n") + "\n".join("· " + p for p in problems[:8]))
+            return None
+        if dest_parent is None:
+            dest_parent = QFileDialog.getExistingDirectory(self, tr("되살릴 위치(이 아래에 새 폴더를 만듭니다)"),
+                                                           os.path.join(self.data_root, "projects"))
+            if not dest_parent:
+                return None
+        try:
+            res = backup.restore_backup(zip_path, os.path.normpath(dest_parent))
+        except (backup.BackupError, OSError, ValueError) as e:
+            self.warn(tr("백업에서 되살리기"), tr("되살리지 못했습니다: {0}").format(e))
+            return None
+        msg = tr("새 폴더에 되살렸습니다 (파일 {0}개).\n{1}").format(res.files, res.path)
+        if res.warnings:
+            msg += "\n\n" + "\n".join("⚠ " + tr(x) for x in res.warnings)
+        self.inform(tr("백업에서 되살리기"), msg)
+        return res
+
+    def _open_lock_is_stale(self, root: str) -> bool:
+        """locks/open.lock 이 남아 있지만 아무도 쥐고 있지 않은가(비정상 종료로 남은 파일). QLockFile 로 실제로 잡아 본다."""
+        from PySide6.QtCore import QLockFile
+        lk = QLockFile(os.path.join(root, "locks", "open.lock"))
+        lk.setStaleLockTime(0)
+        if lk.tryLock(0):
+            lk.unlock()
+            return True
+        return False
+
+    def _workbench_holds_lock(self) -> bool:
+        """지금 작업대가 프로젝트 잠금(locks/open.lock)을 실제로 쥐고 있는가. 라벨 기록(store)이 넘겨받아 쥐었거나,
+        세션 없이 보기만 하는 경우 project_view 가 잡은 잠금(outcome.lock)이 아직 작업대에 있을 때."""
+        wb = self.workbench
+        if wb is None:
+            return False
+        st = getattr(wb, "store", None)
+        if st is not None and getattr(st, "_lock", None) is not None and not getattr(st, "lock_busy", False):
+            return True
+        lk = getattr(getattr(wb, "outcome", None), "lock", None)
+        if lk is None:
+            return False
+        try:
+            return bool(lk.isLocked()) if hasattr(lk, "isLocked") else True
+        except Exception:  # noqa: BLE001 — 모르면 쥐지 않은 쪽(검사를 하는 쪽)으로
+            return False
+
+    def dispose_project_dialog(self, *, root: str | None = None, run=None, trash=None):
+        """'파일 → 프로젝트 지우기(휴지통)…' (05 10-3). 대상 목록 확인 → (지금 연 프로젝트면 작업대를 닫고) 휴지통으로.
+        run(dlg) 을 주면 exec() 대신(시험), trash 는 휴지통 함수 바꿔 끼우기(시험). backup.DisposalResult 또는 None."""
+        from .. import backup
+        from .ops_dialogs import DisposalDialog
+        title = tr("프로젝트 지우기 (휴지통)")
+        if getattr(self, "busy_jobs", 0) > 0:
+            self.statusBar().showMessage(tr("작업이 도는 중입니다 — 끝난 뒤에 하세요"), 5000)
+            return None
+        cur = self._current_project_root()
+        root = root or cur or self._choose_project_dir(tr("지울 프로젝트 폴더"))
+        if not root:
+            return None
+        is_open = cur is not None and os.path.normcase(os.path.abspath(cur)) == os.path.normcase(os.path.abspath(root))
+        busy_msg = tr("다른 창이나 PC 가 이 프로젝트를 열고 있습니다. 닫은 뒤 다시 하세요.")
+        lock_path = os.path.join(root, "locks", "open.lock")
+        # 이 창이 잠금을 실제로 쥔 경우만 잠금 검사를 건너뛴다. 다른 창·PC 가 쥐고 있어 읽기 전용으로 연 경우는
+        # 열지 않은 것과 같이 본다 (그 사람이 지금 라벨링 중일 수 있다)
+        ignore_lock = is_open and self._workbench_holds_lock()
+        if not ignore_lock and os.path.exists(lock_path):
+            if not self._open_lock_is_stale(root):
+                self.warn(title, busy_msg)
+                return None
+            ignore_lock = True
+
+        def planner(keep_labels: bool):
+            return backup.plan_disposal(root, keep_labels=keep_labels, data_root=self.data_root,
+                                        ignore_open_lock=ignore_lock)
+        last = self.settings.value("session/last_labeler", "")
+        dlg = DisposalDialog(self, planner=planner, project_title=self._project_title(root),
+                             labeler_id=last if isinstance(last, str) else "")
+        try:
+            rc = (run or (lambda d: d.exec()))(dlg)
+            if rc != DisposalDialog.Accepted or dlg.plan is None:
+                return None
+            plan, labeler = dlg.plan, dlg.labeler_id
+        finally:
+            dlg.deleteLater()
+        if is_open:
+            self.show_home()                    # 작업대·잠금(open.lock)을 먼저 정리한다
+        # 확인하는 동안 다른 창·PC 가 열었을 수 있다: 보내기 직전에 한 번 더 본다
+        if os.path.exists(lock_path) and not self._open_lock_is_stale(root):
+            self.warn(title, busy_msg)
+            return None
+        res = backup.execute_disposal(plan, labeler_id=labeler, trash=trash, app_version=__version__)
+        if not plan.keep_labels and not os.path.exists(root):
+            remove_recent(self.settings, root)
+            self._fill_recent_menu()
+            self.project_view.refresh()
+        msg = tr("휴지통으로 {0}건 보냈습니다.").format(len(res.trashed))
+        if res.failed:
+            msg += "\n" + tr("보내지 못한 대상 {0}건 (남겨 두었습니다 — 직접 지우세요):").format(len(res.failed))
+            msg += "\n" + "\n".join(f"· {t.path} ({why})" for t, why in res.failed[:8])
+        (self.inform if res.ok else self.warn)(title, msg)
+        return res
 
     def _build_session_menus(self) -> None:
         """세션(&N): 이 세션 잠그기…·재라벨 계획 만들기… / 보고(&B): 일치도 보고서… (06 7-1, 08 D-11).
@@ -200,8 +494,25 @@ class MainWindow(QMainWindow):
                 .format(len(pending))
         return None
 
-    def update_session_actions(self) -> None:
+    def jobs_busy(self) -> bool:
+        """작업이 도는 중인가: 메인 창의 run_job_modal(busy_jobs) 또는 작업대 워커(jobs_busy) (15 5-2 의 15번)."""
         wb = self.workbench
+        if getattr(self, "busy_jobs", 0) > 0:
+            return True
+        keys = getattr(wb, "busy_job_keys", None) if wb is not None else None
+        if keys is None:
+            return False
+        # 파형·영상 확인·엔진 결과·색인 같은 뒤 작업은 라벨 기록을 쓰지 않는다 — 몇 분 걸려도 세션 메뉴를 막지 않는다
+        return any(k not in BACKGROUND_JOBS for k in keys())
+
+    def update_session_actions(self, *_a) -> None:
+        wb = self.workbench
+        if self.jobs_busy():
+            why = tr("작업이 도는 중입니다 — 끝난 뒤에 쓸 수 있습니다")
+            for a in (self.a_lock, self.a_plan, self.a_agreement, self.a_cancel_plan):
+                a.setEnabled(False)
+                a.setToolTip(why)
+            return
         why_lock = wb.can_lock() if wb is not None else tr("프로젝트를 먼저 여세요")
         self.a_lock.setEnabled(why_lock is None)
         self.a_lock.setToolTip(why_lock or "")
@@ -275,7 +586,9 @@ class MainWindow(QMainWindow):
             return None
         rows, current = prep
         from .lock_dialog import LockDialog
-        dlg = LockDialog(self, store=wb.store, sample_verify=rows, current_sample=current)
+        recheck = getattr(wb, "current_sample_recheck", None) if current is not None else None
+        extra = {"recheck": recheck} if recheck is not None else {}      # 잠그기 직전 구간표 지문 재검사 (15 5-2 의 12번)
+        dlg = LockDialog(self, store=wb.store, sample_verify=rows, current_sample=current, **extra)
         try:
             (run or (lambda d: d.exec()))(dlg)
             doc = dlg.lock_doc
@@ -336,6 +649,10 @@ class MainWindow(QMainWindow):
             prog.deleteLater()
             if self.busy_jobs == 0 and getattr(self, "_close_pending", False):
                 QTimer.singleShot(0, self.close)        # 도는 동안 미뤄 둔 창 닫기(closeEvent)를 이제 한다
+            try:
+                self.update_session_actions()           # 작업이 끝났으니 세션 메뉴를 다시 켠다
+            except Exception:  # noqa: BLE001 — 메뉴 갱신 실패가 작업 결과를 가리지 않게
+                LOG.exception("세션 메뉴 갱신 실패")
         return worker.outcome
 
     def lock_prep(self, wb):
@@ -433,15 +750,29 @@ class MainWindow(QMainWindow):
         from .workbench import Workbench
         had = self.workbench is not None
         self._close_workbench("switch_project" if had else "user")   # 저장 안 한 구간 변경은 그 안에서 묻는다
+        if not self.confirm_project_path(outcome):
+            held = getattr(outcome, "lock", None)
+            if held is not None:
+                outcome.lock = None
+                try:
+                    held.unlock()
+                except Exception:  # noqa: BLE001
+                    LOG.exception("프로젝트 잠금 풀기 실패")
+            self.show_home()
+            return
         self.refresh_relabel_index(outcome)
         try:
             self.session = self.choose_session(outcome)
         except Exception:  # noqa: BLE001 — 세션 화면이 실패해도 보기 전용으로는 연다
             LOG.exception("세션 선택 화면 실패 — 보기 전용으로 엽니다")
             self.session = None
-        wb = Workbench(self, session=self.session)   # 세션이 있으면 작업대가 app.store 로 라벨 기록을 연다
+        # 04 5-5 '업데이트 필요' 모드: 새 라벨 저장을 막는다(라벨 기록을 읽기 전용으로 연다). 열람·내보내기는 된다
+        block = updater.label_save_block_reason(self.state_path, __version__)
+        opts = {"save_block": tr(block)} if block and self.session is not None else None
+        wb = Workbench(self, session=self.session, store_options=opts)   # 세션이 있으면 작업대가 app.store 로 라벨 기록을 연다
         wb.data_root = self.data_root                # 채팅 색인 캐시 자리(<data>\cache\<project_id>, 프로젝트 밖)
         self.workbench = wb
+        wb.jobsBusyChanged.connect(self.update_session_actions)
         self.stack.addWidget(wb)
         self.stack.setCurrentWidget(wb)
         # 상태 줄 하나(11 4-2 의 9): 작업대의 상태 칩을 이 창 상태 줄로 옮기고, 잠깐 문장(저장 중… 등)만 왼쪽에 보인다
@@ -470,6 +801,8 @@ class MainWindow(QMainWindow):
         wb.open_project(outcome)
         wb.setFocus()
         self.update_session_actions()
+        self._note_retention(outcome)
+        self.refresh_path_banner()
 
     def refresh_relabel_index(self, outcome) -> str:
         """프로젝트를 열 때(세션을 고르기 전, 세션 밖) relabel/index.json 을 조용히 다시 만든다(14 4-2 의 2).
@@ -526,14 +859,31 @@ class MainWindow(QMainWindow):
             wb.resolve_unsaved(allow_cancel=False)
         except Exception:  # noqa: BLE001 — 닫는 길은 막지 않는다
             LOG.exception("저장하지 않은 변경 처리 실패")
+        st, proj = getattr(wb, "store", None), getattr(wb, "project", None)
+        own_file = st.path if st is not None and not getattr(st, "read_only", True) else None
         self.workbench = None
+        sig = getattr(wb, "jobsBusyChanged", None)
+        if sig is not None:
+            try:
+                sig.disconnect(self.update_session_actions)
+            except (RuntimeError, TypeError):
+                pass
         wb.close_workbench(reason)           # 상태 칩도 이 창 상태 줄에서 뗀다(detach_status_bar)
         self.stack.removeWidget(wb)
         wb.deleteLater()
         self.m_view.clear()
         self.m_view.menuAction().setVisible(False)
         self.a_export.setEnabled(False)
+        self.project_path_issues, self.retention_line = [], None
+        self.refresh_path_banner()
         self.update_session_actions()
+        if self.session_backup and own_file and proj is not None and os.path.isfile(own_file):
+            # 세션 끝: 자기 세션 기록 하나를 백업 폴더에 복사 (S-39 ③). 실패해도 닫기는 계속한다
+            from .. import backup
+            try:
+                backup.copy_session_file(proj.root, own_file)
+            except (backup.BackupError, OSError, ValueError) as e:
+                LOG.warning("세션 기록 복사 실패 (%s)", type(e).__name__)
 
     def show_home(self) -> None:
         self._close_workbench("user")
@@ -562,16 +912,22 @@ class MainWindow(QMainWindow):
         super().closeEvent(ev)
 
     # ---------------------------------------------------------------- 확인
-    def check_updates(self, force: bool) -> None:
+    def update_channel(self) -> str:
+        """숨은 설정 [update] channel (stable | beta, 04 6-2). 모르는 값은 stable."""
+        return updater.normalize_channel(self.settings.value(UPDATE_CHANNEL_KEY, "stable"))
+
+    def check_updates(self, force: bool, on_start: bool = False) -> None:
         if self._check_worker is not None and self._check_worker.isRunning():
             return
         self.status_chip.setText(tr("업데이트 확인 중…"))
-        self._check_worker = UpdateCheckWorker(self.spec, self.installed, self.state_path, force, self.base_url, self)
+        self._check_worker = UpdateCheckWorker(self.spec, self.installed, self.state_path, force, self.base_url, self,
+                                               channel=self.update_channel(), on_start=on_start)
         self._check_worker.result.connect(self._on_check)
         self._check_worker.start()
 
     def _on_check(self, res: updater.CheckResult | None) -> None:
         self._result = res
+        self.refresh_support_banner()           # 확인 결과로 min_supported·mandatory 가 바뀌었을 수 있다
         now = datetime.now().strftime("%H:%M")
         if res is None:
             self.status_chip.setText(tr("업데이트: 아직 확인할 때가 아님 ({0})").format(now))
@@ -598,11 +954,11 @@ class MainWindow(QMainWindow):
         self.status_chip.setText(tr("새 버전 있음 ({0})").format(now))
         self.update_btn.setText(tr("새 버전 v{0}").format(rel.version))
         self.update_btn.setVisible(not res.skipped or rel.manifest.mandatory)
-        if res.needs_update:
-            self.banner.setText(tr("이 버전은 지원이 끝났습니다 (최소 {0}). 업데이트가 필요합니다.").format(rel.manifest.min_supported))
-            self.banner.setVisible(True)
         if self.auto:
-            QTimer.singleShot(0, lambda: self.start_stage(rel))
+            if res.skipped and not rel.manifest.mandatory:
+                LOG.info("자동 모드: 건너뛴 버전 v%s 은 적용하지 않음 (되돌린 뒤 등)", rel.version)
+            else:
+                QTimer.singleShot(0, lambda: self.start_stage(rel))
         elif rel.manifest.mandatory and not res.skipped:
             QTimer.singleShot(0, self.offer_update)
 
@@ -650,7 +1006,7 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def apply_update(self, staged: updater.StagedUpdate) -> None:
-        applier = updater.RobocopyApplier(self.spec, self.installed, self.data_root)
+        applier = updater.RobocopyApplier(self.spec, self.installed, self.data_root, data_backup=self.data_backup)
         problems, warnings = applier.preflight(staged)
         if problems:
             if self.auto:
@@ -685,6 +1041,16 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, tr("업데이트 완료"),
                                     tr("v{0} 으로 업데이트했습니다. (이전 {1})\n이전 버전 사본(_backup)은 다음 정상 시작 뒤에 지워집니다.")
                                     .format(__version__, last.get("from", "?")))
+        elif flag == updater.ROLLBACK_FLAG:
+            QMessageBox.information(self, tr("되돌리기 완료"),
+                                    tr("v{0} 으로 되돌렸습니다. (되돌리기 전 {1})\nv{1} 은 다시 권하지 않습니다. 더 높은 버전이 나오면 "
+                                       "다시 알립니다.").format(__version__, last.get("from", "?")))
+        elif flag == "--update-failed" and last.get("result") == "rollback_failed":
+            log = os.path.join(self.data_root, "logs", "update.log")
+            QMessageBox.warning(self, tr("되돌리기 실패"),
+                                tr("이전 버전으로 되돌리지 못했습니다 (copy_rc={0}, retry_rc={1}). 프로그램 파일이 섞였을 수 "
+                                   "있습니다.\n로그: {2}\n\n{3}").format(last.get("copy_rc"), last.get("restore_rc"), log,
+                                                                       MANUAL_GUIDE))
         elif flag == "--update-failed":
             log = os.path.join(self.data_root, "logs", "update.log")
             QMessageBox.warning(self, tr("업데이트 실패"),
@@ -693,6 +1059,248 @@ class MainWindow(QMainWindow):
         elif flag == "--update-blocked":
             QMessageBox.information(self, tr("업데이트 보류"),
                                     tr("다른 ChatCoach 창이 열려 있어 업데이트를 보류했습니다. 창을 모두 닫고 다시 시도하세요."))
+
+    # ---------------------------------------------------------------- 되돌리기 (04 6-9 · 6-10)
+    def rollback_state(self, repair: bool | None = None) -> updater.RollbackStatus:
+        """메뉴용 되돌리기 상태. repair 를 주지 않으면 폴더가 섞였을 수 있는지(멈춘 업데이트 · restore_failed ·
+        rollback_failed, updater.repair_needed)로 정한다 — 그때는 사본이 지금 버전과 같아도 '복구' 로 켠다."""
+        if repair is None:
+            repair = updater.repair_needed(self.data_root)
+        return updater.rollback_status(self.installed.app_dir, self.data_root, __version__, self.installed.frozen,
+                                       self.spec, repair=repair)
+
+    def update_rollback_action(self) -> None:
+        """도움말 메뉴를 열 때마다: 되돌릴 수 있을 때만 켠다. 이번 실행이 _backup 을 지울 차례면 끈다."""
+        try:
+            text, on, tip = rollback_menu_text(self.rollback_state())
+        except Exception:  # noqa: BLE001 — 메뉴 문구 때문에 앱이 멈추지 않게
+            LOG.exception("되돌리기 상태 확인 실패")
+            text, on, tip = tr("이전 버전으로 되돌리기"), False, tr("상태를 확인하지 못했습니다")
+        if on and self.delete_backup_pending:
+            on, tip = False, tr("이번 실행에서 이전 버전 사본을 정리합니다 (업데이트 뒤 첫 정상 종료 다음 시작). 되돌리기는 "
+                                "업데이트 직후 실행에서만 됩니다")
+        if on and (self._rolling_back or (self._stage_worker is not None and self._stage_worker.isRunning())):
+            on, tip = False, tr("업데이트·되돌리기를 준비하는 중입니다")
+        self.a_rollback.setText(text + "…")
+        self.a_rollback.setEnabled(on)
+        self.a_rollback.setToolTip(tip)
+
+    def _rollback_note(self, st: updater.RollbackStatus) -> str | None:
+        """되돌릴 버전이 마지막 매니페스트의 min_supported 보다 낮으면 되돌린 뒤 바로 '업데이트 필요' 가 된다는 1줄."""
+        if not st.target_version or st.target_version == st.current_version:
+            return None
+        sup = updater.load_support_status(self.state_path, st.target_version)
+        if sup.needs_update:
+            return tr("{0} 은 지원이 끝난 버전입니다 (최소 {1}). 되돌린 뒤에는 새 라벨을 저장할 수 없습니다(열람·내보내기만).") \
+                .format(st.target_version, sup.min_supported)
+        return None
+
+    def rollback_dialog(self, *, status: updater.RollbackStatus | None = None, reason: str | None = None,
+                        confirm: bool = True, run=None) -> bool:
+        """'도움말 → 이전 버전으로 되돌리기…' 와 실패 뒤 제안의 [되돌리기] 가 부르는 한 함수.
+
+        status 가 없으면 지금 상태(메뉴). confirm=False 는 시험 자동 모드. run(dlg) 을 주면 exec() 대신(시험).
+        되돌리기 교체가 시작되면 True(앱은 곧 끝난다)."""
+        st = status or self.rollback_state()
+        if not st.available or (status is None and self.delete_backup_pending):
+            why = st.reason if not st.available else tr("이번 실행에서는 되돌릴 수 없습니다 (이전 버전 사본 정리 차례)")
+            self.statusBar().showMessage(why, 6000)
+            LOG.info("되돌리기 불가: %s", st.reason if not st.available else "delete_backup_pending")
+            return False
+        if self._rolling_back:
+            return False
+        if confirm:
+            dlg = RollbackDialog(st, reason, self, data_backup=True, note=self._rollback_note(st))
+            try:
+                rc = (run or (lambda d: d.exec()))(dlg)
+            finally:
+                dlg.deleteLater()
+            if rc != RollbackDialog.Accepted:
+                LOG.info("되돌리기를 하지 않음 (사용자)")
+                return False
+        return self.start_rollback(st)
+
+    def start_rollback(self, st: updater.RollbackStatus) -> bool:
+        """워커에서 준비(자체 점검 관문, 최대 90초) → 교체 전 조건 → data 백업 → replace.ps1 -Rollback 시작. 성공하면 앱을 끈다."""
+        from ..workers import JobCancelled, JobWorker
+        box: dict = {}
+        spec, installed, droot, sp = self.spec, self.installed, self.data_root, self.state_path
+        backup_fn = self.data_backup
+
+        def job(ctx):
+            try:
+                staged = updater.stage_rollback(spec, installed, droot, repair=st.repair)
+            except updater.UpdateError as ex:
+                box["err"] = ex.message
+                return None
+            if ctx.cancelled():
+                shutil.rmtree(staged.stage_dir, ignore_errors=True)
+                raise JobCancelled()
+            try:
+                updater.RobocopyApplier(spec, installed, droot, data_backup=backup_fn).rollback(staged, sp)
+            except updater.UpdateError as ex:
+                box["err"] = ex.message
+                return None
+            return staged
+        self._rolling_back = True
+        try:
+            w = JobWorker.single("rollback", job, name="되돌리기", parent=self)
+            outcome = self.run_job_modal(w, title=tr("이전 버전으로 되돌리기"),
+                                         label=tr("이전 버전 사본을 점검하고 되돌리기를 준비하는 중… (최대 90초)"))
+            staged = w.results.get("rollback") if outcome == "done" else None
+            w.deleteLater()
+        finally:
+            self._rolling_back = False
+        if staged is None:
+            err = box.get("err") or (tr("취소했습니다") if outcome == "cancelled" else tr("알 수 없는 오류"))
+            LOG.warning("되돌리기 실패: %s", err)
+            if self.auto_rollback:
+                LOG.error("자동 되돌리기 실패 — %s", err)
+            elif outcome != "cancelled":
+                self.warn(tr("되돌리기를 진행할 수 없습니다"), err + "\n\n" + tr(MANUAL_GUIDE))
+            return False
+        LOG.info("되돌리기를 위해 종료 (v%s → v%s)", __version__, staged.target_version)
+        self.statusBar().showMessage(tr("이전 버전으로 되돌리려고 종료합니다…"))
+        QTimer.singleShot(100, QApplication.instance().quit)
+        return True
+
+    def maybe_suggest_rollback(self) -> bool:
+        """업데이트 실패 뒤 되돌리기 제안 (updater.rollback_suggestion): 멈춘 업데이트 · 복구 실패 · 업데이트 뒤 연속 비정상 종료."""
+        if not self.installed.frozen:
+            return False
+        try:
+            sug = updater.rollback_suggestion(self.installed.app_dir, self.data_root, __version__, self.flags,
+                                              self.abnormal_streak, frozen=True, spec=self.spec)
+        except Exception:  # noqa: BLE001
+            LOG.exception("되돌리기 제안 판정 실패")
+            return False
+        if sug is None:
+            return False
+        LOG.info("되돌리기 제안: %s", "repair" if sug.status.repair else "rollback")
+        return self.rollback_dialog(status=sug.status, reason=tr(sug.reason))
+
+    # ---------------------------------------------------------------- 위쪽 띠: 업데이트 필요 · 경로
+    def refresh_support_banner(self) -> None:
+        try:
+            st = updater.load_support_status(self.state_path, __version__)
+        except Exception:  # noqa: BLE001
+            LOG.exception("지원 상태 확인 실패")
+            st = None
+        self.support_banner.set_status(st)
+
+    def _banner_update(self) -> None:
+        """띠의 [업데이트]: 확인한 결과가 있으면 대화상자, 없으면 지금 확인."""
+        if self._result is not None and self._result.release is not None:
+            self.offer_update()
+        else:
+            self.check_updates(force=True)
+
+    def refresh_path_banner(self) -> None:
+        """경로 경고(confirm·error·warn)와 보존 기한 한 줄. info(한글 경로 등)는 로그에만."""
+        lines = []
+        for it in list(self.startup_path_issues) + list(self.project_path_issues):
+            if getattr(it, "level", "info") in ("confirm", "error", "warn"):
+                mark = "⛔" if it.level == "error" else "⚠"
+                line = f"{mark} {tr(it.message)}"
+                if line not in lines:
+                    lines.append(line)
+        if self.retention_line:
+            lines.append(tr("보존 기한: ") + self.retention_line)
+        self.path_banner.setText("\n".join(lines))
+        self.path_banner.setVisible(bool(lines))
+
+    def confirm_startup_paths(self, *, ask=None) -> bool:
+        """앱·데이터·백업 폴더의 confirm 수준 경고(OneDrive·UNC, S-09 ①)를 묻는다. '그래도 계속' 은 settings 에 남겨
+        다시 묻지 않는다(띠에는 계속 보인다). 종료를 고르면 False. ask(issue) → True(계속)/False(종료) 는 시험용."""
+        for it in self.startup_path_issues:
+            if getattr(it, "level", "") != "confirm":
+                continue
+            key = f"{PATH_ACK_GROUP}/{it.role}_{it.code}"
+            if str(self.settings.value(key, "")) == "1":
+                continue
+            LOG.info("경로 확인 묻기: %s %s", it.role, it.code)
+            ok = ask(it) if ask is not None else self._ask_path(it, quit_label=tr("종료"))
+            if not ok:
+                return False
+            self.settings.setValue(key, "1")
+            self.settings.sync()
+        return True
+
+    def _ask_path(self, it, *, quit_label: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(tr("저장 위치 확인"))
+        box.setText(tr(it.message))
+        box.setInformativeText(tr("옮긴 뒤 다시 여는 것을 권장합니다. 그래도 이 위치에서 계속할까요?"))
+        b_go = box.addButton(tr("그래도 계속"), QMessageBox.AcceptRole)
+        box.addButton(quit_label, QMessageBox.RejectRole)
+        box.exec()
+        return box.clickedButton() is b_go
+
+    def confirm_project_path(self, outcome, *, ask=None) -> bool:
+        """프로젝트를 열 때 경로 점검 (S-09 · S-49). confirm(OneDrive·UNC)이면 '이동 권장/그래도 계속' 을 묻고,
+        계속하면 project.json 의 storage_warning_acknowledged 에 남긴다(그 뒤로는 띠에만). False 면 열지 않는다."""
+        from .. import paths
+        proj = getattr(outcome, "project", None)
+        if proj is None:
+            return True
+        try:
+            issues = paths.project_path_issues(proj.root) if not getattr(outcome, "read_only", False) \
+                else paths.path_issues(proj.root, "project", check_write=False)
+        except Exception:  # noqa: BLE001
+            LOG.exception("프로젝트 경로 점검 실패")
+            issues = []
+        self.project_path_issues = issues
+        conf = [i for i in issues if i.level == "confirm"]
+        if not conf:
+            return True
+        data = proj.data or {}
+        ack = data.get("storage_warning_acknowledged") if isinstance(data.get("storage_warning_acknowledged"), dict) else None
+        kind = "unc" if any(i.code == "unc" for i in conf) else "onedrive"
+        if ack and ack.get("path_kind") == kind:
+            return True
+        ok = ask(conf[0]) if ask is not None else self._ask_path(conf[0], quit_label=tr("열지 않기"))
+        if not ok:
+            self.project_path_issues = []
+            return False
+        last = self.settings.value("session/last_labeler", "")
+        by = last if isinstance(last, str) and last else None
+        if not getattr(proj, "read_only", True):
+            stamp = {"at": datetime.now().astimezone().isoformat(timespec="seconds"), "by": by or "L01", "path_kind": kind}
+            try:
+                proj.update(lambda d: d.__setitem__("storage_warning_acknowledged", stamp), by=by)
+            except Exception as e:  # noqa: BLE001 — 기록 실패해도 열기는 계속한다
+                LOG.warning("storage_warning_acknowledged 기록 실패 (%s)", type(e).__name__)
+        return True
+
+    def _note_retention(self, outcome) -> None:
+        """보존 기한 상태 (05 S-06): 30일 안이면·지났으면 띠에 1줄."""
+        from datetime import date
+        from .. import backup
+        proj = getattr(outcome, "project", None)
+        data = (proj.data if proj is not None else None) or {}
+        try:
+            st = backup.retention_state(data, date.today())
+        except Exception:  # noqa: BLE001
+            return
+        self.retention_line = tr(backup.retention_message(st)) if st.status in ("soon", "expired") else None
+
+    # ---------------------------------------------------------------- 시작 뒤 백그라운드 (main.py 가 부른다)
+    def start_background_backups(self, delay_ms: int = 8000) -> None:
+        """창을 보인 뒤: 일 1회 프로젝트 백업(backup.daily_backup_if_due, 02 5-3)을 백그라운드 스레드에서.
+        data\\projects\\* + 최근 목록의 프로젝트. 실패해도 앱은 계속한다(로그에는 개수·예외 종류만)."""
+        import threading
+        from .. import backup
+        extra = list(load_recent(self.settings))
+        pdir = os.path.join(self.data_root, "projects")
+
+        def work():
+            try:
+                rep = backup.daily_backup_if_due(pdir, extra_roots=extra, app_version=__version__)
+                LOG.info("일일 백업: 만듦 %d · 건너뜀 %d · 실패 %d", len(rep.done), rep.skipped, len(rep.failed))
+            except Exception:  # noqa: BLE001
+                LOG.exception("일일 백업 실패")
+        QTimer.singleShot(delay_ms, lambda: threading.Thread(target=work, name="daily-backup", daemon=True).start())
 
     # ---------------------------------------------------------------- 도움말
     def copy_report(self) -> None:

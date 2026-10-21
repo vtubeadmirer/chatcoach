@@ -80,18 +80,25 @@ class EvidenceWidget(QWidget):
         self.notes: dict[str, QLineEdit] = {}
         self.at_labels: dict[str, QLabel] = {}
         self.group_labels: dict[str, QLabel] = {}
-        self.time_info = QLabel("")
+        self.time_info = QLabel("", self)
         self.time_info.setWordWrap(True)
         self._grid = grid
         self._build()
 
     # ------------------------------------------------------------ 만들기
     def _build(self) -> None:
+        """묶음을 (다시) 만든다.
+
+        15 5-2 의 1번(실제 창 1366 에서 오른쪽 밖 24, 끝 656 같음): 부모 없이 만든 부품은 레이아웃이 자리를 잡기 전까지
+        기본 크기 640x480 을 들고 있다. 편집기 칸이 숨은 동안 set_config 로 다시 만들면 보이기 전까지 그대로라
+        잘림 셈에 24개(체크 7·시각 7·메모 7·묶음 제목 3)가 오른쪽 밖으로 잡혔다. 부품을 이 칸을 부모로 만들고,
+        다 넣은 뒤 레이아웃을 바로 돌려(activate) 숨은 상태에서도 칸 폭 안에 자리를 잡게 한다."""
         grid = self._grid
         while grid.count():
             it = grid.takeAt(0)
             w = it.widget()
             if w is not None and w is not self.time_info:
+                w.hide()                      # deleteLater 전까지 남는 옛 부품이 셈·그리기에 끼지 않게
                 w.deleteLater()
         self.boxes.clear()
         self.notes.clear()
@@ -103,19 +110,19 @@ class EvidenceWidget(QWidget):
             keys = [k for k in EVIDENCE_KEYS if st[k] == strength]
             if not keys:
                 continue
-            g = QLabel(tr(STRENGTH_LABELS[strength]) + ":")
+            g = QLabel(tr(STRENGTH_LABELS[strength]) + ":", self)
             self.group_labels[strength] = g
             grid.addWidget(g, row, 0)
             for k in keys:
-                cb = QCheckBox(tr(EVIDENCE_LABELS[k]))
+                cb = QCheckBox(tr(EVIDENCE_LABELS[k]), self)
                 cb.setObjectName(f"ev_{k}")
                 cb.toggled.connect(lambda on, key=k: self._on_toggled(key, on))
-                note = QLineEdit()
+                note = QLineEdit(self)
                 note.setObjectName(f"note_{k}")
                 note.setMaxLength(NOTE_MAX)
                 note.setPlaceholderText(tr("메모(선택)"))
                 note.textEdited.connect(lambda _t: self._emit())
-                at = QLabel("")
+                at = QLabel("", self)
                 at.setMinimumWidth(60)
                 self.boxes[k], self.notes[k], self.at_labels[k] = cb, note, at
                 grid.addWidget(cb, row, 1)
@@ -126,6 +133,8 @@ class EvidenceWidget(QWidget):
                     grid.addWidget(self.time_info, row, 1, 1, 3)
                     row += 1
         grid.setColumnStretch(3, 1)
+        grid.invalidate()
+        grid.activate()
 
     def set_config(self, cfg: rules.RuleConfig) -> None:
         """기준서 시작값이 바뀌면 묶음(강·중·약)을 다시 만든다. 값은 유지한다."""

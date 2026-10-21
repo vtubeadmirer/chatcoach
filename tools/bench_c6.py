@@ -7,6 +7,8 @@
      워커로 돌릴 때의 걸린 시간, 그리고 워커가 도는 동안 UI 스레드 타이머(5ms)의 가장 긴 틈.
   3. 타임라인 부분 갱신 (app/ui/timeline.py): 20만 마커에서 add_marker · remove_marker · update_marker 한 번 평균과
      set_markers(전체 정렬) + 정적 트랙 다시 그리기 한 번.
+  4. 타임라인 확대·스크롤 (15 5-2 의 14번): 20만 마커 + 채팅 밀도에서 1.5배 확대·축소 한 번, 보이는 길이 1/10 스크롤
+     한 번이 다시 그리기까지 걸린 시간(평균·p95·최대). 목표: 02 9장 50ms. --only zoom 으로 이것만 돌린다.
 
 쓰는 법 (앱 .venv):
     set QT_QPA_PLATFORM=offscreen
@@ -202,22 +204,86 @@ def bench_timeline(n: int) -> dict:
     return out
 
 
+# ---------------------------------------------------------------------------- 4. 타임라인 확대·스크롤 (15 5-2 의 14번)
+def _stats(ms: list[float]) -> dict:
+    s = sorted(ms)
+    return {"n": len(s), "avg_ms": round(sum(s) / len(s), 2) if s else None,
+            "p95_ms": round(s[max(0, int(len(s) * 0.95) - 1)], 2) if s else None,
+            "max_ms": round(s[-1], 2) if s else None}
+
+
+def bench_timeline_zoom_scroll(n: int) -> dict:
+    """20만 마커 + 채팅 밀도에서 확대·축소(zoom_in/zoom_out, 1.5배씩)와 스크롤(scroll_to, 보이는 길이의 1/10 씩) 한 번이
+    보기 범위를 바꾸고 다시 그리기(grab — 정적 그림 캐시를 다시 만든다)까지 걸린 시간. 목표: 02 9장 50ms."""
+    from app.ui.timeline import Timeline
+    w = Timeline()
+    w.resize(1600, w.height())
+    w.set_duration(DUR_MS)
+    w.set_fps(30.0)
+    step = DUR_MS // n
+    w.set_markers("labels", [(i * step, "reaction" if i % 5 else "recheck") for i in range(n)])
+    bucket = 10_000
+    w.set_density([(i * 37) % 23 for i in range(DUR_MS // bucket)], bucket)
+    w.set_position(DUR_MS // 2)
+    w.zoom_reset()
+    w.grab()
+
+    def timed(fn) -> float:
+        t0 = time.perf_counter()
+        fn()
+        w.grab()
+        return (time.perf_counter() - t0) * 1000
+
+    zin, zout = [], []
+    per_level: list[tuple[float, float, bool]] = []      # (확대 배율, ms, 촘촘한 트랙 그림인가)
+    levels = 0
+    while w.zoom_factor() < min(w.max_zoom(), 2000.0) and levels < 40:
+        zin.append(timed(w.zoom_in))
+        per_level.append((w.zoom_factor(), zin[-1], w._is_dense("labels")))
+        levels += 1
+    deepest = round(w.zoom_factor(), 1)
+    while w.zoom_factor() > 1.0001 and len(zout) < 60:
+        zout.append(timed(w.zoom_out))
+    over = [(round(z, 1), round(ms, 1), d) for z, ms, d in per_level if ms > 50.0]
+    out = {"markers": n, "zoom_in": _stats(zin), "zoom_out": _stats(zout), "deepest_zoom_x": deepest,
+           "zoom_in_over_target": [{"zoom_x": z, "ms": ms, "dense": d} for z, ms, d in over]}
+    for name, length in (("scroll_full_8h", DUR_MS), ("scroll_1h", 3_600_000), ("scroll_10min", 600_000)):
+        w.set_view(0, length)
+        w.grab()
+        ms = []
+        start = 0.0
+        for _ in range(30):
+            start = min(start + length / 10, DUR_MS - length)
+            ms.append(timed(lambda s=start: w.scroll_to(s)))
+        out[name] = _stats(ms)
+    out["cache_builds"] = w.cache_builds
+    out["target_ms"] = 50.0
+    out["within_target"] = all(out[k]["max_ms"] is None or out[k]["max_ms"] <= 50.0
+                               for k in ("zoom_in", "zoom_out", "scroll_1h", "scroll_10min"))
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="C6 성능 벤치 (합성 데이터)")
     ap.add_argument("--n", type=int, default=200_000, help="합성 채팅 수·마커 수 (기본 20만)")
     ap.add_argument("--json", help="결과를 JSON 파일로도 쓴다")
+    ap.add_argument("--only", choices=("zoom",), help="zoom: 4번(타임라인 확대·스크롤)만")
     args = ap.parse_args(argv)
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])  # noqa: F841
-    tmp = tempfile.mkdtemp(prefix="cc_bench_c6_")
-    try:
-        r1 = bench_chat_index(tmp, args.n)
-        msgs = r1.pop("_messages_path")
-        r2 = bench_verify_worker(msgs)
-        r3 = bench_timeline(args.n)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-    result = {"chat_index": r1, "verify_worker": r2, "timeline": r3}
+    if args.only == "zoom":
+        result = {"timeline_zoom_scroll": bench_timeline_zoom_scroll(args.n)}
+    else:
+        tmp = tempfile.mkdtemp(prefix="cc_bench_c6_")
+        try:
+            r1 = bench_chat_index(tmp, args.n)
+            msgs = r1.pop("_messages_path")
+            r2 = bench_verify_worker(msgs)
+            r3 = bench_timeline(args.n)
+            r4 = bench_timeline_zoom_scroll(args.n)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        result = {"chat_index": r1, "verify_worker": r2, "timeline": r3, "timeline_zoom_scroll": r4}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:

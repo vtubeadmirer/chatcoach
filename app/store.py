@@ -371,8 +371,11 @@ class ProjectStore:
     def open(cls, path: str, session: SessionContext, lock_factory: Callable[[str], Any], *,
              clock: Callable[[], datetime] | None = None, uuid_factory: Callable[[], str] | None = None,
              app_version: str | None = None, data_root: str | None = None, run_info: dict | None = None,
-             schema: LabelSchema | None = None) -> "ProjectStore":
+             schema: LabelSchema | None = None, save_block: str | None = None) -> "ProjectStore":
         """프로젝트를 이 세션으로 연다. 쓸 수 없는 사정이 있으면 예외 대신 read_only=True 와 사유로 연다.
+
+        - save_block: 새 라벨 저장을 막을 사유(04 5-5 '업데이트 필요' 모드 — updater.label_save_block_reason). 주면
+          처음부터 읽기 전용으로 연다(잠금을 잡지 않고 session.open 도 쓰지 않는다). 열람·내보내기는 된다.
 
         - lock_factory(lock_path) → tryLock(timeout)·unlock() 을 가진 객체(앱에서는 QtCore.QLockFile). **필수**다.
           None 이나 부를 수 없는 값이면 TypeError (08 D-09 8). 잠금을 못 잡으면 lock_busy·lock_holder·lock_help 를 채운다.
@@ -392,6 +395,8 @@ class ProjectStore:
         st._pj_stamp = st._project_stamp()
         if proj.read_only:
             st._set_ro(*[f"project.json: {p}" for p in proj.problems[:5]])
+        if save_block:
+            st._set_ro(str(save_block))
         try:
             st._schema = schema or load_label_schema()
         except (OSError, StrictJsonError, ValueError) as e:
@@ -689,6 +694,10 @@ class ProjectStore:
                 meta["tool_models"] = copy.deepcopy(s.tool_models)
             if getattr(s, "reopen_note", None):
                 meta["reopen_note"] = s.reopen_note      # 앞 세션을 잘못 잠근 사유 (D-11 7·D-12 2, 선택)
+            if s.session_kind == vis.ORIGIN_REVIEW:
+                refs = origin_target_refs(self.root)     # 이 세션이 판정할 대상 파일 (15 5-2 의 7번, D-14 2)
+                if refs:
+                    meta["origin_targets"] = refs
             self._meta = meta
         # 9-1: 세션의 기준서 해시가 프로젝트 기록과 다르면 경고
         if data is not None:
@@ -1285,6 +1294,39 @@ def _guide(data: dict, version) -> dict | None:
         if isinstance(g, dict) and g.get("guide_version") == version:
             return g
     return None
+
+
+ORIGIN_TARGETS_MAX = 64            # session.open.origin_targets 의 maxItems 와 같다
+ORIGIN_TARGET_MAX_BYTES = 16 << 20
+
+
+def origin_target_refs(project_root: str) -> list[dict]:
+    """origin/ 의 대상 파일 → [{target_id, chat_ids_sha256}] (target_id 순, 읽지 못한 파일은 뺀다).
+
+    출처 판정 세션이 처음 열릴 때 session.open.origin_targets 로 남긴다(15 5-2 의 7번). 읽기만 한다.
+    대상 파일이 64개를 넘으면 앞 64개만 적는다(그때는 보고서가 경고한다)."""
+    from .core import origin as og
+    d = os.path.join(project_root, "origin")
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    out: list[dict] = []
+    for n in names:
+        if not (n.startswith("OT-") and n.endswith(".json")):
+            continue
+        try:
+            with builtins.open(os.path.join(d, n), "rb") as f:
+                raw = f.read(ORIGIN_TARGET_MAX_BYTES + 1)
+            t = og.parse_targets(load_json_strict(raw, ORIGIN_TARGET_MAX_BYTES))
+        except (OSError, ValueError, StrictJsonError, TypeError, KeyError) as e:
+            log.warning("출처 대상 파일을 읽지 못해 세션 메타에서 뺐습니다 (%s)", type(e).__name__)
+            continue
+        if n != f"{t.target_id}.json":
+            continue
+        out.append({"target_id": t.target_id, "chat_ids_sha256": t.chat_ids_sha256})
+    out.sort(key=lambda x: x["target_id"])
+    return out[:ORIGIN_TARGETS_MAX]
 
 
 def lock_holder_info(lk) -> dict | None:

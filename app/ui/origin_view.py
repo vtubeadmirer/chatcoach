@@ -130,12 +130,15 @@ class OriginView(QWidget):
     rangeRequested = Signal(int, int)     # 확인 범위 (VOD ms)
     statusChanged = Signal(str)
     allJudged = Signal()
+    # 실은 대상 파일 목록(target_refs() 모양). 출처 세션이 어느 대상 파일을 봤는지 통합 쪽이 기록하라고 낸다(15 5-2 의 7번)
+    targetsLoaded = Signal(list)
 
     def __init__(self, save: Callable[[dict], dict], cancel: Callable[[], None], parent=None):
         super().__init__(parent)
         self._save = save
         self._cancel = cancel
         self._targets: og.CombinedTargets | None = None
+        self._refs: list[dict] = []
         self._items: list[og.TargetItem] = []
         self._msgs: dict[str, Mapping] = {}
         self._viewer_no: Mapping[str, int] | None = None
@@ -166,8 +169,16 @@ class OriginView(QWidget):
         self.meta = QLabel()
         self.meta.setTextFormat(Qt.PlainText)
         self.meta.setWordWrap(True)
+        # 대상 파일이 둘 이상이면 합쳐서 판정한다 — 경고 1줄(15 5-2 의 6·8번: 1차 표본이 바뀌면 옛 대상 파일이 남는다)
+        self.multi_warn = QLabel()
+        self.multi_warn.setTextFormat(Qt.PlainText)
+        self.multi_warn.setWordWrap(True)
+        self.multi_warn.setObjectName("multi_targets_warning")
+        self.multi_warn.setStyleSheet("color: #b9770e;")
+        self.multi_warn.hide()
         lay.addWidget(self.head)
         lay.addWidget(self.meta)
+        lay.addWidget(self.multi_warn)
 
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
@@ -340,9 +351,11 @@ class OriginView(QWidget):
         self._viewer_no = viewer_no if self._allowed else None
         if not self._allowed:
             self._targets, self._items, self._msgs, self._heads = None, [], {}, {}
+            self._refs = []
             self._idx = -1
             self._refresh()
             self.currentChanged.emit(-1)
+            self.targetsLoaded.emit([])
             return
         parsed: list[og.OriginTargets] = []
         for t in targets:
@@ -354,6 +367,12 @@ class OriginView(QWidget):
                 except og.OriginError as e:
                     log.warning("출처 대상 파일 형식 오류로 건너뜀 (%s)", type(e).__name__)
         self._targets = og.combine_targets(parsed) if parsed else None
+        self._refs = [{"target_id": t.target_id, "chat_ids_sha256": t.chat_ids_sha256, "basis": t.basis,
+                       "count": len(t.items)} for t in sorted(parsed, key=lambda x: x.target_id)]
+        if len(self._refs) > 1:
+            log.warning("출처 판정: 대상 파일 %d개를 합쳐 씀 (겹친 대상 %d)", len(self._refs),
+                        self._targets.duplicates if self._targets else 0)
+        self.targetsLoaded.emit([dict(r) for r in self._refs])
         self._items = [it for _, it in self._targets.items] if self._targets else []
         wanted = {it.chat_id for it in self._items}
         if isinstance(messages, Mapping):
@@ -393,6 +412,24 @@ class OriginView(QWidget):
     # ------------------------------------------------------------------ 조회
     def targets(self) -> og.CombinedTargets | None:
         return self._targets
+
+    def target_ids(self) -> list[str]:
+        """지금 실은 대상 파일 ID(target_id 순). 대상이 없거나 이 세션에서 볼 수 없으면 빈 목록."""
+        return [r["target_id"] for r in self._refs]
+
+    def target_refs(self) -> list[dict]:
+        """지금 실은 대상 파일마다 {target_id, chat_ids_sha256, basis, count} (숫자·ID 만, 채팅 본문 없음).
+        출처 세션의 session.open·잠금에 남길 값의 모양이다(15 5-2 의 7번 — 기록 칸은 스키마·잠금 쪽 일)."""
+        return [dict(r) for r in self._refs]
+
+    def multi_targets_warning(self) -> str:
+        """대상 파일이 둘 이상이면 경고 문장 1줄, 아니면 빈 문자열(15 5-2 의 6·8번)."""
+        n = len(self._refs)
+        if n < 2:
+            return ""
+        dup = self._targets.duplicates if self._targets is not None else 0
+        return tr("⚠ 대상 파일이 {0}개라 합쳐서 판정합니다 (겹친 대상 {1}건은 한 번만). 1차 표본이 바뀌었으면 "
+                  "옛 대상 파일이 남아 있을 수 있습니다 — 판정할 파일이 맞는지 확인하세요").format(n, dup)
 
     def current_index(self) -> int:
         return self._idx
@@ -692,6 +729,9 @@ class OriginView(QWidget):
             if self._dup_labels:
                 extra += tr(" · 한 채팅에 라벨이 둘 이상 {0}").format(self._dup_labels)
             self.meta.setText(tr("대상 파일 {0}{1}").format(", ".join(self._targets.target_ids), extra))
+        warn = self.multi_targets_warning() if self._allowed else ""
+        self.multi_warn.setText(warn)
+        self.multi_warn.setVisible(bool(warn))
         it = self.current_item()
         if it is None:
             self.item_line.setText("")

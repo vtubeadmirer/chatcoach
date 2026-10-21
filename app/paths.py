@@ -8,6 +8,9 @@ ClipSlicer 와 다른 점:
 - 설정 파일 판정에 open(path, "a") 를 쓰지 않는다 (빈 settings.ini 를 만드는 부작용). 시험 파일을 쓰고 지운다.
 - 번들(frozen) 실행에서는 ffmpeg·libmpv 를 번들 폴더에서만 찾고 PATH 를 보지 않는다 (S-08).
 - import mpv 동안만 PATH 를 libmpv 폴더 하나로 바꿨다가 되돌린다 (S-08).
+
+경로 점검(path_issues · startup_path_issues · project_path_issues)도 여기 있다 (S-09 · S-49):
+OneDrive·UNC·긴 경로·쓰기 불가·한글 폴더. 메시지에는 경로를 넣지 않는다 (S-20).
 """
 from __future__ import annotations
 
@@ -241,6 +244,132 @@ def is_under_onedrive(path: str) -> bool:
         if p == r or p.startswith(r + os.sep):
             return True
     return False
+
+
+def projects_root() -> str:
+    """기본 프로젝트 위치 data_root()\\projects (03 2-1). 폴더를 만들지 않는다."""
+    return os.path.join(data_root(), "projects")
+
+
+# ---------------------------------------------------------------------------
+# 경로 점검 (S-09 · S-49, 07 M4 '경로 확인'): 앱을 켤 때와 프로젝트를 열 때 부른다.
+#
+# 메시지에는 경로를 넣지 않는다 — 로그·문제 보고에 그대로 남겨도 사용자 이름이 새지 않게 (S-20).
+# 수준: "confirm" = 이동 권장/그래도 계속 을 묻는 대화상자 (S-09 ①: 경고만 띄우고 넘어가지 않는다)
+#       "error"   = 그대로 쓰면 저장이 실패한다
+#       "warn"    = 막지 않는 경고 (상태바·알림)
+#       "info"    = 참고
+
+APP_PATH_WARN_CHARS = 120       # S-49: 앱 경로
+PROJECT_PATH_WARN_CHARS = 180   # S-49 · 02 5-4: 프로젝트 경로 (project.PATH_WARN_CHARS 와 같은 값)
+DATA_PATH_WARN_CHARS = 150      # 데이터·백업 폴더: 아래에 projects\<slug 40자>\labels\<세션 파일 40자> 가 붙는다
+
+PATH_ROLES = ("app", "data", "backup", "project")
+_LONG_LIMIT = {"app": APP_PATH_WARN_CHARS, "data": DATA_PATH_WARN_CHARS,
+               "backup": DATA_PATH_WARN_CHARS, "project": PROJECT_PATH_WARN_CHARS}
+_ROLE_KO = {"app": "프로그램 폴더", "data": "데이터 폴더", "backup": "백업 폴더", "project": "프로젝트 폴더"}
+
+
+class PathIssue:
+    """경로 점검 결과 한 건. code: onedrive | onedrive_name | unc | long | not_writable | missing | non_ascii."""
+
+    __slots__ = ("code", "level", "role", "message")
+
+    def __init__(self, code: str, level: str, role: str, message: str):
+        self.code, self.level, self.role, self.message = code, level, role, message
+
+    def __repr__(self) -> str:
+        return f"PathIssue({self.code!r}, {self.level!r}, {self.role!r})"
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, PathIssue) and (self.code, self.level, self.role) == (other.code, other.level, other.role)
+
+    def __hash__(self) -> int:
+        return hash((self.code, self.level, self.role))
+
+
+def looks_like_onedrive(path: str) -> bool:
+    """환경 변수와 상관없이 경로 조각 이름이 'OneDrive' 로 시작하는가 (예: 'OneDrive - 회사').
+
+    환경 변수가 없는 계정(서비스·다른 사용자로 실행)에서도 잡기 위한 보조 판정이다.
+    """
+    p = os.path.abspath(path or ".").replace("/", "\\")
+    return any(part.lower().startswith("onedrive") for part in p.split("\\")[1:] if part)
+
+
+def has_non_ascii(path: str) -> bool:
+    """경로에 ASCII 밖 글자(한글 등)가 있는가."""
+    return any(ord(ch) > 127 for ch in (path or ""))
+
+
+def probe_writable(d: str) -> bool:
+    """이미 있는 폴더 d 에 시험 파일을 쓰고 지워 본다. 폴더를 만들지 않는다 (없으면 False)."""
+    if not os.path.isdir(d):
+        return False
+    return _writable(d)
+
+
+def path_issues(path: str, role: str = "project", *, check_write: bool = True) -> list[PathIssue]:
+    """한 경로의 점검 결과. role: app | data | backup | project.
+
+    - OneDrive(환경 변수 조상) · UNC → confirm (S-09 ①)
+    - 이름만 OneDrive 처럼 보임 → warn
+    - 길이 → warn (app 120 · data/backup 150 · project 180, S-49)
+    - 쓸 수 없음 · 없음 → error (check_write 일 때. app 은 폴백이 있으니 warn)
+    - 한글 등 ASCII 밖 글자 → info (대부분 괜찮다. 외부 도구가 실패하면 영어 폴더로)
+    """
+    if role not in PATH_ROLES:
+        raise ValueError(f"알 수 없는 role: {role!r}")
+    who = _ROLE_KO[role]
+    out: list[PathIssue] = []
+    if is_network_path(path):
+        out.append(PathIssue("unc", "confirm", role,
+                             f"{who}가 네트워크(UNC) 경로에 있습니다. 동시 저장·잠금을 믿을 수 없고 자동 업데이트·휴지통이 동작하지 않습니다. 내 PC 폴더로 옮기는 것을 권장합니다."))
+    elif is_under_onedrive(path):
+        out.append(PathIssue("onedrive", "confirm", role,
+                             f"{who}가 OneDrive 아래에 있습니다. 채팅·라벨이 클라우드로 올라가고, 동기화 충돌로 저장이 실패하거나 파기한 뒤에도 OneDrive 휴지통·버전 기록에 사본이 남습니다. OneDrive 밖(예: %LOCALAPPDATA%\\Programs\\ChatCoach)으로 옮기는 것을 권장합니다."))
+    elif looks_like_onedrive(path):
+        out.append(PathIssue("onedrive_name", "warn", role,
+                             f"{who} 경로에 'OneDrive' 라는 이름의 폴더가 있습니다. 동기화되는 폴더라면 OneDrive 밖으로 옮기세요."))
+    a = os.path.abspath(path or ".")
+    limit = _LONG_LIMIT[role]
+    if len(a) > limit:
+        out.append(PathIssue("long", "warn", role,
+                             f"{who} 경로가 {len(a)}자로 {limit}자를 넘습니다. 긴 경로 때문에 저장이 실패할 수 있습니다. 더 짧은 위치로 옮기세요."))
+    if check_write:
+        if not os.path.isdir(a):
+            out.append(PathIssue("missing", "error", role, f"{who}가 없습니다."))
+        elif not _writable(a):
+            out.append(PathIssue("not_writable", "warn" if role == "app" else "error", role,
+                                 f"{who}에 쓸 수 없습니다." + (" 데이터는 %LOCALAPPDATA%\\ChatCoach\\data 에 둡니다(폴백)." if role == "app"
+                                                          else " 저장이 실패합니다. 쓸 수 있는 폴더로 옮기세요.")))
+    if has_non_ascii(a):
+        out.append(PathIssue("non_ascii", "info", role,
+                             f"{who} 경로에 한글 등 영문 밖 글자가 있습니다. 대부분 괜찮지만, 영상·업데이트 도구가 실패하면 영문 폴더로 옮겨 보세요."))
+    return out
+
+
+def startup_path_issues() -> list[PathIssue]:
+    """앱을 켤 때: 프로그램·데이터·백업 폴더 점검. 같은 문제가 여러 폴더에 있으면 앞의 것만 (코드·수준 기준)."""
+    out: list[PathIssue] = []
+    seen: set[tuple[str, str]] = set()
+    try:
+        groups = [(install_root(), "app"), (data_root(), "data"), (backup_root(), "backup")]
+    except OSError:
+        groups = [(install_root(), "app")]
+    for p, role in groups:
+        for it in path_issues(p, role):
+            key = (it.code, it.level)
+            if it.code in ("onedrive", "unc", "non_ascii") and key in seen:
+                continue
+            seen.add(key)
+            out.append(it)
+    return out
+
+
+def project_path_issues(project_root: str) -> list[PathIssue]:
+    """프로젝트를 열 때·만들 때의 점검."""
+    return path_issues(project_root, "project")
 
 
 def is_network_path(path: str) -> bool:

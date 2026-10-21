@@ -500,10 +500,30 @@ def for_project(project, *, verify_full: bool = False, data_root: str | None = N
 
 
 def drop_cache(project_id: str, data_root: str | None = None) -> bool:
-    """'색인 다시 만들기' 용: 캐시 파일을 지운다. 지웠으면 True."""
+    """'색인 다시 만들기'·프로젝트 파기·스모크 끝(15 5-2 의 10번) 용: 캐시 파일을 지운다. 지웠으면 True.
+
+    색인은 다시 만들 수 있는 파생(chat_id·시각·종류만)이라 휴지통을 거치지 않고 지운다. 쓰다 남은 임시 파일
+    (chat_index.bin.tmp<pid>)도 지우고, 그 프로젝트 캐시 폴더가 비면 폴더도 지운다. 다른 파일이 있으면 폴더는 둔다."""
     p = cache_path_for(project_id, data_root)
+    removed = False
     try:
         os.remove(p)
-        return True
+        removed = True
     except FileNotFoundError:
-        return False
+        pass
+    folder = os.path.dirname(p)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return removed
+    for name in names:
+        if name.startswith(FILE_NAME + ".tmp"):
+            try:
+                os.remove(os.path.join(folder, name))
+            except OSError:
+                pass
+    try:
+        os.rmdir(folder)                 # 비었을 때만 지워진다
+    except OSError:
+        pass
+    return removed

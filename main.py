@@ -10,7 +10,7 @@ import time
 import traceback
 
 _T0 = time.perf_counter()   # 시작 시간 측정 (02 9장: 시작 → 창 표시)
-STARTUP_FLAGS = ("--updated", "--update-failed", "--update-blocked")
+STARTUP_FLAGS = ("--updated", "--update-failed", "--update-blocked", "--rolled-back")   # 마지막 = updater.ROLLBACK_FLAG
 
 
 def parse_args(argv: list[str]) -> dict:
@@ -89,10 +89,13 @@ def main() -> int:
         return selftest.run(args["selftest"], args["expect_version"], args["expect_channel"])
 
     data_root = paths.data_root()
+    from app import __version__ as _ver
     from app import crashguard   # 2.
-    crashguard.enable(data_root)
+    crashguard.enable(data_root, version=_ver)
     stale_pids = crashguard.stale_markers(data_root)
     crashguard.clear_stale_markers(data_root)
+    # 같은 버전에서 이어진 비정상 종료 횟수 (업데이트 뒤 연속 2회면 되돌리기 제안, 04 6-9)
+    abnormal_streak = crashguard.note_start(data_root, _ver, bool(stale_pids))
     frozen = bool(getattr(sys, "frozen", False))
     if frozen:   # 3.
         _clean_qt_env(paths.code_dir())
@@ -129,10 +132,14 @@ def main() -> int:
     install_root = paths.install_root()
     if paths.data_mode() == "fallback":
         notes.append(tr("프로그램 폴더에 쓸 수 없어 데이터를 %LOCALAPPDATA%\\ChatCoach\\data 에 둡니다 (폴백 모드). 이 위치에서는 폴더째 복사와 자동 업데이트가 되지 않습니다."))
-    if paths.is_under_onedrive(install_root):
-        notes.append(tr("OneDrive 아래에서 실행 중입니다. %LOCALAPPDATA%\\Programs\\ChatCoach 로 옮기는 것을 권장합니다."))
-    if paths.is_network_path(install_root):
-        notes.append(tr("네트워크 드라이브에서 실행 중입니다. 자동 업데이트를 지원하지 않습니다."))
+    # 프로그램·데이터·백업 폴더 점검 (S-09 · S-49): OneDrive·UNC·긴 경로·쓰기 불가는 창 위쪽 띠, confirm 은 대화상자
+    try:
+        path_issues = paths.startup_path_issues()
+    except Exception:
+        LOG.exception("경로 점검 실패")
+        path_issues = []
+    for it in path_issues:
+        LOG.info("경로 점검: %s %s %s", it.role, it.code, it.level)
     if updater.stale_update_lock(data_root):
         notes.append(tr("지난 업데이트가 중간에 멈춘 흔적이 있습니다. 문제가 있으면 수동 업데이트 안내를 보세요."))
     if stale_pids:
@@ -142,21 +149,26 @@ def main() -> int:
         notes.append(tr("번들에 없는 파일: {0}").format(", ".join(missing)))
 
     installed = updater.load_installed(SPEC)
+    # 9. 지난 교체의 _backup 삭제는 '첫 정상 종료 뒤 다음 시작' 에서만 (S-31, 04 6-9):
+    #    --updated 로 켜진 지금 실행에서는 지우지 않고, --update-failed 면 사본을 남기며, 이전 실행이 비정상 종료였으면 남긴다.
+    #    --rolled-back 실행도 지우지 않는다(되돌린 버전이 정상 종료한 다음 시작에 지운다).
+    #    준비 폴더(_update) 정리는 사용 중 표식(ACTIVE)이 없는 것만 지우므로 언제 돌아도 안전하다.
+    #    지울 차례인 실행에서는 되돌리기 메뉴를 처음부터 끈다(정리 스레드와 겹치지 않게).
+    delete_backup = not (args["flags"] & {"--updated", "--update-failed", updater.ROLLBACK_FLAG}) and not stale_pids
     from app.ui.mainwindow import MainWindow   # 8.
     try:
-        win = MainWindow(SPEC, installed, data_root, log_file, args["update_base_url"], notes, args["flags"])
+        win = MainWindow(SPEC, installed, data_root, log_file, args["update_base_url"], notes, args["flags"],
+                         abnormal_streak=abnormal_streak, delete_backup_pending=delete_backup and installed.frozen,
+                         path_issues=path_issues)
     except Exception:
         LOG.exception("메인 창 생성 실패")
         QMessageBox.critical(None, tr("실행 실패"), tr("창을 만들지 못했습니다.\n\n") + traceback.format_exc().strip().splitlines()[-1])
         return 1
     install_error_dialog(win)
+    win.session_backup = True
     win.show()
     LOG.info("창 표시: 시작 후 %.0f ms", (time.perf_counter() - _T0) * 1000)
-
-    # 9. 지난 교체의 _backup 삭제는 '첫 정상 종료 뒤 다음 시작' 에서만 (S-31, 04 6-9):
-    #    --updated 로 켜진 지금 실행에서는 지우지 않고, --update-failed 면 사본을 남기며, 이전 실행이 비정상 종료였으면 남긴다.
-    #    준비 폴더(_update) 정리는 사용 중 표식(ACTIVE)이 없는 것만 지우므로 언제 돌아도 안전하다.
-    delete_backup = not (args["flags"] & {"--updated", "--update-failed"}) and not stale_pids
+    win.start_background_backups()
 
     def _cleanup():
         import threading

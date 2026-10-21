@@ -191,6 +191,9 @@ def test_adjudication_view_fits_right_pane_widths(qapp, proj, width):
         assert width < av.NARROW_PX and v.split.orientation() == Qt.Vertical   # 좁으면 위아래
         v.resize(1100, 700)
         qapp.processEvents()
+        assert v.split.orientation() == Qt.Vertical            # 1200 미만은 위아래(15 5-2 의 2번, 실제 창 900px 의 48)
+        v.resize(av.NARROW_PX + 100, 700)
+        qapp.processEvents()
         assert v.split.orientation() == Qt.Horizontal          # 넓으면 나란히
         v.close()
     finally:

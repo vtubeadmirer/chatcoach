@@ -16,6 +16,7 @@ accept() 로 닫는다. 실패하면 화면에 사유를 보이고 열어 둔다
 from __future__ import annotations
 
 import logging
+from typing import Callable
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (QCheckBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton, QStackedWidget,
@@ -67,14 +68,22 @@ class LockDialog(QDialog):
     sessionLocked = Signal(object)      # 잠금 내용(dict)
 
     def __init__(self, parent=None, *, store, sample_verify: list[dict] | None = None,
-                 current_sample: list[str] | None = None):
-        """current_sample: 재라벨 세션의 자기 표본 chat_id 목록(14 4-2 의 5). 주면 store.lock_session 에 그대로 넘긴다."""
+                 current_sample: list[str] | None = None, recheck: Callable[[], list[str] | None] | None = None):
+        """current_sample: 재라벨 세션의 자기 표본 chat_id 목록(14 4-2 의 5). 주면 store.lock_session 에 그대로 넘긴다.
+
+        recheck: [잠그기] 직전에 부르는 검사(15 5-2 의 12번). current_sample 을 계산한 뒤 구간표가 바뀌었으면 다시 계산한
+        목록을, 아니면 None 을 돌려준다. 주지 않으면 부모 창의 작업대(parent.workbench.current_sample_recheck)를 쓴다
+        (메인 창이 아직 이 인자를 넘기지 않는다). current_sample 이 없으면(1차) 부르지 않는다."""
         super().__init__(parent)
         self.setWindowTitle(tr("세션 잠그기"))
         self.setModal(True)
         self.store = store
         self._sample_verify = sample_verify
         self._current_sample = current_sample
+        if recheck is None and current_sample is not None:
+            recheck = getattr(getattr(parent, "workbench", None), "current_sample_recheck", None)
+        self._recheck = recheck if callable(recheck) else None
+        self.rechecked = False              # 구간표가 바뀌어 current_sample 을 다시 계산했나
         self.lock_doc: dict | None = None
         self.summary = store.lock_summary()
 
@@ -176,6 +185,19 @@ class LockDialog(QDialog):
         """store.lock_session() 을 부른다. 성공하면 True(대화상자를 닫음), 실패하면 사유를 보이고 False."""
         if self.step != 2 or not self.confirm_box.isChecked() or not self.summary.can_lock or self.lock_doc is not None:
             return False
+        if self._current_sample is not None and self._recheck is not None:
+            try:
+                fresh = self._recheck()
+            except Exception as e:  # noqa: BLE001 — 다시 계산이 깨지면 잠그지 않는다(어긋난 목록을 남기지 않게)
+                LOG.warning("잠그기 직전 표본 목록 다시 계산 실패: %s", type(e).__name__)
+                self.error_label.setText(tr("구간표가 바뀌어 표본 목록을 다시 계산하다 실패했습니다 — 잠그지 않았습니다: ")
+                                         + type(e).__name__)
+                self.error_label.show()
+                return False
+            if fresh is not None:
+                LOG.info("잠그기 직전 구간표 변경: current_sample %d → %d건", len(self._current_sample), len(fresh))
+                self._current_sample = list(fresh)
+                self.rechecked = True
         try:
             if self._current_sample is not None:
                 doc = self.store.lock_session(sample_verify=self._sample_verify, current_sample=self._current_sample)

@@ -374,22 +374,32 @@ def test_preflight_disk_space(tmp_path, no_onedrive, monkeypatch):
 class _FakePopen:
     """교체 스크립트 대신. mode: silent(아무것도 안 함, 계속 실행 중) · start(started 표식을 씀) · exit(바로 끝남)."""
     calls: list = []
+    killed: list = []
     mode = "silent"
 
     def __init__(self, cmd, **kw):
         _FakePopen.calls.append((cmd, kw))
+        self._killed = False
         if _FakePopen.mode == "start":
             app, sid = cmd[cmd.index("-App") + 1], cmd[cmd.index("-Id") + 1]
             with open(os.path.join(app, "_update", sid, "started"), "w", encoding="ascii") as f:
                 f.write("999")
 
     def poll(self):
-        return 1 if _FakePopen.mode == "exit" else None
+        return 1 if _FakePopen.mode == "exit" or self._killed else None
+
+    def kill(self):
+        _FakePopen.killed.append(self)
+        self._killed = True
+
+    def wait(self, timeout=None):
+        return self.poll()
 
 
 @pytest.fixture()
 def fake_popen(monkeypatch):
     _FakePopen.calls = []
+    _FakePopen.killed = []
     _FakePopen.mode = "silent"
     monkeypatch.setattr(updater.subprocess, "Popen", _FakePopen)
     monkeypatch.setattr(updater, "execution_policy_report", lambda: "정책(테스트)")
@@ -409,6 +419,9 @@ def test_apply_blocked_when_script_never_starts(tmp_path, no_onedrive, fake_pope
     assert 0.5 <= dt < 5, dt
     assert not os.path.exists(os.path.join(root, "update", "updating.lock"))      # 잠금을 지운다
     assert not updater.update_in_progress(root)
+    # 늦게라도 뜬 스크립트가 일을 이어 가지 않게: 포기 표식을 남기고, 아직 살아 있던 스크립트를 끝낸다
+    assert os.path.isfile(os.path.join(staged.stage_dir, "abandoned"))
+    assert len(fake_popen.killed) == 1
     # 실행하려던 명령: appspec 값으로 만든 스크립트 + 인자
     (cmd, kw), = fake_popen.calls
     script = os.path.join(staged.stage_dir, "replace.ps1")
@@ -468,10 +481,34 @@ def test_apply_refuses_on_preflight_problem(tmp_path, no_onedrive, fake_popen):
     assert fake_popen.calls == [] and not os.path.exists(os.path.join(root, "update", "updating.lock"))
 
 
-def test_rollback_not_yet():
+def test_rollback_without_copy_is_refused(tmp_path):
+    """사본(_backup)이 없으면 되돌리기는 준비 단계에서 거부한다 (자세한 경우는 test_updater_policy · test_rollback)."""
     with pytest.raises(UpdateError) as ei:
-        updater.RobocopyApplier(SPEC, rk.installed("x"), "y").rollback()
-    assert ei.value.kind == "precheck"
+        updater.RobocopyApplier(SPEC, rk.installed(str(tmp_path / "app")), str(tmp_path / "data")).rollback()
+    assert ei.value.kind == "precheck" and "사본이 없습니다" in ei.value.message
+
+
+def test_replacer_rollback_branch(script_text):
+    params = script_text[script_text.index("param("):script_text.index(")\n$ErrorActionPreference")]
+    assert "[switch]$Rollback" in params
+    assert "if ($Rollback) { $NoBackup = [switch]$true; $Lite = [switch]$false }" in script_text
+    rb = script_text[script_text.index("if ($Rollback) {\n"):script_text.index('Finish "rolled_back"')]
+    assert "$retryRc = Mirror $New $App $false" in rb and 'Finish "rollback_failed"' in rb
+    assert rb.index("Remove-Item") > rb.index("$retryRc = Mirror")      # 성공했을 때만 backup_ok 를 지운다
+    assert f'Finish "rolled_back" $backupRc $copyRc $retryRc "{updater.ROLLBACK_FLAG}"' in script_text
+    # 되돌리기 분기는 일반 교체의 복구 분기보다 앞에서 끝난다 (같은 사본을 '복구 원본' 으로 다시 쓰지 않는다)
+    assert script_text.index('Finish "rolled_back"') < script_text.index('-> 백업에서 복구')
+
+
+def test_replacer_clears_stale_backup_ok_before_backup(script_text):
+    nb = script_text[script_text.index("if (-not $NoBackup) {"):script_text.index("# 7. 교체")]
+    assert nb.index('Remove-Item -LiteralPath (Join-Path $updDir "backup_ok.json")') < nb.index("Mirror $App $backup")
+
+
+def test_replacer_command_rollback():
+    args = ("s.ps1", r"C:\앱", r"C:\앱\_backup", "upd-1", "ChatCoach.exe", 7, "0.1.1", "0.1.0")
+    cmd = updater.replacer_command(*args, lite=True, rollback=True)
+    assert cmd[-2:] == ["-NoBackup", "-Rollback"] and "-Lite" not in cmd
 
 
 # --------------------------------------------------------------------------- main.parse_args
@@ -502,9 +539,11 @@ def test_parse_args_defaults_and_base_url(main_mod):
 
 def test_parse_args_startup_flags(main_mod):
     a = main_mod.parse_args(["--updated", "-platform", "offscreen", "--update-failed", "--update-blocked", "--unknown"])
-    assert a["flags"] == {"--updated", "--update-failed", "--update-blocked"}
-    assert set(main_mod.STARTUP_FLAGS) == {"--updated", "--update-failed", "--update-blocked"}
+    assert {"--updated", "--update-failed", "--update-blocked"} <= a["flags"]
+    # 되돌리기의 --rolled-back 은 통합 담당이 main.STARTUP_FLAGS 에 더한다. 더하기 전에도 옛 앱은 모르는 인자로 무시한다
+    assert {"--updated", "--update-failed", "--update-blocked"} <= set(main_mod.STARTUP_FLAGS)
+    assert set(main_mod.STARTUP_FLAGS) <= {"--updated", "--update-failed", "--update-blocked", updater.ROLLBACK_FLAG}
     # 교체 스크립트가 재실행에 쓰는 플래그와 같다
     text = updater.render_replacer()
-    for flag in main_mod.STARTUP_FLAGS:
+    for flag in tuple(main_mod.STARTUP_FLAGS) + (updater.ROLLBACK_FLAG,):
         assert f'"{flag}"' in text

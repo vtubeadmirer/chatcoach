@@ -1,9 +1,13 @@
 # vendored from vtubeadmirer/clipslicer@07d13cc (app/logging_setup.py) — 변경: 로거 이름 chatcoach, 로그 폴더 data_root()\logs(후보 목록 제거), 파일 로그 INFO 기본, 가림 패턴·redact 를 report.py 에서 옮겨 와 모든 레코드에 적용, 시작 줄에 경로 대신 데이터 모드
 """회전 로그 + 처리되지 않은 예외 대화상자 + 개인정보 가림 필터.
 
-로그 위치: paths.data_root()\\logs\\chatcoach.log (1MB × 3개 회전). 폴백은 paths 가 이미 처리한다.
+로그 위치: paths.data_root()\\logs\\chatcoach.log (LOG_MAX_BYTES 1MB × 현재 + LOG_BACKUP_COUNT 3개 회전).
+폴백은 paths 가 이미 처리한다.
 가림(redact): 토큰·쿠키·인증 값, 네이버 로그인 쿠키(NID_AUT·NID_SES), 32자 이상 16진수(userIdHash 류),
-사용자 홈 경로(C:\\Users\\<이름>\\ → %USERPROFILE%\\). 파일·콘솔로 나가는 모든 레코드에 적용된다 (S-20).
+사용자 홈 경로(C:\\Users\\<이름>\\ → %USERPROFILE%\\), 채팅 원문 키-값(nickname·nickname_masked·text·content·profile·heard_text·memo 등).
+파일·콘솔로 나가는 모든 레코드에 적용된다 (S-20).
+그래도 1차 규칙은 '처음부터 쓰지 않기' 다: 로그에는 chat_id·viewer_id·길이·예외 종류 이름만 쓴다(05 10-2 의 10).
+가림은 그 규칙이 깨졌을 때의 그물이다. tests/test_paths.py 가 합성 닉네임·본문으로 주요 흐름을 돌려 로그를 검사한다.
 문제 보고(report.py)도 같은 redact 를 쓴다.
 """
 from __future__ import annotations
@@ -43,7 +47,18 @@ SECRET_PATTERNS = [
     # 이름 뒤에 구분자가 오면 공백 포함 이름 전체를, 아니면 공백 앞까지만 가린다.
     (re.compile(r"(?i)\b[A-Z]:[\\/]+Users[\\/]+(?:" + _NAME + r"+(?=[\\/])|[^\\/:*?\"<>|\r\n\s'\",;)\]]+)"),
      "%USERPROFILE%"),
+    # 채팅 원문 키-값 (S-20 ②): 치지직 응답·dict repr 이 실수로 찍혀도 닉네임·본문·profile 문자열이 나가지 않게.
+    # 16진수 규칙 뒤에 둔다(userIdHash 값은 이미 <hex>). 'content-length' 처럼 키 뒤가 ':'·'=' 가 아니면 걸리지 않는다.
+    # 앱 자체 채팅 기록(chat/messages.jsonl)의 키 text(본문) · nickname_masked 도 가린다. 설정 이름 nickname_mask 는 그대로.
+    (re.compile(r"(?i)([\"']?\b(?:nickname|nickname_masked|nick_name|text|content|profile|heard_text|memo|display_name)"
+                r"\b[\"']?\s*[:=]\s*)"
+                r"(?:\"(?:[^\"\\\r\n]|\\.)*\"|'(?:[^'\\\r\n]|\\.)*'|[^\s,;}&\]]+)"),
+     r"\1***"),
 ]
+
+# 파일 로그 크기 제한 (S-20, 05 10-3 '용량 기준 회전'): chatcoach.log 1MB × (현재 + 3개) = 최대 약 4MB
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUP_COUNT = 3
 
 
 def redact(text: str) -> str:
@@ -85,6 +100,20 @@ def log_file() -> str:
     return os.path.join(log_dir(), LOG_FILE_NAME)
 
 
+def log_files() -> list[str]:
+    """data\\logs 안의 로그 파일(chatcoach.log 와 회전본 · crash.log 와 .1 · update.log) 경로. 있는 것만."""
+    d = log_dir()
+    out = []
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    for n in names:
+        if re.match(r"\A(?:chatcoach\.log(?:\.\d+)?|crash\.log(?:\.1)?|update\.log)\Z", n):
+            out.append(os.path.join(d, n))
+    return out
+
+
 def setup(version: str, file_level: int = logging.INFO) -> str:
     """파일 로그 핸들러(기본 INFO)와 예외 훅 설치. 로그 파일 경로를 돌려준다. 두 번 불러도 핸들러가 겹치지 않는다."""
     for h in [h for h in LOG.handlers if getattr(h, "_sl_installed", False)]:
@@ -96,7 +125,7 @@ def setup(version: str, file_level: int = logging.INFO) -> str:
     path = ""
     try:
         path = log_file()
-        fh = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        fh = RotatingFileHandler(path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
         fh.setFormatter(fmt)
         fh.setLevel(file_level)
         fh.addFilter(flt)

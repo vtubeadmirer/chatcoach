@@ -207,7 +207,21 @@
           }
         },
         "dataset_split": {"enum": ["dev", "test"], "description": "세션을 만들 때의 project.dataset_split 사본(03 6-1·6-4). 나중에 프로젝트 값을 바꿔도 이 세션의 값은 그대로라, 세션마다 dev / test 가 남는다(06 9-4)."},
-        "reopen_note": {"type": "string", "minLength": 1, "maxLength": 300, "pattern": "^\\S(.*\\S)?$", "description": "선택. 앞 세션을 잘못 잠갔을 때 그 사유(08 D-11 7·D-12 2). 잠금은 풀지 않으므로 다음 세션의 첫 줄에 적는다. 한 줄, 앞뒤 공백 없음. 세션 선택 화면이 새 세션을 만들 때만 넣는다."}
+        "reopen_note": {"type": "string", "minLength": 1, "maxLength": 300, "pattern": "^\\S(.*\\S)?$", "description": "선택. 앞 세션을 잘못 잠갔을 때 그 사유(08 D-11 7·D-12 2). 잠금은 풀지 않으므로 다음 세션의 첫 줄에 적는다. 한 줄, 앞뒤 공백 없음. 세션 선택 화면이 새 세션을 만들 때만 넣는다."},
+        "origin_targets": {
+          "type": "array",
+          "maxItems": 64,
+          "description": "선택. 출처 판정(origin_review) 세션이 처음 열릴 때 origin/ 에 있던 대상 파일들(15 5-2 의 7번, D-14 2). 보고서 머리는 이 칸이 있으면 이 파일만 적는다. ID·해시만 — 채팅 본문 없음.",
+          "items": {
+            "type": "object",
+            "required": ["target_id", "chat_ids_sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "target_id": {"type": "string", "pattern": "^OT-[0-9]{8}-[0-9a-f]{4}$"},
+              "chat_ids_sha256": {"$ref": "#/$defs/sha256"}
+            }
+          }
+        }
       }
     },
     "runStartBody": {

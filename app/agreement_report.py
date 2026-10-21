@@ -730,6 +730,17 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
     need = _needed_chat_ids(side_a, side_b) | set(sample_ids or ())
     times, times_src, times_missing = _chat_times_for(chat_times, proj.paths.messages_jsonl, need, manifest_times)
     origin_targets, origin_bad = origin_target_summaries(root) if family == "origin" else ([], 0)
+    origin_seen_note = None
+    if family == "origin":
+        # 15 5-2 의 7번: 세션이 열 때 본 대상 파일(session.open.origin_targets)이 두 세션에 다 있으면 그 파일만 적는다.
+        # 옛 세션(칸 없음)이 하나라도 있으면 앞 판처럼 origin/ 전부를 적는다.
+        seen = [ls.meta.get("origin_targets") for ls in (la, lb)]
+        if all(isinstance(s, list) for s in seen):
+            ids = {r.get("target_id") for s in seen for r in s if isinstance(r, Mapping)}
+            origin_targets = [t for t in origin_targets if t["target_id"] in ids]
+            origin_seen_note = "session_open"
+        else:
+            origin_seen_note = "all_files"
 
     def sess_input(ls: LockedSession, side: Mapping) -> dict:
         cs = ls.lock.get("current_sample") if isinstance(ls.lock.get("current_sample"), Mapping) else None
@@ -774,6 +785,11 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
             warnings.append("출처 판정 대상 파일(origin/)이 없어 대상 파일 ID 를 적지 못했습니다 (08 D-13 5)")
         if origin_bad:
             warnings.append(f"읽지 못한 출처 판정 대상 파일 {origin_bad}개는 머리에 적지 않았습니다")
+        if len(origin_targets) >= 2:
+            warnings.append(f"출처 판정 대상 파일이 {len(origin_targets)}개입니다 — 출처 판정 화면은 이 파일들을 합쳐 씁니다. "
+                            "1차 표본이 바뀌어 옛 대상 파일이 남았는지 확인하세요 (15 5-2 의 6·8번)")
+        if origin_seen_note == "all_files":
+            warnings.append("세션이 어느 대상 파일을 봤는지 기록이 없는 옛 세션이 있어 origin/ 의 대상 파일 전부를 적었습니다")
     for ls in (la, lb):
         if ls.after_lock_lines:
             warnings.append(f"{ls.session_id}: 잠금 뒤 붙은 줄 {ls.after_lock_lines}개를 계산에서 뺐습니다")

@@ -13,6 +13,11 @@
   5. data\\update\\last_result.json 이 ok 이고 _internal\\VERSION 이 B 버전이며 settings.ini 가 그대로이고 _backup 이 있는지 본다.
   6. 재실행된 창을 닫고(WM_CLOSE) 다시 한 번 실행해 _backup 이 지워지는지 본다.
 --kind full 이면 A 의 deps.txt 를 어긋나게 바꿔 전체 zip 을 받게 한다.
+--rollback 이면 6 대신: 재실행된 B(--updated)가 CHATCOACH_AUTO_ROLLBACK=1 로 [도움말 → 이전 버전으로 되돌리기] 메뉴 함수
+(MainWindow.rollback_dialog, 확인 없이)를 불러 A 로 되돌린다. last_result 가 rolled_back 이고 VERSION 이 A 이고
+settings.ini 가 그대로이고 skip_version 이 B 인지 본 뒤, --rolled-back 으로 켜진 A 를 닫고 다음 정상 시작에서
+_backup 이 지워지는지 본다.
+모든 실행은 LOCALAPPDATA 를 <work>\\localappdata 로 바꿔 띄운다(업데이트·되돌리기 직전 백업이 사용자 백업 폴더에 쌓이지 않게).
 """
 from __future__ import annotations
 
@@ -113,6 +118,65 @@ def measure_startup(app_dir: str, env: dict, hold=None, hold_timeout: float = 30
     return dt if ok else float("nan")
 
 
+def _version_of(app_dir: str) -> str:
+    try:
+        return open(os.path.join(app_dir, "_internal", "VERSION"), encoding="utf-8-sig").read().strip()
+    except OSError:
+        return ""
+
+
+def run_rollback_phase(app_dir: str, result_path: str, old_version: str, new_version: str, env: dict,
+                       lad: str) -> bool:
+    """--updated 로 재실행된 B 가 메뉴 되돌리기를 부르고 → 교체 스크립트(-Rollback) → A 가 --rolled-back 으로 다시 뜬다."""
+    t0 = time.perf_counter()
+    if not wait_for(lambda: (read_json(result_path) or {}).get("result") in ("rolled_back", "rollback_failed",
+                                                                            "blocked"), 300, "되돌리기 결과"):
+        return False
+    last = read_json(result_path)
+    log(f"되돌리기 last_result ({time.perf_counter() - t0:.1f}초): {last}")
+    state = read_json(os.path.join(app_dir, "data", "update", "state.json")) or {}
+    pre = os.path.join(lad, "ChatCoach", "backups", "pre-update")
+    try:
+        n_pre = len([n for n in os.listdir(pre) if n.endswith(".zip")])
+    except OSError:
+        n_pre = 0
+    checks = {
+        "result rolled_back": last.get("result") == "rolled_back",
+        "from == new, to == old": last.get("from") == new_version and last.get("to") == old_version,
+        "VERSION == old": _version_of(app_dir) == old_version,
+        "settings.ini 보존": open(os.path.join(app_dir, "data", "settings.ini"), encoding="utf-8").read().startswith("[test]\nkeep=1\n"),
+        "skip_version == new": state.get("skip_version") == new_version,
+        "backup_ok.json 지움": not os.path.isfile(os.path.join(app_dir, "data", "update", "backup_ok.json")),
+        "updating.lock 없음": not os.path.isfile(os.path.join(app_dir, "data", "update", "updating.lock")),
+        "업데이트·되돌리기 직전 data 백업 2개": n_pre >= 2,
+        "libmpv 유지": os.path.isfile(os.path.join(app_dir, "_internal", "libmpv-2.dll")),
+    }
+    ok = True
+    for k, v in checks.items():
+        log(f"  {'OK ' if v else 'NG '} {k}")
+        ok = ok and bool(v)
+    if not wait_for(lambda: bool(procs_under(app_dir)), 60, "--rolled-back 으로 다시 뜬 창"):
+        return False
+    time.sleep(5)
+    for pid in procs_under(app_dir):
+        close_window(pid)
+    wait_for(lambda: not procs_under(app_dir), 60, "창 닫힘")
+    try:
+        with open(os.path.join(app_dir, "data", "logs", "chatcoach.log"), encoding="utf-8", errors="replace") as f:
+            tail = [ln for ln in f.readlines() if "되돌리기" in ln or "rolled" in ln or "건너뛴" in ln][-8:]
+        print("--- chatcoach.log (되돌리기 줄) ---\n" + "".join(tail))
+    except OSError:
+        pass
+    backup_dir = os.path.join(app_dir, "_backup")
+    still = os.path.isdir(backup_dir)
+    log(f"  {'OK ' if still else 'NG '} --rolled-back 실행에서는 _backup 을 지우지 않음")
+    dt = measure_startup(app_dir, dict(env), hold=lambda: not os.path.isdir(backup_dir))
+    log(f"되돌린 버전 시작 → 창 표시: {dt:.2f}초")
+    gone = wait_for(lambda: not os.path.isdir(backup_dir), 10, "_backup 삭제")
+    log(f"  {'OK ' if gone else 'NG '} 다음 정상 시작 뒤 _backup 삭제")
+    return ok and still and gone
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--old", required=True, help="옛 빌드 dist 폴더 (안에 ChatCoach\\)")
@@ -122,6 +186,8 @@ def main(argv=None) -> int:
     ap.add_argument("--kind", choices=["lite", "full"], default="lite")
     ap.add_argument("--measure-startup", action="store_true")
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--rollback", action="store_true", help="업데이트 뒤 메뉴 되돌리기까지 (04 6-10)")
+    ap.add_argument("--notes", help="릴리스 노트 파일 (없으면 docs/release-notes/v<새 버전>.md, 그것도 없으면 시험용 노트)")
     a = ap.parse_args(argv)
 
     work = os.path.abspath(a.work)
@@ -143,6 +209,10 @@ def main(argv=None) -> int:
     log(f"A 사본: {app_dir} (v{old_version})")
 
     env = dict(os.environ)
+    lad = os.path.join(work, "localappdata")
+    os.makedirs(lad, exist_ok=True)
+    env["LOCALAPPDATA"] = lad
+    base_env = dict(env)
     if a.measure_startup:
         dt = measure_startup(app_dir, env)
         log(f"시작 → 창 표시: {dt:.2f}초")
@@ -157,7 +227,14 @@ def main(argv=None) -> int:
     key_path = os.path.join(work, "test.key")
     with open(key_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(sm.secret_file_text(kp, None))
-    rc = frs.main(["prepare", "--dist", a.new, "--version", a.new_version, "--out", rel_dir, "--key", key_path])
+    notes = a.notes
+    if not notes and not os.path.isfile(os.path.join(ROOT, "docs", "release-notes", f"v{a.new_version}.md")):
+        # 저장소에 그 버전의 노트가 없으면(시험 전용 버전) 작업 폴더에 시험용 노트를 만든다 (저장소는 건드리지 않음)
+        notes = os.path.join(work, f"notes-v{a.new_version}.md")
+        with open(notes, "w", encoding="utf-8", newline="\n") as f:
+            f.write(f"min_supported: {old_version}\nmandatory: false\n---\n업데이트·되돌리기 왕복 시험용 빌드입니다.\n")
+    rc = frs.main(["prepare", "--dist", a.new, "--version", a.new_version, "--out", rel_dir, "--key", key_path]
+                  + (["--notes", notes] if notes else []))
     if rc:
         return rc
     if a.kind == "full":
@@ -172,6 +249,8 @@ def main(argv=None) -> int:
     # 4. A 실행
     env["CHATCOACH_TEST_PUBKEY"] = kp.public_line()
     env["CHATCOACH_AUTO_UPDATE"] = "1"
+    if a.rollback:
+        env["CHATCOACH_AUTO_ROLLBACK"] = "1"      # --updated 로 켜진 B 만 메뉴 되돌리기를 부른다
     exe = os.path.join(app_dir, SPEC.exe_name)
     t0 = time.perf_counter()
     p = subprocess.Popen([exe, "--update-base-url", base], env=env, cwd=app_dir)
@@ -207,6 +286,11 @@ def main(argv=None) -> int:
     for k, v in checks.items():
         log(f"  {'OK ' if v else 'NG '} {k}")
         ok = ok and bool(v)
+    if a.rollback:
+        ok = run_rollback_phase(app_dir, result_path, old_version, a.new_version, base_env, lad) and ok
+        srv.shutdown()
+        log("왕복 + 되돌리기 시험 " + ("통과" if ok else "실패"))
+        return 0 if ok else 1
     # 재실행된 새 버전이 떠 있어야 한다
     if not wait_for(lambda: bool(procs_under(app_dir)), 60, "재실행된 창"):
         ok = False

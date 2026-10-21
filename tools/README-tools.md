@@ -23,7 +23,9 @@
 | `make_fixture.py` | 합성 픽스처 생성기 (sha1('fixture-N')·'시청자N'·video_no 0). `--check` 로 `tests/fixtures/labels_*.jsonl` 골든이 그대로 다시 만들어지는지 본다. |
 | `gui_smoke.py` | 실제 창을 띄워 작업대 단계(프로젝트 열기 → 영상 → 탐색 → 채팅 → 타임라인)를 PASS/FAIL 로 점검한다 (릴리스 전 수동). `--labeling-flow` 는 사본(project.json·guide·messages.jsonl)에서 세션 → 구간 → 반응(재확인) → 표본 → 내보내기 → 다시 열기까지 돌리고 사본을 지운다. |
 | `ci_selftest.py` | 빌드된 exe 를 한글 폴더 사본에서 `--selftest` 로 점검한다 (release.yml). |
-| `update_roundtrip.py` | 앱 안 업데이트 왕복 시험(04 12-5)을 자동으로 돌린다. |
+| `update_roundtrip.py` | 앱 안 업데이트 왕복 시험(04 12-5)을 자동으로 돌린다. `--rollback` 이면 업데이트 직후 실행에서 [도움말 → 이전 버전으로 되돌리기] 메뉴 함수로 되돌리고 확인한다. |
+| `pilot_setup.py` | 시범 영상 폴더 → 프로젝트·채팅·앵커 후보 (보정은 제안만). `--dry-run` 은 아무것도 쓰지 않는다. |
+| `pilot_freeze.py` | 시범 시작 때 라벨 형식·기준서 v0.1 고정 기록(freeze.json)을 한 번 만들고, 시범 중에는 `--check` 로 확인. |
 | `fake_release_server.py` | 127.0.0.1 전용 가짜 릴리스 서버와 시험 릴리스 준비. |
 
 ## 빌드 · 의존성

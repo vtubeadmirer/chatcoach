@@ -26,13 +26,15 @@ class UpdateCheckWorker(QThread):
     result = Signal(object)
 
     def __init__(self, spec: AppSpec, installed: updater.InstalledInfo, state_path: str, force: bool,
-                 base_url: str | None = None, parent=None):
+                 base_url: str | None = None, parent=None, *, channel: str = "stable", on_start: bool = False):
         super().__init__(parent)
         self.spec, self.installed, self.state_path, self.force, self.base_url = spec, installed, state_path, force, base_url
+        self.channel, self.on_start = updater.normalize_channel(channel), bool(on_start)
 
     def run(self):
         try:
-            res = updater.run_check(self.spec, self.installed, self.state_path, force=self.force, base_url=self.base_url)
+            res = updater.run_check(self.spec, self.installed, self.state_path, force=self.force, base_url=self.base_url,
+                                    channel=self.channel, on_start=self.on_start)
         except Exception as ex:  # 예상 못 한 예외도 '확인 실패' 로 보인다. 조용히 삼키지 않는다
             LOG.exception("업데이트 확인 중 예외")
             res = updater.CheckResult("failed", f"확인 중 오류: {ex}", "network")

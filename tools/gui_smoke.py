@@ -6,6 +6,11 @@
 사용:
   .venv\\Scripts\\python tools\\gui_smoke.py --project <프로젝트 폴더> [--video <영상 파일>] [--offscreen]
         [--screenshot <png>] [--store-copy] [--labeling-flow] [--timeout 초]
+  .venv\\Scripts\\python tools\\gui_smoke.py --screenshot-cleanup [c4,c5,c6] [--yes]
+        스모크를 돌리지 않고 스크린샷 폴더의 묶음 스크린샷을 휴지통으로 보낸다(--yes 없으면 개수만, 15 5-2 의 11).
+
+끝에는 스모크 데이터 폴더의 채팅 색인 캐시를 지운다(cache_drop, 15 5-2 의 10). 네 흐름을 다 켜면 단계 이름을
+14(c5) 의 49 단계와 대조해(STEPS_C5 → expected_steps) 빠진 단계가 있으면 FAIL 로 끝난다(15 5-2 의 16).
 
 단계: 창 → 프로젝트 열기(파일 메뉴와 같은 길: ProjectView.open_path, 세션 선택 화면은 '보기 전용') → 채팅 싣기 →
       타임라인 밀도 → 영상 로드(project.json 에 저장하지 않음) → 정확 탐색 → 채팅 활성화(−3초 탐색 + 하이라이트) →
@@ -77,7 +82,7 @@ SCREENS_DIR = os.path.join(os.path.dirname(ROOT), "chatcoach-data", "screens")
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description="ChatCoach GUI 스모크 시험")
-    ap.add_argument("--project", required=True, help="프로젝트 폴더 (project.json 이 있는 곳)")
+    ap.add_argument("--project", help="프로젝트 폴더 (project.json 이 있는 곳). --screenshot-cleanup 만 할 때는 필요 없음")
     ap.add_argument("--video", help="영상 파일 (저장하지 않고 이번에만 연결)")
     ap.add_argument("--offscreen", action="store_true", help="화면 없이 (QT_QPA_PLATFORM=offscreen)")
     ap.add_argument("--screenshot", help=f"창 스크린샷 png (반드시 {SCREENS_DIR} 안)")
@@ -91,7 +96,113 @@ def parse_args(argv=None):
     ap.add_argument("--window-size", help="--labeling-flow 동안 메인 창 크기 (예: 1366x768, 테두리 포함)")
     ap.add_argument("--data-dir", help="임시 데이터 폴더 (기본 %%TEMP%%\\chatcoach_smoke)")
     ap.add_argument("--timeout", type=float, default=60.0, help="단계 하나의 대기 상한(초)")
+    ap.add_argument("--screenshot-cleanup", nargs="?", const=",".join(CLEANUP_DEFAULT_PREFIXES), metavar="접두어",
+                    help=f"스모크를 돌리지 않고 {SCREENS_DIR} 의 스크린샷(<접두어>_*.png, 기본 "
+                         f"{','.join(CLEANUP_DEFAULT_PREFIXES)})을 휴지통으로 보낸다. --yes 가 없으면 개수만 보인다")
+    ap.add_argument("--yes", action="store_true", help="--screenshot-cleanup 을 실제로 한다(휴지통)")
     return ap.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------- 스크린샷 정리 (15 5-2 의 11번)
+# 사용자가 본 뒤 지우는 묶음 스크린샷 접두어. 실제 채팅이 찍혔을 수 있어 휴지통으로만 보낸다(바로 지우지 않음).
+CLEANUP_DEFAULT_PREFIXES = ("c4", "c5", "c6")
+_PREFIX_OK = set("abcdefghijklmnopqrstuvwxyz0123456789-")
+
+
+def screenshot_cleanup_targets(folder: str, prefixes) -> list[str]:
+    """folder 바로 아래(하위 폴더·링크 제외)의 '<접두어>_*.png' 파일 경로(이름순). 접두어는 소문자·숫자·'-' 만."""
+    pre = [p.strip().lower() for p in prefixes if p and p.strip()]
+    if not pre or any(not set(p) <= _PREFIX_OK for p in pre):
+        raise ValueError("접두어는 영문 소문자·숫자·'-' 만 쓸 수 있습니다")
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        low = name.lower()
+        if not low.endswith(".png") or not any(low.startswith(p + "_") for p in pre):
+            continue
+        path = os.path.join(folder, name)
+        if os.path.islink(path) or not os.path.isfile(path):
+            continue
+        out.append(path)
+    return out
+
+
+def send_to_recycle_bin(paths: list[str]) -> bool:
+    """Windows 휴지통으로 보낸다. 앱의 backup.send_to_trash 를 그대로 쓴다: 휴지통이 받는지(드라이브 종류 · subst ·
+    휴지통 꺼짐 · 최대 크기) 먼저 보고, 못 받는 곳이면 지우지 않고 False. 영구 삭제로 넘어가지 않는다."""
+    if not paths:
+        return True
+    if os.name != "nt":
+        return False
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    from app import backup
+    if any(backup.can_trash(p) for p in paths):      # 하나라도 못 받으면 아무것도 보내지 않는다
+        return False
+    try:
+        for p in paths:
+            backup.send_to_trash(p)
+    except OSError:                                  # TrashError 포함
+        return False
+    return True
+
+
+def screenshot_cleanup(prefixes, *, yes: bool, folder: str | None = None, trash=None) -> int:
+    """--screenshot-cleanup: SCREENS_DIR 안의 묶음 스크린샷을 휴지통으로. 출력은 개수·바이트만(파일 이름 안 찍음).
+    yes 가 아니면 세기만 한다. 종료 코드 0 = 됨(또는 셈만), 1 = 휴지통으로 못 보냄(파일은 그대로)."""
+    folder = folder or SCREENS_DIR
+    targets = screenshot_cleanup_targets(folder, prefixes)
+    size = sum(os.path.getsize(p) for p in targets)
+    if not yes:
+        print(f"스크린샷 정리(셈만): {len(targets)}개, {size} bytes — 휴지통으로 보내려면 --yes")
+        return 0
+    ok = (trash or send_to_recycle_bin)(targets)
+    left = sum(1 for p in targets if os.path.exists(p))
+    print(f"스크린샷 정리: {len(targets)}개 휴지통으로 {'보냄' if ok and not left else '못 보냄'} (남은 {left}개)")
+    return 0 if ok and not left else 1
+
+
+# ---------------------------------------------------------------------------- 단계 목록 (15 5-2 의 16번)
+# 14(c5) 보고의 49 단계와 지금 단계의 대조. 네 흐름(--store-copy --labeling-flow --agreement-flow --adjudication-flow)을
+# 다 켜고 돌렸을 때 이 이름들이 모두 찍혀야 한다(빠지면 FAIL 로 끝난다).
+#   c5 → c6: agree_a_segments + agree_a_samples → agree_a_label (같은 확인 + ③ 완료·타임라인 부분 갱신),
+#            agree_open_b + agree_b_segments + agree_b_samples → agree_b_label (같은 확인 + ④ 문이 ③ 완료 전 닫힘),
+#            agree_copy 새로(전에는 agree_open_a 의 copied 숫자), adj_tools 새로(출처 대상·relabel_second 계획) → 49 − 4 + 2 + 1 = 48.
+#   c6 정리: cache_drop (스모크 데이터 폴더의 채팅 색인 캐시를 끝에 지움, 15 5-2 의 10번) → 49.
+STEPS_C5 = (
+    "window", "open_project", "chat_loaded", "timeline_density", "video_load", "waveform", "seek", "chat_activate",
+    "play", "timeline_zoom", "chat_filter", "store_copy", "screenshot",
+    "flow_open", "flow_media", "flow_segments", "flow_reaction", "flow_sample_draw", "flow_sample_judge",
+    "flow_sample_stage2", "flow_layout", "flow_export", "flow_reopen", "flow_close", "flow_cleanup",
+    "agree_open_a", "agree_a_segments", "agree_a_samples", "agree_a_lock_plan", "agree_open_b", "agree_b_segments",
+    "agree_b_samples", "agree_b_lock_blind", "agree_report", "agree_analysis", "agree_cleanup",
+    "adj_copy", "adj_open_a", "adj_a_label", "adj_a_lock_plan", "adj_b_label", "adj_b_missed", "adj_b_lock_blind",
+    "adj_report", "adj_adjudicate", "adj_cancel_plan", "adj_origin", "adj_cleanup", "close")
+STEPS_RENAMED = {"agree_a_segments": "agree_a_label", "agree_a_samples": "agree_a_label",
+                 "agree_open_b": "agree_b_label", "agree_b_segments": "agree_b_label",
+                 "agree_b_samples": "agree_b_label"}
+STEPS_ADDED = ("agree_copy", "adj_tools", "cache_drop")
+
+
+def expected_steps() -> list[str]:
+    """지금 판에서 네 흐름을 다 켰을 때 찍혀야 하는 단계 이름(c5 목록을 STEPS_RENAMED 로 바꾸고 STEPS_ADDED 를 더함)."""
+    out: list[str] = []
+    for s in STEPS_C5:
+        s = STEPS_RENAMED.get(s, s)
+        if s not in out:
+            out.append(s)
+    out += [s for s in STEPS_ADDED if s not in out]
+    return out
+
+
+def compare_steps(names) -> tuple[list[str], list[str]]:
+    """찍힌 단계 이름 → (빠진 것, 목록에 없는 것)."""
+    seen = list(dict.fromkeys(names))
+    want = expected_steps()
+    return [s for s in want if s not in seen], [s for s in seen if s not in want]
 
 
 # --store-copy 가 임시 폴더로 복사하는 것: 라벨 저장·되돌리기에 필요한 최소한만(03 2-3). 보호 구역(chat/protected·
@@ -228,7 +339,7 @@ class Smoke:
         from app.ui.mainwindow import MainWindow
         installed = updater.load_installed(SPEC)
         self.win = MainWindow(SPEC, installed, self.data_root, "", None, [], set())
-        self.win.check_updates = lambda force=False: None      # 스모크 중에는 네트워크 확인을 하지 않는다
+        self.win.check_updates = lambda *a, **k: None          # 스모크 중에는 네트워크 확인을 하지 않는다
         # 원본 프로젝트는 세션 선택 화면에서 '보기 전용' 을 고른 것과 같게 연다(라벨 기록을 열지 않는다)
         self.chosen: list = []
         self.win.session_chooser = lambda outcome: self.chosen.append(outcome.project.root) or None
@@ -554,8 +665,7 @@ class Smoke:
             t1 = time.perf_counter()
             cov_before = wb.media_coverage()
             if self.args.video and os.path.isfile(self.args.video):
-                wb.connect_media(self.args.video, persist=True)
-                self.wait(lambda: wb._file_duration > 0 and "media_ref" not in wb._jobs, 60)
+                self._connect_copy_media(wb)
             fdur = wb._file_duration
             cov = wb.media_coverage() or []
             ok = bool(fdur) and len(cov) == 1 and one_bar
@@ -856,6 +966,9 @@ class Smoke:
             d.do_lock()
         self.win.update_session_actions()
         if not self.win.a_lock.isEnabled():
+            wb = self.win.workbench
+            print(f"  잠그기 메뉴 꺼짐: {self.win.a_lock.toolTip()} "
+                  f"(작업대 일 {wb.busy_job_keys() if wb is not None else []})", flush=True)
             return None
         return self.win.lock_session_dialog(run=run)
 
@@ -904,6 +1017,13 @@ class Smoke:
                 sess.add_labeler(self.data_root, lid)
         return tmp, dst, out_root, done
 
+    def _connect_copy_media(self, wb) -> None:
+        """사본에 영상을 연결한다(사본의 project.json 에만 저장). 사본의 영상 지문이 --video 와 다르면(합성 프로젝트 등)
+        작업대가 교체 사유를 묻는 입력 상자를 띄워 화면 없이 멈추므로, 사유를 자리표시 문장으로 대신 넣는다."""
+        wb.ask_replace_reason = lambda: "smoke: 시험 영상으로 교체"
+        wb.connect_media(self.args.video, persist=True)
+        self.wait(lambda: wb._file_duration > 0 and "media_ref" not in wb._jobs, 60)
+
     def _flow_cleanup(self, tmp: str, p: str, t0: float) -> None:
         if self.wb is not None and getattr(self.wb, "project", None) is not None and _inside(self.wb.project.root, tmp):
             self.win.show_home()
@@ -928,8 +1048,7 @@ class Smoke:
         wb = self.wb
         ok = ok and ctx_a is not None and not wb.store.read_only
         if ok and self.args.video and os.path.isfile(self.args.video):
-            wb.connect_media(self.args.video, persist=True)
-            self.wait(lambda: wb._file_duration > 0 and "media_ref" not in wb._jobs, 60)
+            self._connect_copy_media(wb)
         cov = wb.media_coverage() or [] if ok else []
         ok = ok and len(cov) == 1
         self.wait(lambda: "chat_index" not in wb._jobs, 60)
@@ -1011,7 +1130,8 @@ class Smoke:
             return None
         return {"sid_a": sid_a, "plan": plan, "a_items": a_items, "judged_a": judged_a, "doc_a": doc_a}
 
-    def _flow_second(self, dst: str, plan: dict, sid_a: str, p: str, *, n_missed: int = 0) -> dict | None:
+    def _flow_second(self, dst: str, plan: dict, sid_a: str, p: str, *, n_missed: int = 0,
+                     a_items: dict | None = None) -> dict | None:
         """L02 두 번째 사람(세션 화면에서 relabel_second, 같은 PC 라 '같은 machine_id'): 블록 안 구간(끝 2분은 게임) →
         계획의 블록 표본(1차 매니페스트의 순서 키·τ_block) 3건 판정(직접·확실함·판단 불가), 잠긴 1차 라벨이 화면 어디에도
         없는지 → ③ 완료 → (n_missed > 0: ④ 놓친 후보 n 건 + 채팅 표 오른쪽 메뉴로 표본 밖 후보 1건) → 잠그기(current_sample).
@@ -1062,8 +1182,12 @@ class Smoke:
             self._shot(f"_{p}_b")
             ok = good and bool(man_b.get("from_plan")) and bool(b_items) and len(judged_b) == 3 and no_primary \
                 and not gate_before and wb.mark_phase_done() is not None
+            # 14(c5) 의 agree_b_samples 가 찍던 숫자(같은 블록 1차 표본 수·겹친 수)를 되살린다(15 5-2 의 16번 대조)
+            a_same = next((v for v in (a_items or {}).values() if set(v) & set(b_items)), [])
+            overlap = len(set(a_same) & set(b_items))
             self.check(f"{p}_b_label", ok, t1,
-                       f"kind={ctx_b.session_kind if ctx_b else '-'} block_ms={lo}~{hi} items={len(b_items)} "
+                       f"kind={ctx_b.session_kind if ctx_b else '-'} scope_blocks={len(scope)} block_ms={lo}~{hi} "
+                       f"items={len(b_items)} a_items_same_block={len(a_same)} overlap={overlap} "
                        f"judged={len(judged_b)} primary_hidden={no_primary} missed_gate_before_samples_mark={gate_before} "
                        f"same_machine_note={bool(choice and choice.same_machine)}")
             if not ok:
@@ -1161,7 +1285,7 @@ class Smoke:
             a = self._flow_primary(dst, p)
             if a is None:
                 return False
-            b = self._flow_second(dst, a["plan"], a["sid_a"], p)
+            b = self._flow_second(dst, a["plan"], a["sid_a"], p, a_items=a["a_items"])
             if b is None:
                 return False
             sid_a, sid_b = a["sid_a"], b["sid_b"]
@@ -1235,7 +1359,7 @@ class Smoke:
             a = self._flow_primary(dst, p)
             if a is None:
                 return False
-            b = self._flow_second(dst, a["plan"], a["sid_a"], p, n_missed=2)
+            b = self._flow_second(dst, a["plan"], a["sid_a"], p, n_missed=2, a_items=a["a_items"])
             if b is None:
                 return False
             sid_a, sid_b = a["sid_a"], b["sid_b"]
@@ -1370,6 +1494,8 @@ class Smoke:
                 if "stop" in watch:
                     watch["stop"]()
             pr0 = pr = None
+            refs: list = []
+            multi_warn = False
             n = 0
             marked = False
             fit_o = "-"
@@ -1395,6 +1521,9 @@ class Smoke:
                     ov.rationale.setText(f"{_hms(1_000 + k)} smoke 출처 {origin}")
                     n += ov.save_current() is not None
                 pr = ov.progress() if ov else None
+                # 대상 파일 둘(조정 세션이 만든 것 + 합성) → 경고 1줄, 실은 파일 ID 를 작업대가 넘길 수 있음(15 5-2 의 6·7번)
+                refs = wb.origin_target_refs() if ok else []
+                multi_warn = bool(ov.multi_targets_warning()) and ov.multi_warn.isVisibleTo(ov) if ov else False
                 marked = wb.mark_phase_done() is not None if ok else False
                 self.pump(30)
                 self._shot("_adj_origin")
@@ -1404,8 +1533,10 @@ class Smoke:
             finally:
                 stop()
             ok = ok and pr0 is not None and pr0.total == total_want and n == total_want and pr is not None and \
-                pr.done == total_want and pr.auto == 1 and marked and not wst["bad"] and wst["seen"] > 0
+                pr.done == total_want and pr.auto == 1 and marked and not wst["bad"] and wst["seen"] > 0 and \
+                len(refs) == 2 and tgt["target_id"] in [r["target_id"] for r in refs] and multi_warn
             self.check(f"{p}_origin", ok, t1,
+                       f"target_files={len(refs)} multi_warning={multi_warn} "
                        f"targets={pr0.total if pr0 else '-'} want={total_want} saved={n} auto={pr.auto if pr else '-'} "
                        f"by_origin={dict(pr.by_origin) if pr else '-'} forbidden_opens={len(wst['bad'])} "
                        f"{sorted({os.path.basename(x) for x in wst['bad']})[:4] if wst['bad'] else ''}"
@@ -1554,10 +1685,38 @@ class Smoke:
                 self.pump(100)
         except Exception:  # noqa: BLE001
             traceback.print_exc(limit=3)
+        self.step_cache_drop()
         failed = [r for r in self.results if not r[1]]
         print(f"== {len(self.results) - len(failed)} passed, {len(failed)} failed, "
               f"{(time.perf_counter() - t_all):.1f} s, platform={self.app.platformName() if self.app else '-'}")
-        return 0 if not failed else 1
+        steps_ok = True
+        a = self.args
+        if a.store_copy and a.labeling_flow and a.agreement_flow and a.adjudication_flow and not failed:
+            missing, extra = compare_steps(r[0] for r in self.results)
+            steps_ok = not missing
+            print(f"== 단계 목록(14 c5 의 49 와 대조, 15 5-2 의 16): {len(dict.fromkeys(r[0] for r in self.results))}"
+                  f"/{len(expected_steps())} missing={missing} extra={extra}")
+        return 0 if not failed and steps_ok else 1
+
+    def step_cache_drop(self) -> bool:
+        """끝에: 스모크 데이터 폴더(--data-dir)에 남은 채팅 색인 캐시(chat_id·시각만)를 지운다(15 5-2 의 10번).
+        사본들도 원본 project.json 의 project_id 를 쓰므로 그 하나만 지우면 된다. 앱의 진짜 data 폴더는 건드리지 않는다."""
+        t0 = time.perf_counter()
+        import json
+        from app import chat_index as ci
+        try:
+            with open(os.path.join(self.args.project, "project.json"), encoding="utf-8") as f:
+                pid = (json.load(f) or {}).get("project_id")
+        except (OSError, ValueError):
+            pid = None
+        if not pid:
+            return self.check("cache_drop", True, t0, "skip (project_id 없음 — 캐시를 만들지 않음)")
+        try:
+            dropped = ci.drop_cache(pid, self.data_root)
+            left = os.path.exists(ci.cache_path_for(pid, self.data_root))
+        except (OSError, ValueError) as e:
+            return self.check("cache_drop", False, t0, type(e).__name__)
+        return self.check("cache_drop", not left, t0, f"dropped={dropped} left={left}")
 
 
 def main(argv=None) -> int:
@@ -1566,7 +1725,13 @@ def main(argv=None) -> int:
     except Exception:  # noqa: BLE001
         pass
     args = parse_args(argv)
-    if not os.path.isfile(os.path.join(args.project, "project.json")):
+    if args.screenshot_cleanup is not None:
+        try:
+            return screenshot_cleanup(args.screenshot_cleanup.split(","), yes=args.yes)
+        except ValueError as e:
+            print(str(e))
+            return 2
+    if not args.project or not os.path.isfile(os.path.join(args.project, "project.json")):
         print("project.json 이 없습니다")
         return 2
     return Smoke(args).run()

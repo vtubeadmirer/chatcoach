@@ -101,7 +101,6 @@ PATCH_MAX_MARKERS = 64
 # 조정 모드의 hsplit 오른쪽 몫(14 4-2 의 1). 1366 창에서 오른쪽 약 790px — 영상·타임라인 칸은 약 570px 남는다
 ADJ_RIGHT_SHARE = 0.58
 ADJ_RIGHT_MIN_PX = 760
-ADJ_SIDE_MIN_PX = 1200            # 조정 화면을 나란히 배치로 둘 만큼 넓은 오른쪽 칸(그보다 좁으면 위아래 배치 폭으로)
 # missed_candidate(④)·origin(출처 판정)·adjudication(조정)은 타임라인에 그리지 않고 그 화면에만 넘긴다.
 HEAD_KINDS = ("segment", "utterance", "reaction", "continuation", "video_check", "missed_candidate", "origin",
               "adjudication")
@@ -931,6 +930,9 @@ class Workbench(QWidget):
     labelsChanged = Signal()             # 저장·철회·단계 표시로 라벨 기록이 바뀜
     messageShown = Signal(str)           # 잠깐 보이는 상태 문장(_say). 메인 창 상태 줄이 받는다
     busyChanged = Signal(bool)           # 저장 중(D-10 2) 켜짐·꺼짐
+    # 작업대 뒤에서 도는 일(채팅·색인·표본·④ 대상 읽기 등 _run_job)이 하나라도 있으면 True, 다 끝나면 False.
+    # 메인 창이 자기 busy_jobs(run_job_modal)와 합쳐 세션 메뉴를 끄는 데 쓴다(15 5-2 의 15번). 바뀔 때만 낸다.
+    jobsBusyChanged = Signal(bool)
 
     def __init__(self, parent=None, *, parts: dict | None = None, session_kind=None, phase=None,
                  labeler_id: str | None = None, session=None, store_options: dict | None = None):
@@ -967,6 +969,7 @@ class Workbench(QWidget):
         self._fps: float | None = None       # 고정 프레임률 (영상 probe)
         self._vfr = False                    # 가변 프레임률이면 ←/→ 가 0.1초
         self._jobs: dict[str, FuncWorker] = {}
+        self._jobs_busy = False              # jobsBusyChanged 로 마지막에 알린 값
         self._closed = False
         self._link_path: str | None = None
         self._status_last = ""
@@ -1223,6 +1226,7 @@ class Workbench(QWidget):
             except Exception as e:  # noqa: BLE001
                 res, err = None, f"{type(e).__name__}: {e}"
             on_done(res, err)
+            self._sync_jobs_busy()           # 앞 일을 떼어 냈으면 바쁨이 풀렸을 수 있다
             return
         w = FuncWorker(fn, self)
         self._jobs[name] = w
@@ -1232,9 +1236,25 @@ class Workbench(QWidget):
                 del self._jobs[name]
             if not self._closed:
                 on_done(res, err)
+            self._sync_jobs_busy()
         w.done.connect(finished)
         w.finished.connect(w.deleteLater)
         w.start()
+        self._sync_jobs_busy()
+
+    def jobs_busy(self) -> bool:
+        """뒤에서 도는 작업대 일이 있나(jobsBusyChanged 와 같은 값)."""
+        return bool(self._jobs)
+
+    def busy_job_keys(self) -> list[str]:
+        """지금 도는 작업대 일의 이름(chat · store · waveform …). 메인 창이 세션 메뉴를 끌지 정할 때 본다."""
+        return [str(k) for k in self._jobs]
+
+    def _sync_jobs_busy(self) -> None:
+        now = bool(self._jobs) and not self._closed
+        if now != self._jobs_busy:
+            self._jobs_busy = now
+            self.jobsBusyChanged.emit(now)
 
     @staticmethod
     def _orphan(w: FuncWorker) -> None:
@@ -1591,7 +1611,34 @@ class Workbench(QWidget):
             self._busy_failed = True
             raise
         self._apply_saved(rec)
+        self._warn_missed_after_reaction(rec)
         return rec
+
+    MISSED_STALE_WARNING = ("④ 놓친 후보를 적은 채팅의 ③ 을 직접·높음으로 고쳤습니다 — 그 놓친 후보는 일치도에서 빠집니다 "
+                            "(기록은 남음, 06 2-9)")
+
+    def missed_heads_for(self, chat_id: str) -> list[dict]:
+        """이 세션의 현재 유효 ④ 놓친 후보 가운데 표본 안(scope = sample)이고 이 채팅인 것."""
+        return [r for r in self._label_heads["missed_candidate"].values()
+                if (r.get("body") or {}).get("chat_id") == chat_id and (r.get("body") or {}).get("scope") == "sample"]
+
+    def _warn_missed_after_reaction(self, rec) -> bool:
+        """③(반응)을 직접·높음으로 고쳐 저장했는데 그 채팅에 ④ 놓친 후보(표본 안)가 있으면 경고 1줄(15 5-2 의 13번,
+        14 4-2 의 4번). 막지는 않는다 — 일치도 쪽 drop_missed_stale 이 그 후보를 뺀다. 경고했으면 True."""
+        if not isinstance(rec, dict) or rec.get("kind") != "reaction":
+            return False
+        b = rec.get("body") or {}
+        cid = b.get("chat_id")
+        if not isinstance(cid, str) or b.get("result") != "graded" or b.get("grade") not in ("direct", "likely"):
+            return False
+        n = len(self.missed_heads_for(cid))
+        if not n:
+            return False
+        LOG.info("③ 직접·높음 저장: 같은 채팅의 ④ 놓친 후보 %d건 (일치도에서 빠짐)", n)
+        line = tr(self.MISSED_STALE_WARNING)
+        self._note(line)
+        self._say(line)
+        return True
 
     def retract_label(self, entity_id: str, reason: str, merged_into: str | None = None) -> dict:
         """대상 철회(store.retract). SegmentForm 의 retract 콜백."""
@@ -2266,12 +2313,9 @@ class Workbench(QWidget):
         if wide:
             if self._split_before is None:
                 self._split_before = list(self.hsplit.sizes())
+            # 조정 화면이 폭으로 배치를 고른다(adjudication_view.NARROW_PX = 1200 미만이면 위아래, 15 5-2 의 2번).
+            # 전에는 여기서 1200 미만이면 870 이하로 묶었지만 문턱값을 올려 필요 없어졌다.
             right = max(int(total * ADJ_RIGHT_SHARE), min(total - 320, ADJ_RIGHT_MIN_PX))
-            # 조정 화면은 NARROW_PX 이상이면 목록·고른 건을 나란히 둔다. 그 배치는 넓은 화면(ADJ_SIDE_MIN_PX 이상)에서만
-            # 들어가므로, 그보다 좁으면 위아래 배치가 되게 NARROW_PX 아래로 둔다(실제 창 1366: 900px 에서 오른쪽 밖 48개)
-            from .adjudication_view import NARROW_PX
-            if right < ADJ_SIDE_MIN_PX:
-                right = min(right, NARROW_PX - 30)
             self.hsplit.setSizes([max(1, total - right), right])
         elif self._split_before is not None:
             self.hsplit.setSizes(self._split_before)
@@ -2590,6 +2634,13 @@ class Workbench(QWidget):
         pr = self.origin_view.progress()
         LOG.info("출처 판정: 대상 파일 %d개, 대상 %d건, 판정 %d건", len(targets), pr.total if pr else 0,
                  pr.done if pr else 0)
+
+    def origin_target_refs(self) -> list[dict]:
+        """출처 판정 세션이 지금 실은 대상 파일 [{target_id, chat_ids_sha256, basis, count}] (15 5-2 의 7번).
+        출처 세션이 어느 대상 파일을 봤는지 session.open·잠금에 남기는 쪽(스키마·locking)이 이 값을 받는다. 화면 밖 기록은
+        아직 없다 — 보고서는 지금처럼 origin/ 의 대상 파일 전부를 적는다."""
+        v = self.origin_view
+        return v.target_refs() if v is not None else []
 
     # ---- 단계 완료 표시 (phase.mark)
     def mark_phase_done(self, done: bool | None = None) -> dict | None:
@@ -3191,6 +3242,7 @@ class Workbench(QWidget):
         targets = [copy.deepcopy(s) for s in ph.sample_targets(self.segment_heads(), self._marks)]
         plan = copy.deepcopy(self.relabel_plan)
         idx = self.chat_index
+        self._current_sample_basis = self.segments_digest()     # 잠그기 화면이 다시 견준다(15 5-2 의 12번)
 
         def job(ctx):
             msgs = index_records(idx, mpath) or read_messages(mpath)
@@ -3204,6 +3256,37 @@ class Workbench(QWidget):
                 ids.update(it["chat_id"] for it in man["items"])
             return sorted(ids)
         return job
+
+    def segments_digest(self) -> str:
+        """지금 유효 구간표의 지문: (entity_id, 판 id, 시작, 끝, 분류) 를 정렬해 sha256. 라벨 본문·근거는 넣지 않는다."""
+        rows = sorted((str(s.get("entity_id")), str(s.get("id")), (s.get("body") or {}).get("start_ms"),
+                       (s.get("body") or {}).get("end_ms"), (s.get("body") or {}).get("category"))
+                      for s in self.segment_heads())
+        h = hashlib.sha256()
+        for r in rows:
+            h.update(repr(r).encode("utf-8"))
+            h.update(b"\n")
+        return h.hexdigest()
+
+    def current_sample_recheck(self) -> list[str] | None:
+        """잠그기 화면의 [잠그기] 직전 검사(15 5-2 의 12번): current_sample 을 계산한 뒤 구간표 지문이 바뀌었으면 그 자리에서
+        다시 계산해 새 목록을 돌려준다. 바뀌지 않았거나(또는 재라벨 세션이 아니면) None.
+
+        진행 대화상자가 모달이라 지금 흐름에서는 바뀔 길이 없다 — 앞으로 길이 늘어도 잠금 기록이 구간표와 어긋나지 않게 둔
+        안전장치다. 다시 계산은 UI 스레드에서 돈다(드물고, 블록 표본 몇 개뿐)."""
+        basis = getattr(self, "_current_sample_basis", None)
+        if basis is None or basis == self.segments_digest():
+            return None
+        job = self.current_sample_job()
+        if job is None:
+            return None
+
+        class _Ctx:
+            @staticmethod
+            def check() -> None:
+                return None
+        LOG.info("잠그기 직전 구간표가 바뀌어 current_sample 을 다시 계산함")
+        return job(_Ctx())
 
     # ------------------------------------------------------------ 세션 잠그기 (06 7-1, D-11 7)
     def can_lock(self) -> str | None:
@@ -3452,6 +3535,9 @@ class Workbench(QWidget):
         for w in list(self._jobs.values()):
             self._orphan(w)
         self._jobs.clear()
+        if self._jobs_busy:
+            self._jobs_busy = False
+            self.jobsBusyChanged.emit(False)
         if self.review is not None:
             try:
                 self.review.detach()
