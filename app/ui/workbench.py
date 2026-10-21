@@ -61,10 +61,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Mapping
 
-from PySide6.QtCore import QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
-                               QLineEdit, QMessageBox, QPushButton, QSplitter, QStackedWidget, QVBoxLayout, QWidget)
+                               QLineEdit, QMessageBox, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import jsonl, media
 from .. import project as project_mod
@@ -811,6 +811,18 @@ class _HeldLock:
         return self._lk.getLockInfo() if self._lk is not None and hasattr(self._lk, "getLockInfo") else None
 
 
+def _is_text_input(w) -> bool:
+    """글을 쓰는 칸인가(여기에 커서가 있으면 글자 키를 단축키로 가로채지 않는다)."""
+    from PySide6.QtWidgets import QAbstractSpinBox, QPlainTextEdit, QTextEdit
+    if isinstance(w, (QLineEdit, QPlainTextEdit, QAbstractSpinBox)):
+        return not getattr(w, "isReadOnly", lambda: False)()
+    if isinstance(w, QTextEdit):
+        return not w.isReadOnly()
+    if isinstance(w, QComboBox):
+        return w.isEditable()
+    return False
+
+
 def _set_text(w: QLabel, text: str) -> None:
     if w.text() != text:
         w.setText(text)
@@ -1067,6 +1079,35 @@ class Workbench(QWidget):
         self.media_info.setObjectName("hint")
         self.btn_media = QPushButton(tr("영상 파일 연결…"))
         self.btn_media.clicked.connect(self.choose_and_connect_media)
+        # 재생 조작 단추 줄 (시범 1일차: 단추가 없어 영상을 멈출 길이 단축키뿐이었다). 단추는 포커스를 가져가지 않는다
+        crow = QHBoxLayout()
+        crow.setSpacing(4)
+        self.play_buttons: dict[str, QPushButton] = {}
+
+        def pbtn(key: str, text: str, tip: str, fn) -> QPushButton:
+            b = QPushButton(tr(text))
+            b.setToolTip(tr(tip))
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)   # 칸이 좁아지면 같이 줄어든다(조정 화면 넓히기)
+            b.setMinimumWidth(30)
+            b.clicked.connect(lambda _c=False: (fn(), self.take_keys()))
+            crow.addWidget(b, 1)
+            self.play_buttons[key] = b
+            return b
+        pbtn("back10", "−10초", "10초 뒤로 (Ctrl+←)", lambda: self.step(-BIG_STEP_MS))
+        pbtn("back5", "−5초", "5초 뒤로 (J)", lambda: self.step(-STEP_MS))
+        pbtn("back1", "−1초", "1초 뒤로 (Shift+←)", lambda: self.step(-SMALL_STEP_MS))
+        pbtn("frame_back", "◀|", "1프레임 뒤로 (←)", lambda: self.frame_key(-1))
+        self.btn_play = pbtn("play", "▶ 재생", "재생 / 일시정지 (Space)", self.toggle_play)
+        crow.setStretchFactor(self.btn_play, 2)
+        pbtn("frame_fwd", "|▶", "1프레임 앞으로 (→)", lambda: self.frame_key(1))
+        pbtn("fwd1", "+1초", "1초 앞으로 (Shift+→)", lambda: self.step(SMALL_STEP_MS))
+        pbtn("fwd5", "+5초", "5초 앞으로 (L)", lambda: self.step(STEP_MS))
+        pbtn("fwd10", "+10초", "10초 앞으로 (Ctrl+→)", lambda: self.step(BIG_STEP_MS))
+        crow.addSpacing(12)
+        pbtn("slower", "느리게", "재생 속도 낮추기 ([)", self.speed_down)
+        pbtn("faster", "빠르게", "재생 속도 높이기 (])", self.speed_up)
+        pl.addLayout(crow)
         mrow.addWidget(self.media_info, 1)
         mrow.addWidget(self.btn_media)
         pl.addLayout(mrow)
@@ -1136,6 +1177,19 @@ class Workbench(QWidget):
         if hasattr(self.chat, "context_actions"):
             self.chat.context_actions = self.chat_context_actions     # 오른쪽 메뉴 (14 4-2 의 11)
         self.timeline.seekRequested.connect(self.seek_vod)
+        # 단축키가 먹게: 타임라인·영상을 누르면 키 입력을 작업대로 되돌린다. 영상 클릭은 재생·일시정지(ClipSlicer 습관).
+        # 처음 열 때 글자 칸(채팅 검색)에 커서가 들어가 Space·J·L 이 검색어로 들어가던 문제(시범 1일차)도 같이 막는다.
+        self.timeline.seekRequested.connect(lambda _ms: self.take_keys())
+        if hasattr(self.player, "clicked"):
+            self.player.clicked.connect(lambda: (self.toggle_play(), self.take_keys()))
+        self.setFocusPolicy(Qt.StrongFocus)
+        esc = QShortcut(QKeySequence("Escape"), self.search)
+        esc.setContext(Qt.WidgetShortcut)
+        esc.activated.connect(self.take_keys)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+        QTimer.singleShot(0, self, self.take_keys)
 
         # ---- 분석 보기
         self.analysis_action = QAction(tr("분석 보기 (엔진 반응)"), self)
@@ -2009,7 +2063,46 @@ class Workbench(QWidget):
 
     def _on_playing(self, on: bool) -> None:
         self._playing = bool(on)
+        if hasattr(self, "btn_play"):
+            self.btn_play.setText(tr("⏸ 일시정지") if self._playing else tr("▶ 재생"))
         self._update_status()
+
+    # ---- 키 입력 (시범 1일차 수정)
+    def take_keys(self) -> None:
+        """글자 칸이 아니면 키 입력을 작업대가 받게 한다. 편집 중인 글자 칸에 있으면 건드리지 않는다."""
+        if self._closed:
+            return
+        fw = QApplication.focusWidget()
+        if fw is not None and fw is not self.search and _is_text_input(fw) and self.isAncestorOf(fw):
+            return
+        self.setFocus(Qt.OtherFocusReason)
+
+    def eventFilter(self, obj, ev):  # noqa: N802
+        """한글 입력 상태에서 B·M·J·L·R·K 같은 글자 단축키가 'ㅠ·ㅡ' 로 들어오는 것을 실제 키 위치로 되살린다.
+
+        글자 칸에 커서가 있으면 그대로 둔다(글을 써야 하므로). 수정자(Ctrl·Alt)가 있는 키는 Qt 가 이미 키 코드로 잡는다.
+        """
+        try:
+            if ev.type() == QEvent.Type.KeyPress and not self._closed and self.isVisible():
+                txt = ev.text()
+                if txt and "ㄱ" <= txt[0] <= "ㆎ" and not (ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+                    fw = QApplication.focusWidget()
+                    if fw is not None and _is_text_input(fw):
+                        return False
+                    if fw is not None and fw.window() is not self.window():
+                        return False
+                    vk = int(ev.nativeVirtualKey())
+                    if 0x41 <= vk <= 0x5A:
+                        key = chr(vk)
+                        if ev.modifiers() & Qt.ShiftModifier:
+                            key = "Shift+" + key
+                        s = self.shortcut_map.get(key)
+                        if s is not None and s.isEnabled():
+                            s.activated.emit()
+                            return True
+        except Exception:  # noqa: BLE001
+            return False
+        return False
 
     def _on_player_error(self, msg: str) -> None:
         self._note(tr("플레이어: {0}").format(msg))
@@ -2357,6 +2450,8 @@ class Workbench(QWidget):
 
     def add_boundary_here(self) -> bool:
         """B (02 7-6): ① 구간에서 지금 재생 위치에 경계를 더한다(폼의 모델 층, 실행 취소 200단계)."""
+        if self.mode == ph.BROWSE and ph.SEGMENTS in self.mode_buttons:
+            self.set_mode(ph.SEGMENTS)               # 둘러보기에서 B 를 누르면 ① 구간으로 넘어간다(시범 1일차)
         if self.mode != ph.SEGMENTS or self.segment_form is None:
             self._say(tr("구간 경계 추가(B)는 ① 구간에서 씁니다"))
             return False
