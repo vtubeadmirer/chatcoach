@@ -31,7 +31,8 @@
   고르는 대상 채팅에 이 편집이 고치는 것과 다른 라벨이 이미 있을 때 저장을 막는다(그 라벨을 고쳐야 한다).
 규칙 (저장은 되지만 표시·기록하는 것)
 - 직접·높음은 7-2 재확인('들었다' 고 인정된 회차 min_views 이상)이 없으면 '완료' 가 아니다(질문 15 기본안).
-  result['complete'] = False, warning(recheck_missing). 타임라인은 속이 빈 표시(작업대 몫).
+  result['complete'] = False, warning(recheck_missing). 타임라인은 속이 빈 표시(작업대 몫). D-16 4 로 시범에서는
+  '권장' 이라 저장·잠그기를 막지 않는다(막은 적도 없다 — 표시만 남긴다).
   '들었다' 인정 비율은 기준서 시작값 recheck.heard_min_coverage(없으면 rules.HEARD_MIN_COVERAGE, D-10 6).
 - 직접·높음에서 이어짐을 비우면 경고 줄 continuation_missing(D-10 7, 막지 않음). 운영 기록에도 code
   continuation_missing 으로 남긴다(label-event 스키마 warning code 목록에 넣음, D-11 4).
@@ -41,21 +42,38 @@
 블라인드 (안내서 원칙 3, 03 12장): 이 편집기는 엔진 결과·AI 등급·다른 세션 라벨을 받지도 보이지도 않는다.
 자동 인식 문장은 visibility 가 허락할 때만(라벨링 세션은 토글) [보기] 버튼이 생기고, 켜면 exposed 를 부른다.
 
+빠른 입력 (08 D-16): 편집기 맨 위의 단추 6개(Ctrl+Shift+1~6). 라벨러는 '무엇을 들었나' 만 고른다. 단추 하나가
+- 후보 발화가 없으면 만든다: 시작 = 편집기를 연 순간의 재생 위치(없으면 반응 지점), 끝 = 시작 + 3초.
+  라벨러가 이미 고친 시작·끝은 그대로 둔다.
+- 그 후보를 연결 발화로 두고, 단추에 맞는 증거를 체크한다(시간 창은 지금처럼 앱이 계산).
+- 등급은 rules.grade_conditions 로 정한다(엔진 결과는 쓰지 않는다). 단추가 바라는 등급이 조건을 채우지 않으면
+  아래 등급으로, 그래도 없으면 조건을 채우는 가장 높은 등급으로, 그것도 없으면 불명확. 그래서 늘 '조건과 같음' 이다.
+- 확신도 = 확실함, 근거 = '단추 이름 HH:MM:SS(반응 시각)', 들은 내용이 비었으면 단추 이름.
+- 그다음 저장(save)을 그대로 부른다. 막는 문제가 있으면 저장하지 않고 이유를 보인다(채운 값은 남아 고칠 수 있다).
+- 저장되면 편집기가 닫히고 결과에 status_text('저장: 직접 반응 (채팅 읽고 대답)')가 붙는다(작업대 상태 줄).
+기본 화면은 '딸깍' 만이다: 대상 채팅 한 줄 · 단추 6개 · 취소. 나머지(후보 발화·증거·등급·확신도·근거·이어짐·7-2·메시지)는
+접힌 '자세히 입력' 안에 있다. 라벨러가 직접 펼치거나 접으면 설정(settings.ini)에 기억한다. 빠른 저장이 막히면
+자동으로 펼치고 맨 위에 쉬운 문장 하나로 이유를 보인다(자동 펼침은 기억하지 않는다).
+Enter = 기본 단추 '채팅 읽고 대답'(QUICK_DEFAULT). '자세히 입력' 안에 초점이 있으면 Enter 는 그 칸 몫이고 저장은 Ctrl+Enter.
+등급을 미리 고르지 않는다: 단추를 누르기 전에는 아무 등급도 골라 두지 않는다(D-16 6).
+7-2 두 번 듣기는 D-16 4 로 '권장' 이다: 저장·완료를 막지 않고 미완료 표시(recheck_missing)만 남긴다.
+
 단축키 (02 7-6): Ctrl+1~4 등급, Ctrl+5 반응 미확인, Alt+1~3 확신도, Ctrl+T 근거에 현재 시각, Ctrl+Enter 저장,
-Esc 취소. 수정자 없는 글자 키는 쓰지 않는다(R·[·] 는 review_player.install_shortcuts 가 작업대에 건다).
-시각은 모두 VOD(채팅) 시각 ms 다.
+Esc 취소, Ctrl+Shift+1~6 빠른 입력(D-16). 수정자 없는 글자 키는 쓰지 않는다(R·[·] 는 review_player.install_shortcuts 가
+작업대에 건다). 시각은 모두 VOD(채팅) 시각 ms 다.
 """
 from __future__ import annotations
 
 import copy
 import logging
+import re
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFormLayout, QFrame, QGridLayout, QGroupBox,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFormLayout, QFrame, QGridLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
                                QVBoxLayout, QWidget)
 
@@ -95,6 +113,58 @@ OPS_WARNING_CODES = frozenset({"audio_not_heard", "recheck_missing", "grade_rule
                                "long_silence_signal", "clock_skew", CONTINUATION_MISSING, "other"})
 _KEEP = object()                                 # load_context 에서 '넘기지 않음' 표시(None 과 구분)
 
+QUICK_END_MS = 3_000                             # 빠른 입력의 발화 끝 = 시작 + 3초 (D-16 2)
+
+
+@dataclass(frozen=True)
+class QuickPreset:
+    """빠른 입력 단추 하나(D-16 1). want = 단추가 바라는 등급(조건이 허락할 때만 그 등급)."""
+    key: str
+    label: str
+    evidence: tuple[str, ...]
+    want: str
+    tip: str
+    unclear_cause: str | None = None
+
+
+QUICK_PRESETS: tuple[QuickPreset, ...] = (
+    QuickPreset("nickname", "닉네임 부르고 대답", ("nickname_called",), "direct",
+                "채팅 쓴 사람의 닉네임을 부르고 대답함 → 닉네임 호명(강) · 직접 반응"),
+    QuickPreset("repeat", "채팅 읽고 대답", ("text_repeated",), "direct",
+                "채팅 문구를 소리 내 읽고 대답함 → 문구 되풀이(강) · 직접 반응"),
+    QuickPreset("reference", "채팅 가리키고 대답", ("direct_reference",), "direct",
+                "'이 채팅', '방금 질문' 처럼 그 채팅을 가리키고 대답함 → 직접 가리킴(강) · 직접 반응"),
+    QuickPreset("answer", "질문에 대답", ("answer_form",), "likely",
+                "질문에 맞는 답 + 시간 창 → '비슷한 채팅: 없음' 이면 연결 가능성 높음, 아니면 관련성만 있음"),
+    QuickPreset("topic", "주제만 같음", ("same_topic",), "related_only",
+                "그 채팅과 같은 주제를 말했지만 그 채팅에 대한 대답인지는 모름 → 같은 주제(약) · 관련성만 있음"),
+    QuickPreset("unknown", "어느 채팅인지 모름", (), "unclear",
+                "대답은 했지만 어느 채팅에 한 말인지 가릴 수 없음 → 불명확(비슷한 채팅 여러 개)",
+                unclear_cause="multiple_similar_chats"),
+)
+QUICK_KEYS = tuple(f"Ctrl+Shift+{i}" for i in range(1, len(QUICK_PRESETS) + 1))
+QUICK_DEFAULT = "repeat"                         # Enter 로 저장되는 기본 단추('채팅 읽고 대답')
+DETAIL_PREF_KEY = "reaction_editor/detail_expanded"   # '자세히 입력' 펼침 기억(사용자 설정 settings.ini)
+
+
+def _load_detail_pref() -> bool:
+    try:
+        from ...paths import make_settings
+        v = make_settings().value(DETAIL_PREF_KEY, False)
+    except Exception:  # noqa: BLE001 — 설정을 못 읽으면 접힌 채로
+        return False
+    return v is True or str(v).lower() in ("true", "1")
+
+
+def _save_detail_pref(on: bool) -> None:
+    try:
+        from ...paths import make_settings
+        s = make_settings()
+        s.setValue(DETAIL_PREF_KEY, bool(on))
+        s.sync()
+    except Exception as e:  # noqa: BLE001
+        LOG.debug("설정 저장 실패: %s", type(e).__name__)
+
 
 # ---------------------------------------------------------------------------- 후보 발화 상태
 
@@ -110,6 +180,7 @@ class Candidate:
     time_manual: bool = False
     saved: dict | None = None
     used_asr: bool = False
+    auto_start: bool = False                # 시작이 앱이 채운 값 그대로인가(빠른 입력이 '편집기를 연 위치' 로 바꿔도 됨)
 
     def filled(self) -> bool:
         """무엇이든 적었는가(빈 후보는 저장하지 않고 '반응 미확인' 을 막지도 않는다)."""
@@ -250,6 +321,10 @@ class ReactionEditor(QWidget):
         self._asr_revealed = False
         self._loading = False
         self._last_validation: Validation | None = None
+        self._open_pos_ms: int | None = None     # 편집기를 연 순간의 재생 위치(빠른 입력의 발화 시작, D-16 2)
+        self._quick_auto: dict[str, str] = {}    # 빠른 입력이 마지막으로 채운 글(rationale·heard) — 다른 단추면 바꿔 쓴다
+        self.last_quick: str | None = None       # 마지막으로 누른 빠른 입력 단추 key(저장 성공 여부와 무관)
+        self._status_text: str | None = None     # 빠른 입력 저장 중일 때 결과에 넣을 상태 문장
         self._build()
         self._install_shortcuts()
         self.setEnabled(False)
@@ -272,6 +347,69 @@ class ReactionEditor(QWidget):
         f.setBold(True)
         self.title.setFont(f)
         lay.addWidget(self.title)
+
+        # 빠른 입력 (D-16 1): 무엇을 들었나만 고르면 증거·등급·확신도·근거를 채워 바로 저장한다.
+        # 기본 화면은 '딸깍' 만: 대상 채팅 한 줄 · 단추 6개 · 취소. 나머지는 접힌 '자세히 입력' 안에 있다.
+        self.quick_error = QLabel("")            # 빠른 저장이 막혔을 때 쉬운 문장 하나
+        self.quick_error.setObjectName("quick_error")
+        self.quick_error.setWordWrap(True)
+        self.quick_error.setTextFormat(Qt.PlainText)
+        self.quick_error.setStyleSheet("color: #b00020; font-weight: bold;")
+        self.quick_error.hide()
+        lay.addWidget(self.quick_error)
+        self.quick_target = QLabel("")           # 대상 채팅 한 줄(시각 · 시청자 · 본문)
+        self.quick_target.setObjectName("quick_target")
+        self.quick_target.setWordWrap(True)
+        self.quick_target.setTextFormat(Qt.PlainText)
+        lay.addWidget(self.quick_target)
+        qbox = QGroupBox(tr("어떻게 대답했나요?"))       # 제목은 짧게(그룹 제목은 줄바꿈이 없어 칸 폭을 넓힌다)
+        qbox.setObjectName("quick_input")
+        ql = QVBoxLayout(qbox)
+        qhint = QLabel(tr("누르면 바로 저장됩니다. 채팅을 읽고 대답했으면 Enter."))
+        qhint.setWordWrap(True)
+        ql.addWidget(qhint)
+        qgrid = QGridLayout()                    # 2칸씩 — 1366×768 편집기 칸(약 470px)에 들어가게(11 4-2 의 2)
+        self.quick_buttons: dict[str, QPushButton] = {}
+        for i, p in enumerate(QUICK_PRESETS):
+            default = p.key == QUICK_DEFAULT
+            b = QPushButton(f"{i + 1}. {tr(p.label)}" + ("  ⏎" if default else ""))
+            b.setObjectName(f"quick_{p.key}")
+            b.setToolTip(f"{tr(p.tip)} ({QUICK_KEYS[i]}{' · Enter' if default else ''})")
+            b.setMinimumHeight(40)
+            bf = QFont(b.font())
+            bf.setBold(True)
+            b.setFont(bf)
+            if default:                          # 기본 단추: 눈에 띄게(Enter 로 저장)
+                b.setDefault(True)
+                b.setStyleSheet("QPushButton { border: 2px solid #1a73e8; border-radius: 4px; padding: 4px; }")
+            b.clicked.connect(lambda _c=False, k=p.key: self.quick_input(k))
+            self.quick_buttons[p.key] = b
+            qgrid.addWidget(b, i // 2, i % 2)
+        ql.addLayout(qgrid)
+        qrow = QHBoxLayout()
+        self.quick_cancel = QPushButton(tr("취소 (Esc)"))
+        self.quick_cancel.setObjectName("quick_cancel")
+        self.quick_cancel.setToolTip(tr("대답이 아니면 저장하지 않고 닫습니다"))
+        self.quick_cancel.clicked.connect(self.cancel)
+        qrow.addWidget(self.quick_cancel)
+        qrow.addStretch(1)
+        self.detail_toggle = QPushButton(tr("자세히 입력 ▸"))
+        self.detail_toggle.setObjectName("detail_toggle")
+        self.detail_toggle.setCheckable(True)
+        self.detail_toggle.setFlat(True)
+        self.detail_toggle.toggled.connect(self._on_detail_toggled)
+        qrow.addWidget(self.detail_toggle)
+        ql.addLayout(qrow)
+        lay.addWidget(qbox)
+
+        # 자세히 입력 (접힘): 지금까지의 화면 전부. 아래 lay 는 이 칸의 레이아웃이다
+        self.detail = QWidget()
+        self.detail.setObjectName("detail")
+        top_lay = lay
+        lay = QVBoxLayout(self.detail)
+        lay.setContentsMargins(0, 0, 0, 0)
+        top_lay.addWidget(self.detail)
+        top_lay.addStretch(1)
 
         # 반응 지점
         row = QHBoxLayout()
@@ -482,9 +620,10 @@ class ReactionEditor(QWidget):
         self.msg.setWordWrap(True)
         self.msg.setTextFormat(Qt.PlainText)
         lay.addWidget(self.msg)
-        lay.addStretch(1)
 
-        brow = QHBoxLayout()
+        self.detail_buttons = QWidget()          # 저장·취소 줄도 '자세히 입력' 을 펼쳤을 때만
+        brow = QHBoxLayout(self.detail_buttons)
+        brow.setContentsMargins(6, 0, 6, 6)
         self.save_btn = QPushButton(tr("저장 (Ctrl+Enter)"))
         self.cancel_btn = QPushButton(tr("취소 (Esc)"))
         self.save_btn.clicked.connect(self.save)
@@ -492,7 +631,54 @@ class ReactionEditor(QWidget):
         brow.addWidget(self.save_btn)
         brow.addWidget(self.cancel_btn)
         brow.addStretch(1)
-        outer.addLayout(brow)
+        outer.addWidget(self.detail_buttons)
+        self._loading = True
+        try:
+            self.detail_toggle.setChecked(_load_detail_pref())
+        finally:
+            self._loading = False
+        self._apply_detail(self.detail_toggle.isChecked())
+
+    # ---------------------------------------------------------------- 자세히 입력 접기·펴기
+    def _on_detail_toggled(self, on: bool) -> None:
+        self._apply_detail(on)
+        if not self._loading:
+            _save_detail_pref(on)                # 라벨러가 직접 바꾼 것만 기억한다(자동 펼침은 기억하지 않음)
+
+    def _apply_detail(self, on: bool) -> None:
+        self.detail.setVisible(bool(on))
+        self.detail_buttons.setVisible(bool(on))
+        self.detail_toggle.setText(tr("자세히 입력 ▾") if on else tr("자세히 입력 ▸"))
+
+    def detail_expanded(self) -> bool:
+        return self.detail_toggle.isChecked()
+
+    def set_detail_expanded(self, on: bool, *, remember: bool = False) -> None:
+        """'자세히 입력' 을 펼치거나 접는다. remember=True 면 설정에 남긴다(단추를 누른 것과 같음)."""
+        self._loading = not remember
+        try:
+            self.detail_toggle.setChecked(bool(on))
+        finally:
+            self._loading = False
+        self._apply_detail(bool(on))
+
+    def _quick_fail(self, text: str) -> None:
+        """빠른 저장이 막혔다: '자세히 입력' 을 펴고 맨 위에 쉬운 문장 하나."""
+        self.set_detail_expanded(True)
+        self.quick_error.setText(text)
+        self.quick_error.show()
+
+    def keyPressEvent(self, ev):  # noqa: N802
+        """Enter = 기본 빠른 입력('채팅 읽고 대답'). '자세히 입력' 안의 칸에 커서가 있으면 그 칸 몫이다(거기서는
+        Ctrl+Enter 가 저장). 글자 칸은 Enter 를 부모로 넘기므로 여기서 초점 위치를 본다."""
+        if (ev.key() in (Qt.Key_Return, Qt.Key_Enter) and self._open
+                and not (ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier))):
+            fw = QApplication.focusWidget() or self.focusWidget()
+            if fw is None or not (fw is self.detail or self.detail.isAncestorOf(fw)):
+                ev.accept()
+                self.quick_input(QUICK_DEFAULT)
+                return
+        super().keyPressEvent(ev)
 
     def _install_shortcuts(self) -> None:
         def sc(seq, fn):
@@ -505,6 +691,8 @@ class ReactionEditor(QWidget):
             self._shortcuts.append(sc(f"Ctrl+{i}", lambda gg=g: self.set_grade(gg)))
         for i, c in enumerate(CONFIDENCES, start=1):
             self._shortcuts.append(sc(f"Alt+{i}", lambda cc=c: self.set_confidence(cc)))
+        for key, p in zip(QUICK_KEYS, QUICK_PRESETS):
+            self._shortcuts.append(sc(key, lambda k=p.key: self.quick_input(k)))
         self._shortcuts.append(sc("Ctrl+T", self.insert_time))
         self._shortcuts.append(sc("Ctrl+Return", self.save))
         self._shortcuts.append(sc("Ctrl+Enter", self.save))
@@ -616,36 +804,42 @@ class ReactionEditor(QWidget):
     def is_open(self) -> bool:
         return self._open
 
-    def open_for(self, chat_id: str | None, reaction_vod_ms: int | None, *, sample_ref: dict | None = None) -> None:
+    def open_for(self, chat_id: str | None, reaction_vod_ms: int | None, *, sample_ref: dict | None = None,
+                 open_pos_ms: int | None = None) -> None:
         """새 반응 편집. chat_id 를 주면 그 채팅이 대상, 없으면 후보 채팅 목록에서 고른다(02 7-3).
 
-        반응 지점이 없으면(채팅 더블클릭) 지금 위치를 쓴다. sample_ref 를 주면 3단계(표본) 입력이다.
+        반응 지점이 없으면 지금 위치를 쓴다. sample_ref 를 주면 3단계(표본) 입력이다.
+        open_pos_ms: 편집기를 열기 직전의 재생 위치(라벨러가 멈춘 자리, D-16 2). 작업대가 채팅 더블클릭으로 영상을
+            채팅 앞으로 옮긴 뒤 열 때 넘긴다. 주지 않으면 지금 재생 위치.
         """
-        if reaction_vod_ms is None and self._position_fn is not None:
-            try:
-                reaction_vod_ms = int(self._position_fn())
-            except Exception:  # noqa: BLE001
-                reaction_vod_ms = None
+        open_pos = int(open_pos_ms) if isinstance(open_pos_ms, int) and not isinstance(open_pos_ms, bool) \
+            else self._position_now()
+        if reaction_vod_ms is None:
+            reaction_vod_ms = self._position_now()
         self._reset_state()
         self._reaction_ms = None if reaction_vod_ms is None else int(reaction_vod_ms)
+        self._open_pos_ms = open_pos if open_pos is not None else self._reaction_ms
         self._raw_click_ms = self._reaction_ms
         self._entry = "from_sample" if sample_ref else "from_utterance"
         self._sample_ref = copy.deepcopy(sample_ref) if sample_ref else None
         start = self._reaction_ms
-        self._cands = [Candidate(start_ms=start)]
+        self._cands = [Candidate(start_ms=start, auto_start=True)]
         self._cur = 0
         self._linked = 0
         self._begin(chat_id)
         self.title.setText(tr("반응 라벨 편집 — 새 반응"))
 
     def open_existing(self, reaction: Mapping, *, utterances: Mapping[str, Mapping] | None = None,
-                      continuation: Mapping | None = None, video_checks: Sequence[Mapping] = ()) -> None:
+                      continuation: Mapping | None = None, video_checks: Sequence[Mapping] = (),
+                      open_pos_ms: int | None = None) -> None:
         """이미 저장된 반응을 고친다(재확인 포함). utterances: utterance entity_id → 현재 판 레코드.
 
         저장하면 같은 entity_id 의 새 판(supersedes = 지금 판)이 된다. 재확인 뒤 판단이 바뀌면 처음 판단을
         first_judgment 로 복사하고 changed_on_recheck 를 켠다(안내서 7-2).
         """
         b = dict(reaction.get("body") or {})
+        open_pos = int(open_pos_ms) if isinstance(open_pos_ms, int) and not isinstance(open_pos_ms, bool) \
+            else self._position_now()
         self._reset_state()
         self._existing = dict(reaction)
         self._saved_reaction = dict(reaction)
@@ -669,7 +863,8 @@ class ReactionEditor(QWidget):
             if uid and uid == b.get("linked_utterance_id"):
                 linked = i
         if not cands:
-            cands = [Candidate(start_ms=self._reaction_ms)]
+            cands = [Candidate(start_ms=self._reaction_ms, auto_start=True)]
+        self._open_pos_ms = open_pos if open_pos is not None else self._reaction_ms
         self._cands, self._cur, self._linked = cands, 0, linked
         self._begin(b.get("chat_id"), similar=b.get("similar_chat_ids") or [])
         self._loading = True
@@ -689,7 +884,24 @@ class ReactionEditor(QWidget):
         self.title.setText(tr("반응 라벨 편집 — 고치기·재확인"))
         self._recompute()
 
+    def _position_now(self) -> int | None:
+        """지금 재생 위치(VOD ms). 모르면 None."""
+        if self._position_fn is None:
+            return None
+        try:
+            return int(self._position_fn())
+        except Exception:  # noqa: BLE001
+            return None
+
+    def open_position(self) -> int | None:
+        """편집기를 연 순간의 재생 위치(빠른 입력의 발화 시작, D-16 2). 재생 위치를 몰랐으면 반응 지점."""
+        return self._open_pos_ms
+
     def _reset_state(self) -> None:
+        self._quick_auto = {}
+        self.last_quick = None
+        self.quick_error.hide()
+        self.set_detail_expanded(_load_detail_pref())    # 열 때마다 라벨러가 고른 펼침 상태로(자동 펼침은 되돌림)
         self._existing = None
         self._saved_reaction = None
         self._prior_checks = []
@@ -800,6 +1012,14 @@ class ReactionEditor(QWidget):
         if sk:
             parts.append(tr("후원·시스템 등 {0}건은 목록에서 뺌").format(sk))
         self.target_info.setText(" · ".join(parts))
+        # 빠른 입력 화면의 대상 채팅 한 줄
+        i = d.index_of(self._target) if (self._target and d is not None) else None
+        if i is not None:
+            self.quick_target.setText(tr("채팅: {0}  {1}  {2}").format(
+                fmt_time(d.times[i], frac_digits=0, always_hours=True), fmt_viewer_no(d.vnos[i]),
+                clean_line(d.texts[i])[:80]))
+        else:
+            self.quick_target.setText(tr("채팅: 아직 고르지 않음 ('자세히 입력' 의 목록에서 고르세요)"))
 
     def target_chat_id(self) -> str | None:
         return self._target
@@ -878,7 +1098,7 @@ class ReactionEditor(QWidget):
 
     def remove_candidate(self) -> None:
         if len(self._cands) <= 1:
-            self._cands = [Candidate(start_ms=self._reaction_ms)]
+            self._cands = [Candidate(start_ms=self._reaction_ms, auto_start=True)]
             self._cur = 0
             self._linked = 0
         else:
@@ -921,7 +1141,10 @@ class ReactionEditor(QWidget):
         if not (0 <= self._cur < len(self._cands)):
             return
         c = self._cands[self._cur]
-        c.start_ms = parse_time(self.utt_start.text())
+        start = parse_time(self.utt_start.text())
+        if start != c.start_ms:
+            c.auto_start = False                 # 라벨러가 시작을 고쳤다(빠른 입력이 덮어쓰지 않는다)
+        c.start_ms = start
         c.end_ms = parse_time(self.utt_end.text())
         c.heard_text = self.heard.text()
         c.evidence = self.evidence.value()
@@ -1062,6 +1285,116 @@ class ReactionEditor(QWidget):
         self.heard_count.setText(str(len(t)))
         self._recompute()
         return True
+
+    # ================================================================ 빠른 입력 (D-16)
+    def quick_input(self, key: str) -> dict | None:
+        """빠른 입력 단추(D-16 1). 후보 발화·연결·증거·등급·확신도·근거·들은 내용을 채우고 save() 를 부른다.
+
+        돌려주는 값은 save() 와 같다(막히면 None — 채운 값은 남고 이유가 메시지 칸에 보인다).
+        등급은 rules.grade_conditions 로만 정한다(_quick_grade). 엔진 결과는 이 편집기에 오지 않는다.
+        """
+        if not self._open:
+            return None
+        p = next((x for x in QUICK_PRESETS if x.key == key), None)
+        if p is None:
+            return None
+        self.last_quick = p.key
+        self.quick_error.hide()
+        if not self._target:
+            self._quick_fail(tr("어느 채팅에 대한 대답인지 먼저 골라 주세요. 아래 목록에서 그 채팅을 한 번 누르고 다시 단추를 누르면 됩니다."))
+            return None
+        self._store_cand_ui()
+        if not self._cands:
+            self._cands = [Candidate(start_ms=self._reaction_ms, auto_start=True)]
+            self._linked = 0
+        idx = self._linked if 0 <= self._linked < len(self._cands) else 0
+        self._cur = idx
+        c = self._cands[idx]
+        # 발화 시작·끝 (D-16 2): 라벨러가 고친 값은 그대로 둔다
+        start = self._open_pos_ms if self._open_pos_ms is not None else self._reaction_ms
+        # 반응 시각도 멈춘 자리로 (빠른 입력은 '대답을 듣고 멈춘 순간' 이 반응 지점이다 — 채팅 시각을 넣으면 지연이 0 이 된다)
+        if self._open_pos_ms is not None:
+            self._reaction_ms = int(self._open_pos_ms)
+        # '질문에 대답' 은 라벨러가 이 채팅을 대답 대상으로 고른 것이다: 비슷한 채팅을 따로 체크하지 않았으면 '없음' 으로 본다
+        if p.key == "answer" and not self.similar_ids() and self.similar_box.currentData() is None:
+            i_none = _find_data(self.similar_box, True)
+            if i_none >= 0:
+                self.similar_box.setCurrentIndex(i_none)
+        if c.start_ms is None or (c.auto_start and start is not None):
+            c.start_ms = start
+            c.auto_start = True
+        if c.end_ms is None and c.start_ms is not None:
+            c.end_ms = int(c.start_ms) + QUICK_END_MS
+        # 들은 내용 (D-16 3): 비었거나 앞서 빠른 입력이 넣은 글이면 단추 이름
+        label = tr(p.label)
+        if not c.heard_text.strip() or c.heard_text == self._quick_auto.get("heard") or _is_quick_text(c.heard_text):
+            c.heard_text = label[:HEARD_MAX]
+            c.heard_source = "typed"
+            c.pasted_text = None
+            self._quick_auto["heard"] = c.heard_text
+        # 증거: 단추의 증거를 체크한다(이미 체크한 다른 증거는 그대로). 시간 창은 앱 계산(_sync_time_window)
+        ev = normalize_evidence(c.evidence)
+        for k in p.evidence:
+            if not ev[k]["present"]:
+                ev[k] = {"present": True, "at_ms": c.start_ms}
+        c.evidence = ev
+        self._linked = idx
+        self._load_cand_ui()                     # 화면에 싣고 시간 창을 다시 계산한다
+        self._store_cand_ui()
+        # 등급 — 조건 충족 규칙으로만
+        gc = self.conditions()
+        g = self._quick_grade(p, gc)
+        self._loading = True
+        try:
+            self._set_grade_ui(g)
+            if g == "unclear":
+                cause = p.unclear_cause or gc.unclear_cause or "other"
+                self.unclear_box.setCurrentIndex(_find_data(self.unclear_box, cause))
+            self._set_conf_ui("certain")
+            rat = self.rationale.text().strip()
+            if not rat or rat == self._quick_auto.get("rationale") or _is_quick_text(rat):
+                t = self._reaction_ms if self._reaction_ms is not None else c.start_ms
+                text = f"{label} {_hhmmss(t)}" if t is not None else label
+                self.rationale.setText(text[:RATIONALE_MAX])
+                self._quick_auto["rationale"] = self.rationale.text().strip()
+        finally:
+            self._loading = False
+        self._recompute()
+        self._update_review_window()
+        self._status_text = tr("저장: {0} ({1})").format(tr(GRADE_LABELS[g]), label)
+        try:
+            res = self.save()
+        finally:
+            self._status_text = None
+        if res is None:
+            v = self._last_validation
+            why = (v.errors[0] if v is not None and v.errors else self.msg.text().strip()) or tr("알 수 없는 문제")
+            self._quick_fail(tr("저장하지 못했습니다. {0}. 아래 '자세히 입력' 에서 고친 뒤 저장(Ctrl+Enter)하세요.")
+                             .format(why.lstrip("✗! ").rstrip(". ")))
+        return res
+
+    def _quick_grade(self, p: QuickPreset, gc: rules.GradeConditions) -> str:
+        """단추가 바라는 등급을 조건이 허락하면 그 등급. 아니면 그 아래에서 허락되는 첫 등급, 그래도 없으면 허락되는 가장
+        높은 등급, 끝으로 불명확(후보가 있으면 늘 고를 수 있다, 01 3-1). 고른 등급은 늘 조건과 같음(consistent)이다."""
+        if p.want == "unclear":
+            return "unclear"
+        li = self._linked_filled_index()
+        linked = gc.per_candidate[li] if (li is not None and li < len(gc.per_candidate)) else None
+
+        def ok(g: str) -> bool:
+            if g not in gc.eligible_grades:
+                return False
+            if g == "direct":
+                return rules.direct_allowed(linked)
+            if g == "likely":
+                return rules.likely_allowed(linked)
+            return True
+
+        ranked = [g for g in GRADES if g != "unclear"]
+        for g in ranked[ranked.index(p.want):] + ranked:
+            if ok(g):
+                return g
+        return "unclear"
 
     # ================================================================ 등급·확신도·근거
     def set_grade(self, g: str | None) -> None:
@@ -1235,7 +1568,8 @@ class ReactionEditor(QWidget):
         if self.review is not None and heard == 0:
             warns.append(("audio_not_heard", tr("확인 범위를 소리로 다 듣지 않았습니다")))
         if g in LINKED_GRADES and heard < self._min_views:
-            warns.append(("recheck_missing", tr("직접·높음은 두 번 들어야 완료입니다 (지금 {0}/{1}) — 저장은 되지만 '미완료'")
+            # D-16 4: 시범에서는 '권장'. 막지 않고 미완료 표시(경고·속이 빈 마커)만 남긴다
+            warns.append(("recheck_missing", tr("7-2 두 번 듣기 권장 (지금 {0}/{1}) — 저장은 되고 '미완료' 로 표시됩니다")
                           .format(heard, self._min_views)))
         v = Validation(errs, warns, gc, gvs)
         self._last_validation = v
@@ -1507,8 +1841,10 @@ class ReactionEditor(QWidget):
             return None
         result["complete"] = self.is_complete()
         result["written"] = list(self._written)
+        if self._status_text:
+            result["status_text"] = self._status_text     # 빠른 입력: 작업대 상태 줄에 보일 한 줄
         if not result["complete"]:
-            self.msg.setText(tr("저장했습니다 — 재확인이 남아 '미완료' 입니다"))
+            self.msg.setText(tr("저장했습니다 — 7-2 두 번 듣기(권장)가 남아 '미완료' 로 표시됩니다"))
         self.close_editor()
         self.finished.emit(result)
         return result
@@ -1590,6 +1926,21 @@ def _find_data(box: QComboBox, value) -> int:
     return 0
 
 
+def _hhmmss(ms: int) -> str:
+    """VOD ms → 'HH:MM:SS' (빠른 입력 근거의 시각. parse_timestamps 가 읽는 모양)."""
+    s = max(0, int(ms)) // 1000
+    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+_QUICK_TEXT_RE = re.compile(r"^(?:%s)(?: \d{2}:\d{2}:\d{2})?$" % "|".join(re.escape(p.label) for p in QUICK_PRESETS))
+
+
+def _is_quick_text(text: str) -> bool:
+    """빠른 입력이 넣은 글('단추 이름' 또는 '단추 이름 HH:MM:SS')인가. 그런 글은 다른 단추를 누르면 바꿔 쓴다.
+    라벨러가 직접 쓴 글은 건드리지 않는다."""
+    return bool(_QUICK_TEXT_RE.match((text or "").strip()))
+
+
 def _err_text(e: Exception) -> str:
     probs = getattr(e, "problems", None)
     if isinstance(probs, list) and probs:
@@ -1598,4 +1949,5 @@ def _err_text(e: Exception) -> str:
 
 
 __all__ = ["ReactionEditor", "Candidate", "Validation", "find_segment", "utterance_body", "normalize_coverage",
-           "review_window_in_media", "GRADES", "GRADE_LABELS", "UNCONFIRMED", "CONFIDENCES", "CONTINUATION_MISSING"]
+           "review_window_in_media", "GRADES", "GRADE_LABELS", "UNCONFIRMED", "CONFIDENCES", "CONTINUATION_MISSING",
+           "QUICK_PRESETS", "QUICK_KEYS", "QUICK_END_MS", "QuickPreset"]

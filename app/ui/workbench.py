@@ -90,6 +90,9 @@ WAVE_MAX_POINTS = 20_000
 ENGINE_TRACK = "engine"
 LABEL_TRACK = "labels"            # timeline.TRACK_ORDER 의 라벨 트랙
 PRIMARY_TRACK = "primary"         # 분석 세션의 잠긴 1차 라벨 트랙 (08 D-09 5, 엔진 트랙과 다른 색)
+# 라벨링 세션 채팅 표의 '이미 매김' 표시(08 D-16, 초록). 자기 세션 라벨만
+OWN_MARK_TEXT = {"direct": "✓ 직접", "likely": "✓ 높음", "related_only": "✓ 관련", "unclear": "✓ 불명확",
+                 "unconfirmed": "✓ 미확인"}
 RELABEL_KINDS = ("relabel_same", "relabel_second")
 # 엔진 등급 → timeline.MARK_STYLES 의 종류 (강한 판정은 채운 표시, 약한 판정은 속이 빈 표시)
 ENGINE_MARK_KIND = {"direct": "engine", "likely": "engine", "related_only": "engine_weak", "unclear": "engine_weak"}
@@ -1591,6 +1594,35 @@ class Workbench(QWidget):
             else:
                 self.timeline.set_markers(LABEL_TRACK, marks)
             self._label_marks_now = marks
+        if "reaction" in kinds:
+            self._push_own_chat_marks()
+
+    def own_chat_marks(self) -> dict[str, str]:
+        """라벨링 세션(1차·재라벨)이 자기 세션에서 매긴 현재 유효 반응 라벨 → 채팅 표 표시 chat_id → '✓ 직접' 등(08 D-16).
+        다른 세션의 라벨은 넣지 않는다(블라인드): session_id 가 이 세션인 머리만. 라벨링 세션이 아니면 빈 dict."""
+        from ..core import visibility as vis
+        if self.session_kind not in vis.LABELING_SESSIONS:
+            return {}
+        sid = getattr(self.session, "session_id", None)
+        out: dict[str, str] = {}
+        for r in self._label_heads["reaction"].values():
+            b = r.get("body") or {}
+            cid = b.get("chat_id")
+            if not isinstance(cid, str) or (sid is not None and r.get("session_id") not in (None, sid)):
+                continue
+            g = b.get("grade") if b.get("result") == "graded" else "unconfirmed"
+            out[cid] = OWN_MARK_TEXT.get(g, "✓")
+        return out
+
+    def _push_own_chat_marks(self) -> None:
+        """채팅 표에 이 세션이 이미 매긴 채팅을 초록으로(저장·빠른 저장·Ctrl+Z·다시 열기마다 부른다)."""
+        from ..core import visibility as vis
+        if self.session_kind not in vis.LABELING_SESSIONS or not hasattr(self.chat, "set_label_marks"):
+            return
+        try:
+            self.chat.set_label_marks(self.own_chat_marks(), own=True)
+        except TypeError:                     # own 인자를 모르는 대역 채팅 칸
+            pass
 
     def _patch_label_marks(self, old: list[tuple[int, str]], new: list[tuple[int, str]]) -> bool:
         """old → new 의 차이(같은 (시각, 종류) 는 개수로 셈)만 타임라인에 반영한다. 못 하면 False(부르는 쪽이 전체)."""
@@ -1831,6 +1863,7 @@ class Workbench(QWidget):
             self.editor.load_context(chats=self._editor_chats())
         if self._primary_chats and hasattr(self.chat, "set_label_marks") and self.primary_view_allowed():
             self.chat.set_label_marks(dict(self._primary_chats))   # 채팅이 store 보다 늦게 실렸을 때
+        self._push_own_chat_marks()                                  # 라벨링 세션: 자기 라벨 초록 표시(08 D-16)
         self._update_status(full=True)
 
     def _on_media_checked(self, res, err: str) -> None:
@@ -2123,9 +2156,11 @@ class Workbench(QWidget):
             self._set_vod(vod_ms)
 
     def _on_chat_activated(self, chat_id: str, vod_ms: int) -> None:
+        paused_at = self._vod_pos            # 옮기기 전 재생 위치 = 라벨러가 대답을 듣고 멈춘 자리(D-16 2, 빠른 입력의 발화 시작)
         self.seek_vod(int(vod_ms) - SEEK_LEAD_MS)
         if self.mode == ph.REACTIONS and not self.is_editing():
-            self.open_reaction_editor(chat_id, int(vod_ms))      # 02 7-3: 채팅 더블클릭 → 편집 상태
+            self.open_reaction_editor(chat_id, int(vod_ms),       # 02 7-3: 채팅 더블클릭 → 편집 상태
+                                      open_pos_ms=paused_at if _is_int(paused_at) else None)
 
     def step(self, delta_ms: int) -> None:
         self.seek_vod(self._vod_pos + int(delta_ms))
@@ -2846,8 +2881,10 @@ class Workbench(QWidget):
         self.open_reaction_editor(sel, self._vod_pos)
 
     def open_reaction_editor(self, chat_id: str | None, reaction_vod_ms: int | None, *,
-                             sample_ref: dict | None = None, existing: dict | None = None) -> bool:
-        """반응 편집 상태로 들어간다(오른쪽 칸 = 편집기). 단계 순서가 막혀 있으면 False."""
+                             sample_ref: dict | None = None, existing: dict | None = None,
+                             open_pos_ms: int | None = None) -> bool:
+        """반응 편집 상태로 들어간다(오른쪽 칸 = 편집기). 단계 순서가 막혀 있으면 False.
+        open_pos_ms: 열기 직전 재생 위치(빠른 입력의 발화 시작, D-16 2). 없으면 편집기가 지금 위치를 쓴다."""
         if self.mode not in (ph.REACTIONS, ph.SAMPLES):
             return False
         if self.is_editing():
@@ -2873,9 +2910,10 @@ class Workbench(QWidget):
             checks = [r for r in self._label_heads["video_check"].values()
                       if (r.get("body") or {}).get("target_entity_id") == eid]
             ed.open_existing(copy.deepcopy(existing), utterances=copy.deepcopy(utt),
-                             continuation=copy.deepcopy(cont), video_checks=copy.deepcopy(checks))
+                             continuation=copy.deepcopy(cont), video_checks=copy.deepcopy(checks),
+                             open_pos_ms=open_pos_ms)
         else:
-            ed.open_for(chat_id, reaction_vod_ms, sample_ref=sample_ref)
+            ed.open_for(chat_id, reaction_vod_ms, sample_ref=sample_ref, open_pos_ms=open_pos_ms)
         self.right.setCurrentWidget(ed)
         ed.setFocus(Qt.OtherFocusReason)
         return True
@@ -2888,7 +2926,9 @@ class Workbench(QWidget):
         self._leave_editor()
         if self.mode == ph.SAMPLES and self.queue is not None and isinstance(rec, dict):
             self.queue.mark_saved(rec)
-        if isinstance(result, dict) and not result.get("complete", True):
+        if isinstance(result, dict) and result.get("status_text"):
+            self._say(str(result["status_text"]))            # 빠른 입력(D-16): '저장: 직접 반응 (채팅 읽고 대답)'
+        elif isinstance(result, dict) and not result.get("complete", True):
             self._say(tr("저장했습니다 — 7-2 재확인이 남아 타임라인에 속이 빈 표시로 남습니다"))
         else:
             self._say(tr("반응 라벨을 저장했습니다"))

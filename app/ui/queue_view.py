@@ -26,6 +26,8 @@
     덮어쓰지 않게). 화면에는 '② 라벨 있음' 만 보이고 등급·근거는 편집기를 열어야 보인다.
   - '반응 미확인' 과 '판단 불가' 는 여기서 바로 reaction 초안(result=unconfirmed)을 save 콜백으로 넘긴다.
     판단 불가 = result unconfirmed + confidence undeterminable (안내서 5장: 판정 자체를 못 내림).
+    단추 하나로 저장된다(08 D-16): 확신도를 안 골랐으면 확실함, 근거가 비었으면 '대답 없음 HH:MM:SS'
+    (판단 불가는 '소리로 판단 못 함 HH:MM:SS'). 시각은 표본 채팅 시각. 라벨 형식은 그대로다.
   - 저장하면 다음 표본으로 간다(02 7-4). 들어가면 7-2 범위 [채팅 − pre_roll, 채팅 + post_roll] 반복·자동 재생.
     아직 후보 발화가 없으니 '발화 끝' 대신 채팅 시각을 쓴다(반응 편집기가 발화를 정하면 그쪽이 범위를 다시 잡는다).
   - 파일에 쓰지 않는다. 라벨은 save(draft) 콜백(store 경유), 매니페스트 파일은 아래 `write_manifest_file` 을
@@ -630,16 +632,28 @@ class QueueView(QWidget):
         return ctx
 
     def judge_unconfirmed(self) -> dict | None:
-        """반응 미확인 저장 (확신도는 고른 것. 판단 불가를 골랐으면 판단 불가로 저장)."""
+        """반응 미확인 저장. 단추 하나로 저장된다(08 D-16, '딸깍'): 확신도를 고르지 않았으면 확실함, 근거가 비었으면
+        '대답 없음 HH:MM:SS(채팅 시각)'. 고른 확신도·적은 근거는 그대로 쓴다(판단 불가를 골랐으면 판단 불가로 저장)."""
         c = self.confidence()
         if c is None:
-            self._say(tr("확신도를 고르세요 (Alt+1 확실함 · Alt+2 아마도 · Alt+3 판단 불가)"))
-            return None
+            c = "certain"
+            self.set_confidence(c)
+        self._auto_rationale(tr("대답 없음"))
         return self._save_unconfirmed(c)
 
     def judge_undeterminable(self) -> dict | None:
+        """판단 불가로 저장. 근거가 비었으면 '소리로 판단 못 함 HH:MM:SS'."""
         self.set_confidence("undeterminable")
+        self._auto_rationale(tr("소리로 판단 못 함"))
         return self._save_unconfirmed("undeterminable")
+
+    def _auto_rationale(self, text: str) -> None:
+        """근거 칸이 비었으면 '문구 HH:MM:SS(표본 채팅 시각)' 를 넣는다. 저장이 막힐 때(표본 없음 등)는 건드리지 않는다."""
+        if self.rationale.text().strip() or self._blocked_reason():
+            return
+        it = self.current_item()
+        s = max(0, int(it["t_ms"])) // 1000
+        self.rationale.setText(f"{text} {s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"[:RATIONALE_MAX])
 
     def _save_unconfirmed(self, conf: str) -> dict | None:
         why = self._blocked_reason()

@@ -62,6 +62,8 @@ COLOR_DONATION = QColor("#e0b252")
 COLOR_STREAMER = QColor("#64b5f6")
 COLOR_LABEL_BG = QColor("#3a2a44")      # 잠긴 1차 라벨이 있는 행 (분석 세션만, 08 D-09 5 — 엔진 청록과 다른 보라)
 COLOR_LABEL_FG = QColor("#ce93d8")
+COLOR_OWN_BG = QColor("#1f3a28")        # 이 라벨링 세션이 이미 매긴 채팅 (08 D-16 — 분석 보라·엔진 청록과 다른 초록)
+COLOR_OWN_FG = QColor("#81c784")
 
 
 # ── 순수 도우미 ───────────────────────────────────────────────────────────
@@ -222,9 +224,12 @@ class ChatTableModel(QAbstractTableModel):
         self.data_ = ChatData([])
         self.rows: Sequence[int] = range(0)
         self.hl_src = -1               # 재생 위치 행(원본 인덱스), 없으면 -1
-        self.marks: dict[int, str] = {}  # 원본 인덱스 → 사람 라벨 표시(분석 세션의 잠긴 1차 라벨만, set_label_marks)
+        self.marks: dict[int, str] = {}  # 원본 인덱스 → 사람 라벨 표시(set_label_marks)
+        self.marks_own = False           # True = 이 라벨링 세션 자기 라벨(초록), False = 분석 세션의 잠긴 1차 라벨(보라)
         self._label_bg = QBrush(COLOR_LABEL_BG)
         self._label_fg = QBrush(COLOR_LABEL_FG)
+        self._own_bg = QBrush(COLOR_OWN_BG)
+        self._own_fg = QBrush(COLOR_OWN_FG)
         self._bold = QFont()
         self._bold.setBold(True)
         self._dim_brush = QBrush(COLOR_DIM)
@@ -278,7 +283,7 @@ class ChatTableModel(QAbstractTableModel):
             k = d.kinds[src]
             if c == COL_KIND:
                 if self.marks and src in self.marks:
-                    return self._label_fg
+                    return self._own_fg if self.marks_own else self._label_fg
                 if k == 1:
                     return self._don_brush
                 if k == 0 and d.roles[src] == 1:
@@ -290,12 +295,15 @@ class ChatTableModel(QAbstractTableModel):
         if role == _R_BACKGROUND:
             if src == self.hl_src:
                 return self._hl_brush
-            return self._label_bg if (self.marks and src in self.marks) else None
+            if self.marks and src in self.marks:
+                return self._own_bg if self.marks_own else self._label_bg
+            return None
         if role == _R_FONT:
             return self._bold if (src == self.hl_src and c == COL_TIME) else None
         if role == _R_TOOLTIP:
             if c == COL_KIND and self.marks and src in self.marks:
-                return tr("잠긴 1차 세션의 사람 라벨 (분석 보기)")
+                return (tr("이 세션에서 이미 매긴 채팅 — 두 번 누르면 그 라벨을 고칩니다") if self.marks_own
+                        else tr("잠긴 1차 세션의 사람 라벨 (분석 보기)"))
             if c != COL_TEXT:
                 return None
             s = d.texts[src]
@@ -456,10 +464,13 @@ class ChatPanel(QWidget):
         self.model.reset_all(data, range(data.n))
         self._update_count()
 
-    def set_label_marks(self, marks: dict[str, str] | None) -> int:
-        """chat_id → 짧은 표시(예: '1차 직접'). '종류' 칸에 보라 글씨·행 배경으로 보인다. None·빈 dict 면 지운다.
+    def set_label_marks(self, marks: dict[str, str] | None, *, own: bool = False) -> int:
+        """chat_id → 짧은 표시. '종류' 칸 글씨·행 배경으로 보인다. None·빈 dict 면 지운다. 표에 있는 채팅 수를 돌려준다.
 
-        분석 세션의 잠긴 1차 라벨만 넘긴다(08 D-09 5). 라벨링 세션에서는 작업대가 부르지 않는다. 표에 있는 채팅 수를 돌려준다.
+        두 쓰임만 있다(블라인드, 안내서 원칙 3):
+        - own=False: 분석 세션의 잠긴 1차 라벨(예: '1차 직접', 보라, 08 D-09 5).
+        - own=True: 라벨링 세션(1차·재라벨)이 **자기 세션에서** 이미 매긴 현재 유효 반응 라벨(예: '✓ 직접', 초록,
+          08 D-16). 다시 켰을 때 같은 채팅을 또 매기지 않게. 다른 세션의 라벨은 절대 넘기지 않는다(작업대가 거른다).
         """
         out: dict[int, str] = {}
         for cid, text in (marks or {}).items():
@@ -467,6 +478,7 @@ class ChatPanel(QWidget):
             if src is not None and text:
                 out[src] = str(text)
         self.model.marks = out
+        self.model.marks_own = bool(own)
         self.model.emit_all_changed()
         return len(out)
 

@@ -184,12 +184,18 @@ def test_unknown_session_blocked(qapp):
 
 
 # --------------------------------------------------------------------------- 판정
-def test_unconfirmed_requires_confidence_and_rationale(qapp):
+def test_unconfirmed_one_click_fills_confidence_and_rationale(qapp):
+    """08 D-16 '딸깍': 확신도·근거를 비워 두고 단추만 눌러도 저장된다(확실함 · '대답 없음 HH:MM:SS')."""
+    check = reaction_checker()
     v, m, _, saver = make_view(qapp)
-    assert v.judge_unconfirmed() is None and "확신도" in v.msg.text()
-    v.set_confidence("certain")
-    assert v.judge_unconfirmed() is None and "근거" in v.msg.text()
-    assert saver.drafts == []
+    it = v.current_item()
+    rec = v.judge_unconfirmed()
+    assert rec is not None and len(saver.drafts) == 1
+    b = saver.drafts[0]["body"]
+    s = it["t_ms"] // 1000
+    assert b["confidence"] == "certain" and b["result"] == "unconfirmed"
+    assert b["rationale"] == f"대답 없음 {s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+    assert check(b) == []
 
 
 def test_unconfirmed_save_valid_and_advances(qapp):
