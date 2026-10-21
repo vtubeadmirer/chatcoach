@@ -12,6 +12,10 @@
   (06 3-3 3일 간격·3-4, app.session.reopen_refusal).
 - 새 세션 종류: 1차·재라벨 2종·조정·출처 판정·분석. 지금 프로젝트 상태에서 열 수 있는 것만 켜지고,
   꺼진 것은 까닭을 옆에 적는다(app.session.kind_choices, 이 PC 의 machine4·지금 시각을 넘긴다).
+- 계획 요약은 relabel/index.json 으로 고른 라벨러 것만 연다(D-12 2, ProjectSurvey.plans_of → relabel.plans_for_labeler).
+  다른 라벨러의 계획 본문은 열지 않는다. 취소된 계획(relabel/<plan_id>.cancel.json)은 고를 수 없다(D-12 7).
+- 잘못 잠근 사유(D-11 7·D-12 2): 이 라벨러에게 잠긴 자기 세션이 있고 새 세션을 고르면 선택 칸이 보인다 →
+  session.open.reopen_note.
 - 재라벨 2종(08 D-11 6, 03 12-2): 고르면 그 라벨러의 계획 파일 하나만 열어(app.relabel.read_plan_for_session)
   scope=blocks·relabel_plan_id 를 session.open 에 넣는다. 같은 사람 재라벨을 3일 간격 전에 열면 사유를 받고
   (ask_early_reason) SessionContext.extra['relabel_too_early'] 로 넘긴다 — 작업대가 store 를 연 뒤 warning 줄로 남긴다.
@@ -157,6 +161,19 @@ class SessionDialog(QDialog):
         self.notes = QLabel("")
         self.notes.setWordWrap(True)
         lay.addWidget(self.notes)
+
+        # 잘못 잠근 사유 (D-11 7·D-12 2): 잠금은 풀지 않으므로 새 세션 session.open.reopen_note 에 적는다.
+        # 이 라벨러에게 잠긴 자기 세션이 있고 새 세션을 고를 때만 보인다. 선택 칸이다.
+        self.reopen_box = QWidget()
+        rl = QHBoxLayout(self.reopen_box)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.addWidget(QLabel(tr("앞 세션을 잘못 잠갔다면 그 사유 (선택)")))
+        self.reopen_edit = QLineEdit()
+        self.reopen_edit.setMaxLength(sess.REOPEN_NOTE_MAX)
+        self.reopen_edit.setPlaceholderText(tr("예: 표본 판정을 덜 마치고 잠금 — 이 세션에서 마저 매김 (기록에 남음)"))
+        rl.addWidget(self.reopen_edit, 1)
+        self.reopen_box.setVisible(False)
+        lay.addWidget(self.reopen_box)
 
         row = QHBoxLayout()
         self.btn_view_only = QPushButton(tr("보기 전용으로 열기"))
@@ -396,7 +413,17 @@ class SessionDialog(QDialog):
         lines = sess.exposure_notes(self.survey, lid, kind) if (self.survey and lid and kind) else []
         self.notes.setText("\n".join(lines))
         self.notes.setVisible(bool(lines))
+        self.reopen_box.setVisible(bool(key and key.startswith(NEW_PREFIX) and any(e.locked for e in self.existing)))
         self.btn_open.setEnabled(key is not None and lid is not None)
+
+    def reopen_note(self) -> str | None:
+        """새 세션 session.open 에 넣을 '잘못 잠근 사유'. 칸이 안 보이거나 비었으면 None."""
+        if not self.reopen_box.isVisibleTo(self):
+            return None
+        try:
+            return sess.clean_reopen_note(self.reopen_edit.text())
+        except ValueError:
+            return None
 
     # ------------------------------------------------------------------ 끝내기
     def _build_context(self) -> sess.SessionContext | None:
@@ -426,10 +453,13 @@ class SessionDialog(QDialog):
                     return None
                 extra["relabel_too_early"] = reason       # 작업대가 store 를 연 뒤 warning(relabel_too_early) 로 남긴다
         taken = set(self.survey.session_ids if self.survey else ())
+        note = self.reopen_note()
+        if note:
+            LOG.info("새 세션에 잘못 잠근 사유를 적습니다 (%d자)", len(note))   # 사유 글은 로그에 남기지 않는다
         for _ in range(20):
             r4 = self._rand4() if self._rand4 else sess.random4()
             ctx = sess.new_session(lid, kind, machine_id_value=mid,
-                                   now=self._now() if self._now else None, rand4=r4, **plan_args)
+                                   now=self._now() if self._now else None, rand4=r4, reopen_note=note, **plan_args)
             if ctx.session_id not in taken:
                 return replace(ctx, extra=extra) if extra else ctx
         raise RuntimeError("겹치지 않는 세션 ID 를 만들지 못했습니다")

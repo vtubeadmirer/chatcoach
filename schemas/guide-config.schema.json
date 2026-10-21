@@ -112,7 +112,7 @@
         },
         "sample": {
           "type": "object",
-          "description": "안내서 2장 3단계 무작위 표본(sha256-tau-v1, docs/design/06-evaluation-and-agreement.md 2장). 적격 채팅이 census_max 이하이면 전부(전수)를 쓴다.",
+          "description": "안내서 2장 3단계 무작위 표본(지금 기본 sha256-tau-v2, 옛 판 sha256-tau-v1 은 재현 검증만 — 08 D-11 5·D-12 2, docs/design/06-evaluation-and-agreement.md 2장). 적격 채팅이 census_max 이하이면 전부(전수)를 쓴다.",
           "required": ["per_segment", "census_max", "max_extend_ratio"],
           "additionalProperties": false,
           "properties": {

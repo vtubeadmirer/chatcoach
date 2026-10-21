@@ -39,7 +39,7 @@
     },
     "active_guide_version": {"$ref": "#/$defs/guideVersion", "description": "새 세션이 기본으로 쓸 기준서 버전. guides[] 안에 있어야 한다."},
     "calibration": {"$ref": "#/$defs/calibration"},
-    "sample_seed": {"type": "string", "pattern": "^[0-9a-f]{32}$", "description": "프로젝트를 만들 때 한 번 만드는 임의 16바이트(hex 32자). 화면에서 바꿀 수 없고 비밀이 아니다. 재라벨 무작위 블록 순서(06 3-2)와 표본 순서 키(sha256-tau-v1: SHA-256('{sample_seed}|{draw_no}|{chat_id}'), 03 15-1·06 2-1)가 쓴다. 설계 문서: 03 6-1."},
+    "sample_seed": {"type": "string", "pattern": "^[0-9a-f]{32}$", "description": "프로젝트를 만들 때 한 번 만드는 임의 16바이트(hex 32자). 화면에서 바꿀 수 없고 비밀이 아니다. 재라벨 무작위 블록 순서(sha256-relabel-v1: '{sample_seed}|relabel|{원 세션 ID}', 06 3-2)와 표본 순서 키(sha256-tau-v2, 옛 판 v1 도 같음: SHA-256('{sample_seed}|{draw_no}|{chat_id}'), 03 15-1·06 2-1)가 쓴다(08 D-12 1·2). 설계 문서: 03 6-1."},
     "dataset_split": {"enum": ["dev", "test"], "default": "dev", "description": "평가 세트 구분. 기본 dev(시범처럼 기준을 고치는 데 쓴 라벨은 최종 엔진 평가에 기본으로 넣지 않는다, 06 9-4). 세션은 열 때 이 값을 복사한다(session.open.dataset_split). 바꾸는 것은 검토자만. 설계 문서: 03 6-1."},
     "labelers": {
       "type": "array",

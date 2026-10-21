@@ -205,7 +205,11 @@ def test_choices_follow_project_state(proj):
     assert ch["origin_review"].enabled
     touch(proj.root, "relabel", "RP-20261021-ab12.json")
     _, _, ch = _choices(proj)
-    assert not ch["relabel_same"].enabled and "v1" in ch["relabel_same"].reason
+    # 빈 JSON 계획은 '읽을 수 있는 계획 없음 — 계획 형식이 아님' 으로 꺼진다. 옛 검사("v1" in reason)는
+    # 형식 이름 'relabel-plan v1' 에 우연히 걸려 통과했다(13 보고 4-2 12번, D-12 2).
+    reason = ch["relabel_same"].reason
+    assert not ch["relabel_same"].enabled
+    assert "읽을 수 있는 재라벨 계획이 없습니다" in reason and "계획 형식" in reason
 
 
 def test_analysis_enabled_by_locked_primary_without_engine(proj):

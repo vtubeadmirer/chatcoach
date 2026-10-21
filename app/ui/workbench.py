@@ -14,6 +14,11 @@
   '반응 있음'(M) 은 같은 편집기를 연다. 표본 채팅에 이미 ② 반응 라벨이 있으면 새 라벨을 만들지 않고 그 라벨을 고친다(D-10 4).
 - 채팅 1건 = 현재 유효 라벨 1건(D-10 4): ② 에서 반응 라벨이 있는 채팅을 열면 그 라벨을 고치는 편집기로 연다.
 - 구간 라벨이 없거나, 저스트채팅 구간이 없거나, 단계 완료 표시(phase.mark)가 없으면 ②·③ 은 꺼지고 까닭이 보인다.
+- ④ 놓친 후보 (재라벨 세션만, D-12 5): 오른쪽은 놓친 후보 폼(MissedForm). 대상은 자기 구간표·계획의 블록 표본·자기 판정으로
+  워커에서 계산한다(prepare_missed_selection, samples/ 를 열지 않음). ③ 의 [표본 완료 표시](phase.mark samples)가 관문이다.
+- 조정 (adjudication 세션): 오른쪽은 조정 화면(AdjudicationView). 출처 판정 (origin_review 세션): 오른쪽은 OriginView —
+  origin/ 의 대상 파일과 대상 채팅만 읽는다. 이 두 세션의 모드 줄에는 자기 화면만 있고, store 가 열리면 바로 그 화면으로 간다.
+  어느 모드를 보일지는 app.core.phase.modes_for(세션 종류).
 
 블라인드 (안내서 원칙 3, 03 12장)
 - 라벨링 세션(primary·relabel_*)에서는 엔진 결과·다른 세션 라벨·AI 등급 제안을 어디에도 보이지 않는다.
@@ -90,8 +95,10 @@ RELABEL_KINDS = ("relabel_same", "relabel_second")
 ENGINE_MARK_KIND = {"direct": "engine", "likely": "engine", "related_only": "engine_weak", "unclear": "engine_weak"}
 LINK_MAX_BYTES = 64 * 1024 * 1024
 ENGINE_ITEM = "engine_results"    # app.core.visibility.ENGINE_RESULTS (엔진 판정, 분석 모드). 봉인 AI 결과(ai_results)와 다르다
-# 타임라인에 반영하는 라벨 종류(현재 유효 판). retract 는 대상을 지운다.
-HEAD_KINDS = ("segment", "utterance", "reaction", "continuation", "video_check")
+# 작업대가 들고 있는 현재 유효 라벨 종류(타임라인·폼에 넘긴다). retract 는 대상을 지운다.
+# missed_candidate(④)·origin(출처 판정)·adjudication(조정)은 타임라인에 그리지 않고 그 화면에만 넘긴다.
+HEAD_KINDS = ("segment", "utterance", "reaction", "continuation", "video_check", "missed_candidate", "origin",
+              "adjudication")
 HEARD_MIN_COVERAGE = rules.HEARD_MIN_COVERAGE   # '들었다' 인정 비율의 코드 기본값. 실제 값은 기준서 recheck.heard_min_coverage(D-10 6)
 DEFAULT_MIN_VIEWS = 2             # guide-config recheck.min_views_direct_likely
 DEFAULT_BUFFER_MS = 10_000        # guide-config segment.boundary_buffer_sec
@@ -476,7 +483,8 @@ def plan_blocks_for(plan: Mapping, start_ms: int, end_ms: int) -> list[tuple[Map
 
 def prepare_relabel_sample(messages_path: str, seg: Mapping, segments, plan: Mapping, *, values: Mapping,
                            project_data: Mapping, meta: Mapping, drawn_by: str, app_version: str, coverage,
-                           drawn_at: str | None = None) -> tuple[dict, dict[str, dict]]:
+                           drawn_at: str | None = None,
+                           messages: tuple[list[dict], str] | None = None) -> tuple[dict, dict[str, dict]]:
     """재라벨 세션의 블록 표본(06 3-5)을 메모리에서 매니페스트 모양으로 만든다 — 파일에 쓰지 않는다(samples/ 를 열지 않음).
 
     - 적격: 재라벨러 **자기** 구간표(seg = 그 저스트채팅 구간)로 06 2-2 의 0~3번(영상 밖·완충 포함, 완충은 relabel_buffers).
@@ -491,6 +499,7 @@ def prepare_relabel_sample(messages_path: str, seg: Mapping, segments, plan: Map
       블록마다 따로 고른 표본을 모두 담고, τ 가 작은 블록에서 몇 건이 더 들 수 있다(일치도는 둘 다 판정한 채팅만 쓴다).
       seed_material 이 다르면(다른 draw_no) 한 매니페스트로 만들 수 없어 블록 경계에서 구간을 나누게 한다.
     막히면 ValueError(까닭 문장): 블록 밖 구간·이 블록에 1차 표본 없음·영상 없음·τ_block 안 적격 0.
+    messages: 이미 읽은 (채팅 줄 목록, 파일 sha256) — ④ 대상 고르기처럼 구간 여럿을 한 번에 계산할 때 다시 읽지 않게.
     """
     from ..core import relabel_plan as rp
     from ..core import sampling as sp
@@ -518,7 +527,7 @@ def prepare_relabel_sample(messages_path: str, seg: Mapping, segments, plan: Map
     seed, draw_no = sp.parse_seed_material(sm)
     if seed != project_data.get("sample_seed"):
         raise ValueError(tr("계획의 시드가 이 프로젝트의 sample_seed 와 다릅니다"))
-    msgs, sha = read_messages(messages_path)
+    msgs, sha = messages if messages is not None else read_messages(messages_path)
     buf = _sec_ms(values, "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
     scope = (meta.get("scope") or {}).get("ranges") or plan.get("scope", {}).get("ranges") or []
     buffers = relabel_buffers(segments, [tuple(r) for r in scope], buf)
@@ -577,6 +586,59 @@ def sample_messages(messages_path: str, chat_ids) -> dict[str, dict]:
     wanted = set(chat_ids)
     msgs, _ = read_messages(messages_path)
     return {m["chat_id"]: m for m in msgs if m.get("chat_id") in wanted}
+
+
+MISSED_MSG_MARGIN_MS = 120_000    # ④ 보조값(직전 10초 채팅 수·노출 추정)에 쓰는 범위 밖 여유
+
+
+@dataclass
+class MissedLoad:
+    """④ 대상 계산 결과(워커 → 화면). texts 는 대상 채팅의 본문만(닉네임 없음)."""
+    selection: object = None
+    texts: dict[str, str] = field(default_factory=dict)
+    scope_ranges: tuple | None = None
+    problems: list[str] = field(default_factory=list)
+
+
+def prepare_missed_selection(messages_path: str, segments, plan: Mapping | None, targets, *, values: Mapping,
+                             project_data: Mapping, meta: Mapping, drawn_by: str, app_version: str, coverage,
+                             reactions, missed_records, session_kind: str | None) -> MissedLoad:
+    """④ 놓친 채팅 후보 대상(06 2-9, 03 12-3, D-12 5)을 계산한다(파일에 쓰지 않음, 워커에서 부른다).
+
+    - 재라벨 세션: 대상 구간(③ 완료 구간, phase.missed_targets)마다 계획의 블록 표본을 메모리에서 다시 만든다
+      (prepare_relabel_sample — samples/ 를 열지 않음). 그 표본 가운데 자기 판정이 반응 미확인·관련성만·불명확인 채팅.
+    - 범위는 session.open.scope(블록) 안만(core.missed.scope_ranges_of). 경계 완충은 블록마다(relabel_buffers).
+    - 1차 세션은 ④ 를 열지 않는다(D-12 5). plan 이 없으면 빈 결과와 까닭.
+    """
+    from ..core import missed as mc
+    out = MissedLoad(scope_ranges=mc.scope_ranges_of(meta.get("scope"), session_kind))
+    if session_kind not in RELABEL_KINDS or plan is None:
+        out.problems.append(tr("④ 놓친 후보는 재라벨 계획이 있는 재라벨 세션에서만 매깁니다 (08 D-12 5)"))
+        out.selection = mc.Selection(())
+        return out
+    msgs, sha = read_messages(messages_path)
+    mans = []
+    for seg in targets:
+        try:
+            man, _m = prepare_relabel_sample(messages_path, seg, segments, plan, values=values,
+                                             project_data=project_data, meta=meta, drawn_by=drawn_by,
+                                             app_version=app_version, coverage=coverage, messages=(msgs, sha))
+            mans.append(man)
+        except ValueError as e:
+            out.problems.append(str(e))
+    scope = out.scope_ranges or ()
+    buf = _sec_ms(values, "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
+    buffers = relabel_buffers(segments, [tuple(r) for r in scope], buf)
+    pre, post = recheck_rolls(values)
+    near = [m for m in msgs if _is_int(m.get("t_ms")) and any(
+        lo - MISSED_MSG_MARGIN_MS <= m["t_ms"] < hi + MISSED_MSG_MARGIN_MS for lo, hi in scope)]
+    sel = mc.select_targets(mans, reactions, near, segments, buffers=buffers, scope_ranges=scope, coverage=coverage,
+                            pre_roll_ms=pre, post_roll_ms=post, samples_done=[s["entity_id"] for s in targets],
+                            missed_records=missed_records, thresholds=mc.thresholds_from_guide(values))
+    want = {t.chat_id for t in sel.targets}
+    out.selection = sel
+    out.texts = {m["chat_id"]: m.get("text") or "" for m in near if m.get("chat_id") in want}
+    return out
 
 
 @dataclass
@@ -861,6 +923,10 @@ class Workbench(QWidget):
         self.editor = None
         self.queue = None
         self.review = None
+        self.missed_form = None              # ④ 놓친 후보 폼 (재라벨 세션, D-12 5)
+        self.missed_load: MissedLoad | None = None
+        self.adjudication_view = None        # 조정 화면 (adjudication 세션)
+        self.origin_view = None              # 출처 판정 화면 (origin_review 세션)
         self._editor_return = None           # 편집기를 닫으면 돌아갈 오른쪽 칸
         # 2·3단계 Ctrl+Z 장부: 이번 실행의 반응 저장 한 번 = 한 항목 {'eid': 반응 entity_id, 'items': [(entity_id, 저장 전 머리
         # 사본 또는 None(새 대상), 저장 뒤 머리 id)]}. 되돌리면 새 대상은 철회, 고친 대상은 앞 판 body 로 새 판(03 10-1 표).
@@ -871,6 +937,7 @@ class Workbench(QWidget):
         self._media_cov: list[tuple[int, int]] | None = None   # 영상이 덮는 VOD 범위 (D-10 3, open_project 에서 계산)
         self._busy = False                   # 저장 중(D-10 2)
         self._busy_failed = False
+        self._sync_jobs = False              # open_project(sync=True)(시험): 모드에 들어갈 때의 읽기도 바로 돈다
         self._status_bar = None              # attach_status_bar 로 붙인 메인 창 상태 줄
         self.relabel_plan: dict | None = None   # 재라벨 세션: 자기 계획(relabel/<plan_id>.json) 하나만 읽는다(03 12-1)
         # 분석 세션(08 D-09 5): 잠긴 1차 세션의 라벨. 라벨링 세션에서는 늘 비어 있다(디스크에서 열지도 않는다)
@@ -900,7 +967,8 @@ class Workbench(QWidget):
         self.mode_group = QButtonGroup(self)
         self.mode_group.setExclusive(True)
         self.mode_buttons: dict[str, QPushButton] = {}
-        for m in ph.MODES:
+        # 세션 종류마다 보일 모드만 단추로 만든다(조정·출처 판정 세션은 자기 화면, ④ 는 재라벨 세션만 — core.phase.modes_for)
+        for m in ph.modes_for(self.session_kind):
             b = QPushButton(tr(ph.MODE_LABELS[m]))
             b.setCheckable(True)
             b.setFocusPolicy(Qt.NoFocus)
@@ -1130,6 +1198,7 @@ class Workbench(QWidget):
         proj = getattr(outcome, "project", outcome)
         self.outcome = outcome if hasattr(outcome, "project") else None
         self.project = proj
+        self._sync_jobs = bool(sync)
         data = proj.data or {}
         self.notes = []
         if proj.read_only:
@@ -1220,6 +1289,13 @@ class Workbench(QWidget):
         self.refresh_labels()
         self.load_locked_primary()
         self._update_status(full=True)
+        # 조정·출처 판정 세션은 그 화면이 할 일의 전부다 — 바로 연다(모드 줄의 둘러보기로 채팅 표에 돌아갈 수 있다)
+        auto = {"adjudication": ph.ADJUDICATE, "origin_review": ph.ORIGIN}.get(self.session_kind)
+        if auto is not None and self.mode == ph.BROWSE and self.gates().get(auto, ph.Gate(False)).allowed:
+            try:
+                self.set_mode(auto)
+            except Exception as e:  # noqa: BLE001 — 화면을 못 열어도 작업대는 연다
+                self._note(tr("{0} 화면을 열지 못했습니다: {1}").format(tr(ph.MODE_LABELS[auto]), type(e).__name__))
 
     # ------------------------------------------------------------ 재라벨 세션 (06 3장, 03 12-2, D-11 6)
     def _load_relabel_plan(self, st) -> None:
@@ -1848,11 +1924,13 @@ class Workbench(QWidget):
         self._say(tr("속도 x{0:g}").format(self.review.speed()))
 
     def toggle_review_loop(self) -> None:
-        """R (02 7-6): 7-2 범위 반복. 편집기가 열려 있으면 그 범위, ③ 표본이면 표본 범위."""
+        """R (02 7-6): 7-2 범위 반복. 편집기가 열려 있으면 그 범위, ③ 표본이면 표본 범위, 출처 판정이면 대상 범위."""
         if self.is_editing():
             self.editor.listen_again() if not self.review.loop_on() else self.review.stop_loop()
         elif self.mode == ph.SAMPLES and self.queue is not None:
             self.queue.toggle_loop()
+        elif self.mode == ph.ORIGIN and self.origin_view is not None:
+            self.origin_view.toggle_loop()
         else:
             self._say(tr("7-2 범위 반복(R)은 반응 편집기나 ③ 표본에서 씁니다"))
 
@@ -1886,7 +1964,15 @@ class Workbench(QWidget):
 
     def gates(self) -> dict[str, ph.Gate]:
         why = self._write_block_reason()
-        return ph.gates(self.segment_heads(), self._marks, can_write_labels=why is None, why_no_write=why)
+        g = ph.gates(self.segment_heads(), self._marks, can_write_labels=why is None, why_no_write=why,
+                     session_kind=self.session_kind if self.session is not None else None)
+        # 조정·출처 판정 화면은 그 세션의 store 가 열려야 연다(읽기 전용이면 화면이 보기만 한다)
+        for m in (ph.ADJUDICATE, ph.ORIGIN):
+            if g[m].allowed and self.store is None:
+                g[m] = ph.Gate(False, self.store_problem or tr("라벨 기록을 여는 중입니다"))
+        if g[ph.MISSED].allowed and self.relabel_plan is None:
+            g[ph.MISSED] = ph.Gate(False, tr("재라벨 계획을 읽지 못해 ④ 대상을 낼 수 없습니다"))
+        return g
 
     def _update_modes(self) -> None:
         g = self.gates()
@@ -1896,7 +1982,8 @@ class Workbench(QWidget):
             b.setEnabled(gate.allowed or m == self.mode)
             b.setToolTip(gate.reason or "")
             b.setChecked(m == self.mode)
-            if not gate.allowed and m in (ph.REACTIONS, ph.SAMPLES, ph.SEGMENTS) and gate.reason:
+            if not gate.allowed and m in (ph.REACTIONS, ph.SAMPLES, ph.SEGMENTS, ph.MISSED, ph.ADJUDICATE,
+                                          ph.ORIGIN) and gate.reason:
                 reasons.append((m, gate.reason))
         # 같은 까닭은 한 번만 (세션 없음 등)
         seen, lines = set(), []
@@ -1918,6 +2005,19 @@ class Workbench(QWidget):
             done = self._marks.done("reactions")
             b.setText(tr("반응 단계 다시 열기") if done else tr("반응 완료 표시"))
             b.setVisible(True)
+        elif self.mode == ph.SAMPLES:
+            # ③ 완료 표시: ④ 놓친 후보의 관문(03 12-3). 1차 세션에서도 '표본 판정을 마쳤다' 는 기록으로 남는다
+            done = self._marks.done("samples")
+            b.setText(tr("표본 단계 다시 열기") if done else tr("표본 완료 표시"))
+            b.setVisible(True)
+        elif self.mode == ph.MISSED:
+            done = self._marks.done("missed")
+            b.setText(tr("④ 단계 다시 열기") if done else tr("④ 완료 표시"))
+            b.setVisible(True)
+        elif self.mode == ph.ORIGIN:
+            done = self._marks.done("origin")
+            b.setText(tr("출처 판정 다시 열기") if done else tr("출처 판정 완료 표시"))
+            b.setVisible(True)
         else:
             b.setVisible(False)
 
@@ -1928,7 +2028,9 @@ class Workbench(QWidget):
     def has_unsaved(self) -> bool:
         """저장하지 않은 것이 있는가(구간 폼의 모델 변경 또는 열린 반응 편집기)."""
         f = self.segment_form
-        return bool((f is not None and f.model is not None and f.has_unsaved) or self.is_editing())
+        mf = self.missed_form
+        return bool((f is not None and f.model is not None and f.has_unsaved) or self.is_editing()
+                    or (self.mode == ph.MISSED and mf is not None and mf.has_unsaved()))
 
     def ask_unsaved(self) -> str:
         """저장하지 않은 구간 변경이 있을 때 묻는다: 'save' · 'discard' · 'cancel'. 시험에서는 바꿔 끼운다."""
@@ -1996,6 +2098,10 @@ class Workbench(QWidget):
         if self.mode == ph.SEGMENTS and not self.resolve_unsaved():
             self._sync_mode_buttons()
             return False
+        if self.mode == ph.MISSED and self.missed_form is not None and self.missed_form.has_unsaved():
+            self._say(tr("④ 저장하지 않은 입력이 있습니다 — 저장(Ctrl+Enter)하거나 취소(Esc)한 뒤에 바꿀 수 있습니다"))
+            self._sync_mode_buttons()
+            return False
         self.mode = mode
         if mode == ph.SEGMENTS:
             self._enter_segments()
@@ -2007,6 +2113,12 @@ class Workbench(QWidget):
             self._ensure_review()
             self._ensure_editor()
             self._enter_samples()
+        elif mode == ph.MISSED:
+            self._enter_missed(sync=self._sync_jobs)
+        elif mode == ph.ADJUDICATE:
+            self._enter_adjudication()
+        elif mode == ph.ORIGIN:
+            self._enter_origin(sync=self._sync_jobs)
         else:
             self.right.setCurrentWidget(self.page_chat)
         self._push_segments_track()
@@ -2057,9 +2169,147 @@ class Workbench(QWidget):
             return False
         return self.segment_form.add_boundary(self._vod_pos)
 
+    # ---- ④ 놓친 채팅 후보 (재라벨 세션, 06 2-9, 03 6-10·12-3, D-12 5)
+    def _ensure_missed_form(self):
+        if self.missed_form is None:
+            from .forms.missed_form import MissedForm
+            f = MissedForm(self.save_label, self._form_cancel, ops=self.write_ops)
+            f.setFocusPolicy(Qt.StrongFocus)
+            f.targetChanged.connect(self._on_missed_target)
+            f.message.connect(self._say)
+            self.missed_form = f
+            self.right.addWidget(f)
+        return self.missed_form
+
+    def _enter_missed(self, sync: bool = False) -> None:
+        """④ 모드: 자기 구간표·계획의 블록 표본·자기 판정으로 대상을 계산(워커)해 폼에 싣는다. samples/ 는 열지 않는다."""
+        f = self._ensure_missed_form()
+        self.right.setCurrentWidget(f)
+        if self.store is None or self.project is None:
+            return
+        from .. import __version__
+        targets = [copy.deepcopy(s) for s in ph.missed_targets(self.segment_heads(), self._marks)]
+        args = dict(values=self.guide_values(), project_data=dict(self.project.data), meta=self.store.session_meta or {},
+                    drawn_by=self.labeler_id or "L01", app_version=__version__, coverage=self.media_coverage(),
+                    reactions=[copy.deepcopy(r) for r in self._label_heads["reaction"].values()],
+                    missed_records=[copy.deepcopy(r) for r in self._label_heads["missed_candidate"].values()],
+                    session_kind=self.session_kind)
+        mpath = self.project.paths.messages_jsonl
+        segs = [copy.deepcopy(s) for s in self.segment_heads()]
+        plan = copy.deepcopy(self.relabel_plan) if self.relabel_plan is not None else None
+        self._say(tr("④ 대상을 계산하는 중…"))
+        self._run_job("missed", lambda cancelled: prepare_missed_selection(mpath, segs, plan, targets, **args),
+                      self._on_missed_loaded, sync)
+
+    def _on_missed_loaded(self, res: MissedLoad | None, err: str) -> None:
+        if res is None:
+            self._say(tr("④ 대상을 내지 못했습니다: {0}").format(err.split(": ", 1)[-1][:200]))
+            return
+        self.missed_load = res
+        for p in res.problems[:3]:
+            self._note(p)
+        pre, post = recheck_rolls(self.guide_values())
+        from ..core import missed as mc
+        self._ensure_missed_form().load_context(
+            selection=res.selection, chat_texts=res.texts, scope_ranges=res.scope_ranges,
+            media_coverage=self._media_cov, thresholds=mc.thresholds_from_guide(self.guide_values()),
+            pre_roll_ms=pre, post_roll_ms=post, read_only=bool(self.store is None or self.store.read_only),
+            position_fn=self.vod_position)
+        sel = res.selection
+        LOG.info("④ 대상 %d건 (판정함 %d)", len(sel.targets), sel.done)
+        self._say(tr("④ 대상 {0}건 · 판정함 {1}건").format(len(sel.targets), sel.done))
+
+    def _on_missed_target(self, _chat_id: str, t_ms: int) -> None:
+        """대상을 고르면 7-2 확인 범위로 옮긴다(채팅 10초 전 ~ 30초 뒤, 타임라인에 범위 표시)."""
+        pre, post = recheck_rolls(self.guide_values())
+        if hasattr(self.timeline, "set_loop_range"):
+            self.timeline.set_loop_range(max(0, int(t_ms) - pre), int(t_ms) + post)
+        self.seek_vod(int(t_ms) - pre)
+
+    def missed_selection(self):
+        """지금 ④ 대상(core.missed.Selection). 계산 전이면 None."""
+        return self.missed_load.selection if self.missed_load is not None else None
+
+    # ---- 조정 (adjudication 세션, 03 6-12·12-1, 06 5장·7-1, D-12 3·4·7)
+    def chat_info(self, chat_id: str) -> tuple[int | None, str | None]:
+        """조정 화면용: 채팅 → (VOD 시각, 화면에 보일 본문 한 줄). 조정 세션은 채팅을 읽는다(03 12-1). 로그에는 쓰지 않는다."""
+        try:
+            d = self._editor_chats()
+            i = d.index_of(chat_id)
+        except Exception:  # noqa: BLE001
+            return None, None
+        if i is None:
+            return None, None
+        t = d.times[i]
+        text = d.texts[i] if i < len(d.texts) else None
+        return (int(t) if t >= 0 else None), (str(text)[:200] if text else None)
+
+    def _enter_adjudication(self) -> None:
+        if self.adjudication_view is None:
+            from .. import __version__
+            from .adjudication_view import AdjudicationView
+            self.adjudication_view = AdjudicationView(store=self.store, app_version=__version__,
+                                                      chat_info=self.chat_info)
+            self.right.addWidget(self.adjudication_view)
+        else:
+            self.adjudication_view.refresh_sessions()
+            self.adjudication_view.refresh_plans()
+        self.right.setCurrentWidget(self.adjudication_view)
+
+    # ---- 출처 판정 (origin_review 세션, 06 4-7, 03 6-11·12-1, D-12 6)
+    def _ensure_origin_view(self):
+        if self.origin_view is None:
+            from .origin_view import OriginView
+            v = OriginView(self.save_label, self._form_cancel)
+            v.set_play_keys(False)            # R 은 작업대가 잡아 넘긴다(애매한 단축키 방지)
+            v.setFocusPolicy(Qt.StrongFocus)
+            v.statusChanged.connect(self._say)
+            v.rangeRequested.connect(lambda a, b: hasattr(self.timeline, "set_loop_range")
+                                     and self.timeline.set_loop_range(a, b))
+            self.origin_view = v
+            self.right.addWidget(v)
+        return self.origin_view
+
+    def origin_dir(self) -> str | None:
+        return os.path.join(self.project.root, "origin") if self.project is not None else None
+
+    def _enter_origin(self, sync: bool = False) -> None:
+        """출처 판정 모드: origin/ 의 대상 파일과 대상 채팅만 읽어 화면에 싣는다(다른 세션 라벨·표본은 열지 않는다)."""
+        v = self._ensure_origin_view()
+        self.right.setCurrentWidget(v)
+        if self.project is None or self.store is None:
+            return
+        from ..core import visibility as vis
+        if not vis.files_to_open(self.session_kind or "").can_read("origin"):
+            return
+        from .origin_view import list_targets
+        targets = list_targets(self.origin_dir())
+        ids = sorted({it.chat_id for t in targets for it in t.items})
+        mpath = self.project.paths.messages_jsonl
+
+        def done(msgs, err, targets=targets):
+            if msgs is None:
+                self._say(tr("출처 판정 대상 채팅을 읽지 못했습니다: {0}").format(err[:200]))
+                msgs = {}
+            self._load_origin(targets, msgs)
+        self._run_job("origin_msgs", lambda cancelled: sample_messages(mpath, ids), done, sync)
+
+    def _load_origin(self, targets, msgs) -> None:
+        pre, post = recheck_rolls(self.guide_values())
+        self._ensure_origin_view().load_context(
+            session_kind=self.session_kind, session_id=self.session.session_id if self.session else None,
+            targets=targets, messages=msgs, labels=list(self._label_heads["origin"].values()),
+            viewer_no=self.chat_data.viewer_no or None, player=self.player if self.media_path else None,
+            to_file=self.vod_to_file, to_vod=self.file_to_vod, pre_roll_ms=pre, post_roll_ms=post,
+            autoplay=bool(self.media_path))
+        pr = self.origin_view.progress()
+        LOG.info("출처 판정: 대상 파일 %d개, 대상 %d건, 판정 %d건", len(targets), pr.total if pr else 0,
+                 pr.done if pr else 0)
+
     # ---- 단계 완료 표시 (phase.mark)
     def mark_phase_done(self, done: bool | None = None) -> dict | None:
-        """① 구간 · ② 반응 모드에서 그 단계의 완료 표시(phase.mark scope=all)를 쓴다. done 을 주지 않으면 지금 상태를 뒤집는다."""
+        """지금 모드 단계의 완료 표시(phase.mark scope=all)를 쓴다(① 구간 · ② 반응 · ③ 표본 · ④ 놓친 후보 · 출처 판정).
+        done 을 주지 않으면 지금 상태를 뒤집는다."""
         if self.mode == ph.SEGMENTS:
             p = "segments"
             if self.segment_form is not None and self.segment_form.has_unsaved:
@@ -2070,11 +2320,18 @@ class Workbench(QWidget):
             if not self.segment_heads():
                 self._say(tr("저장된 구간이 없습니다"))
                 return None
-        elif self.mode == ph.REACTIONS:
-            p = "reactions"
+        elif self.mode in (ph.REACTIONS, ph.SAMPLES):
+            p = "reactions" if self.mode == ph.REACTIONS else "samples"
             if self.is_editing():
                 self._say(tr("반응 편집 중입니다 — 저장하거나 취소하세요"))
                 return None
+        elif self.mode == ph.MISSED:
+            p = "missed"
+            if self.missed_form is not None and self.missed_form.has_unsaved():
+                self._say(tr("④ 저장하지 않은 입력이 있습니다 — 먼저 저장하세요 (Ctrl+Enter)"))
+                return None
+        elif self.mode == ph.ORIGIN:
+            p = "origin"
         else:
             return None
         if done is None:
@@ -2084,8 +2341,9 @@ class Workbench(QWidget):
         except Exception as e:  # noqa: BLE001
             self._say(tr("단계 표시를 저장하지 못했습니다: {0}").format(e))
             return None
-        self._say(tr("{0} 단계를 {1}로 표시했습니다").format(
-            tr("① 구간") if p == "segments" else tr("② 반응"), tr("완료") if done else tr("다시 열기")))
+        names = {"segments": "① 구간", "reactions": "② 반응", "samples": "③ 표본", "missed": "④ 놓친 후보",
+                 "origin": "출처 판정"}
+        self._say(tr("{0} 단계를 {1}로 표시했습니다").format(tr(names[p]), tr("완료") if done else tr("다시 열기")))
         return rec
 
     # ---- ② 반응 (반응 편집기)
@@ -2619,6 +2877,9 @@ class Workbench(QWidget):
         """잠그기 화면을 열기 전에: 열린 편집기를 닫게 하고 저장하지 않은 구간 변경을 처리한다. 계속해도 되면 True."""
         if self.is_editing():
             self._say(tr("반응 편집 중입니다 — 저장하거나 취소한 뒤에 잠그세요"))
+            return False
+        if self.mode == ph.MISSED and self.missed_form is not None and self.missed_form.has_unsaved():
+            self._say(tr("④ 저장하지 않은 입력이 있습니다 — 저장하거나 취소(Esc)한 뒤에 잠그세요"))
             return False
         if not self.resolve_unsaved():
             return False

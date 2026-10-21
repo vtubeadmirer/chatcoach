@@ -10,6 +10,8 @@
 세션·보고 메뉴 (06 7-1·7-3, 08 D-11): [세션 → 이 세션 잠그기…] 는 app/ui/lock_dialog(2단계) 뒤 작업대를 읽기 전용으로,
 [세션 → 재라벨 계획 만들기…] 는 잠긴 자기 1차 세션에서만(app/ui/relabel_dialog), [보고 → 일치도 보고서…] 는 잠긴 두 세션을
 골라 프로젝트 밖에 쓴다(app/ui/agreement_dialog). 보고서 메뉴는 잠기지 않은 라벨링 세션 중에는 꺼진다.
+[세션 → 재라벨 계획 취소…] 는 조정 세션(검토자)에서만 켜진다(app/ui/plan_cancel_dialog, 06 7-1·D-12 7). 조정·출처 판정·
+④ 놓친 후보는 작업대의 모드다(세션 종류에 따라 모드 줄에 나온다, app.core.phase.modes_for).
 
 업데이트 연동 흐름 (04 6장): 시작 30초 뒤 백그라운드 확인 → 상태바 3상태 → '새 버전' 버튼 → 대화상자 →
 준비(진행률·취소) → 교체 전 조건 → 적용(시작 표식 확인) → 앱 종료. 확인 시각은 updater 가 결과 뒤에 쓴다.
@@ -162,6 +164,9 @@ class MainWindow(QMainWindow):
         self.a_plan = QAction(tr("재라벨 계획 만들기(&P)…"), self)
         self.a_plan.triggered.connect(lambda: self.relabel_plan_dialog())
         self.m_session.addAction(self.a_plan)
+        self.a_cancel_plan = QAction(tr("재라벨 계획 취소(&C)…"), self)
+        self.a_cancel_plan.triggered.connect(lambda: self.plan_cancel_dialog())
+        self.m_session.addAction(self.a_cancel_plan)
         self.m_report = self.menuBar().addMenu(tr("보고(&B)"))
         self.a_agreement = QAction(tr("일치도 보고서(&A)…"), self)
         self.a_agreement.triggered.connect(lambda: self.agreement_dialog())
@@ -206,6 +211,44 @@ class MainWindow(QMainWindow):
         why_rep = self.agreement_block_reason()
         self.a_agreement.setEnabled(why_rep is None)
         self.a_agreement.setToolTip(why_rep or "")
+        why_cancel = self.plan_cancel_block_reason()
+        self.a_cancel_plan.setEnabled(why_cancel is None)
+        self.a_cancel_plan.setToolTip(why_cancel or "")
+
+    def plan_cancel_block_reason(self) -> str | None:
+        """재라벨 계획 취소를 지금 열 수 없는 까닭(06 7-1 '검토자', D-12 7): 조정 세션이고 기록을 쓸 수 있어야 한다."""
+        wb = self.workbench
+        if wb is None or getattr(wb, "project", None) is None:
+            return tr("프로젝트를 먼저 여세요")
+        from .. import relabel as relabel_io
+        if wb.session is None or wb.session_kind not in relabel_io.CANCEL_KINDS:
+            return tr("재라벨 계획 취소는 조정 세션(검토자)에서 합니다 (06 7-1)")
+        if wb.store is None:
+            return tr("라벨 기록을 여는 중입니다")
+        if wb.store.read_only:
+            return tr("라벨 기록이 읽기 전용입니다: {0}").format(wb.store.read_only_reason or "")
+        return None
+
+    def plan_cancel_dialog(self, *, run=None):
+        """'세션 → 재라벨 계획 취소…' (D-12 7). run(dlg) 을 주면 exec() 대신(시험). 쓴 취소 기록 dict 또는 None."""
+        why = self.plan_cancel_block_reason()
+        if why:
+            self.statusBar().showMessage(why, 5000)
+            return None
+        from .plan_cancel_dialog import PlanCancelDialog
+        wb = self.workbench
+        dlg = PlanCancelDialog(self, store=wb.store, app_version=__version__)
+        try:
+            (run or (lambda d: d.exec()))(dlg)
+            doc = dlg.doc
+        finally:
+            dlg.deleteLater()
+        if doc is not None:
+            if wb.adjudication_view is not None:
+                wb.adjudication_view.refresh_plans()
+            self.update_session_actions()
+            self.statusBar().showMessage(tr("재라벨 계획 {0} 를 취소했습니다").format(doc.get("plan_id")), 5000)
+        return doc
 
     def lock_session_dialog(self, *, run=None):
         """'세션 → 이 세션 잠그기…' — 2단계 잠그기 화면(app/ui/lock_dialog). run(dlg) 을 주면 exec() 대신 그것을 부른다

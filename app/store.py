@@ -687,6 +687,8 @@ class ProjectStore:
                 meta["tool"] = copy.deepcopy(s.tool)
             if s.tool_models is not None:
                 meta["tool_models"] = copy.deepcopy(s.tool_models)
+            if getattr(s, "reopen_note", None):
+                meta["reopen_note"] = s.reopen_note      # 앞 세션을 잘못 잠근 사유 (D-11 7·D-12 2, 선택)
             self._meta = meta
         # 9-1: 세션의 기준서 해시가 프로젝트 기록과 다르면 경고
         if data is not None:

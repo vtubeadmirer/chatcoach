@@ -16,8 +16,11 @@
   프로젝트·라벨·로그에는 labeler_id 만 쓴다(S-24·S-37).
 - 세션 고르기 계산 (survey_project·kind_choices): 세션 선택 화면(app/ui/session_dialog.py)이 쓴다.
   labels/·locks/·origin/·derived/ 의 **파일 이름만** 본다. 다른 세션 기록의 내용은 읽지 않는다(03 12-1).
-  읽는 내용은 고른 라벨러 자기 세션 파일의 첫 줄(session.open, 기준서 버전·계획 ID)과 재라벨 계획 파일의 요약 칸
-  (누구·어떤 종류·원 세션·시작 가능 시각, app.relabel.list_plans)뿐이다. 계획에는 라벨 내용이 없다.
+  읽는 내용은 고른 라벨러 자기 세션 파일의 첫 줄(session.open, 기준서 버전·계획 ID)과, relabel/index.json 으로 고른
+  **그 라벨러의** 재라벨 계획 파일의 요약 칸(누구·어떤 종류·원 세션·시작 가능 시각)뿐이다(D-12 2,
+  ProjectSurvey.plans_of → app.relabel.plans_for_labeler). 다른 라벨러의 계획 본문은 열지 않는다(색인이 없거나 깨졌거나
+  모자라면 그 자리에서 색인을 다시 만들고, 못 만들면 계획을 열지 않고 재라벨 선택을 막는다). 계획에는 라벨 내용이 없다.
+- reopen_note(D-11 7·D-12 2): 앞 세션을 잘못 잠갔을 때의 사유. 새 세션 session.open 의 선택 칸.
 - 재라벨 2종(08 D-11 6, 06 3-3): 그 라벨러에게 맡긴 쓸 수 있는 계획이 있고, 원 세션이 잠겼고, 그 계획으로 연
   자기 세션이 아직 없을 때 켜진다. relabel_same 은 3일 간격 전이면 '앞당긴 시작'(사유 필요) 또는 강제면 막힘.
   relabel_second 는 간격이 없고, 이 PC 가 원 세션 PC 와 같으면 '같은 machine_id' 를 표시한다.
@@ -87,6 +90,7 @@ __all__ = [
     "resume_session", "default_blind", "session_file_name", "parse_session_file_name",
     "LabelerEntry", "LabelerRoster", "load_labelers", "add_labeler", "check_labeler_id", "clean_display_name",
     "ExistingSession", "ProjectSurvey", "KindChoice", "survey_project", "kind_choices", "exposure_notes",
+    "REOPEN_NOTE_MAX", "clean_reopen_note", "check_reopen_note", "reopen_refusal", "existing_sessions",
 ]
 
 
@@ -141,6 +145,29 @@ def _yyyymmdd(d) -> str:
     if not re.fullmatch(r"[0-9]{8}", s):
         raise ValueError(f"날짜는 yyyymmdd 여야 합니다: {s!r}")
     return s
+
+
+REOPEN_NOTE_MAX = 300
+
+
+def clean_reopen_note(text) -> str | None:
+    """화면 입력 → reopen_note. 줄바꿈·제어 문자는 공백으로, 앞뒤 공백 제거. 비면 None. 300자 넘으면 ValueError."""
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        raise ValueError("reopen_note 는 문자열이어야 합니다")
+    s = " ".join(_CTRL_RE.sub(" ", text).split())
+    if len(s) > REOPEN_NOTE_MAX:
+        raise ValueError(f"잘못 잠근 사유는 {REOPEN_NOTE_MAX}자 이하여야 합니다")
+    return s or None
+
+
+def check_reopen_note(text) -> str:
+    """reopen_note 형식(스키마 sessionOpenBody.reopen_note 와 같음): 한 줄, 앞뒤 공백 없음, 1~300자."""
+    if not isinstance(text, str) or not text or text != text.strip() or len(text) > REOPEN_NOTE_MAX \
+            or _CTRL_RE.search(text):
+        raise ValueError("reopen_note 형식이 아닙니다 (한 줄, 1~300자)")
+    return text
 
 
 def check_labeler_id(labeler_id) -> str:
@@ -211,6 +238,8 @@ class SessionContext:
     - session_created_at: 세션을 처음 만든 시각(ISO, 오프셋 포함). 이어 쓰는 세션이면 store 가 첫 줄의 값을 쓴다.
     - guide_version: 묶을 기준서 버전. None 이면 project.json 의 active_guide_version.
     - scope / relabel_plan_id / blind / tool / tool_models: 03 6-4·12-2. None 이면 기본값(전체 범위, 모두 가림).
+    - reopen_note: 앞 세션을 잘못 잠갔을 때 그 사유(선택, D-11 7·D-12 2). 잠금은 풀지 않으므로 새 세션 session.open 에
+      적는다. 한 줄, 앞뒤 공백 없이 1~300자. 새 세션에만 들어간다(이어 쓰는 세션은 첫 줄의 값을 그대로 쓴다).
     """
     labeler_id: str
     session_kind: str
@@ -224,9 +253,12 @@ class SessionContext:
     blind: dict | None = None
     tool: dict | None = None
     tool_models: dict | None = None
-    extra: dict = field(default_factory=dict)   # 앞으로 늘 칸(지금은 쓰지 않음)
+    extra: dict = field(default_factory=dict)   # 세션을 연 뒤 작업대가 쓸 값(앞당긴 시작 사유 등). session.open 에는 안 들어감
+    reopen_note: str | None = None
 
     def __post_init__(self):
+        if self.reopen_note is not None:
+            check_reopen_note(self.reopen_note)
         if not isinstance(self.labeler_id, str) or not LABELER_RE.match(self.labeler_id):
             raise ValueError(f"labeler_id 형식이 아닙니다: {self.labeler_id!r}")
         if self.session_kind not in KIND_CODES:
@@ -268,8 +300,9 @@ def new_session(labeler_id: str, session_kind: str = "primary", *, data_root: st
                 machine_id_value: str | None = None, now: datetime | None = None,
                 rand4: str | None = None, guide_version: str | None = None, scope: dict | None = None,
                 relabel_plan_id: str | None = None, blind: dict | None = None, tool: dict | None = None,
-                tool_models: dict | None = None) -> SessionContext:
+                tool_models: dict | None = None, reopen_note: str | None = None) -> SessionContext:
     """새 세션. machine_id_value 가 없으면 data_root(없으면 app.paths.data_root())의 machine.json 에서 얻는다.
+    reopen_note: 앞 세션을 잘못 잠갔을 때 그 사유(선택, D-12 2). clean_reopen_note 로 정리한 값을 넣는다.
 
     now 는 OS 시간대가 붙은 시각(없으면 지금). 날짜 부분이 session_id 에, 전체가 session_created_at 에 들어간다.
     blind 를 주지 않으면 primary·relabel_* 는 None(store 가 DEFAULT_BLIND), 그 밖의 종류는 default_blind(종류).
@@ -286,6 +319,7 @@ def new_session(labeler_id: str, session_kind: str = "primary", *, data_root: st
         machine4=machine4(mid), machine_id=mid,
         session_created_at=t.isoformat(timespec="seconds"), guide_version=guide_version,
         scope=scope, relabel_plan_id=relabel_plan_id, blind=blind, tool=tool, tool_models=tool_models,
+        reopen_note=clean_reopen_note(reopen_note),
     )
 
 
@@ -446,11 +480,32 @@ class ProjectSurvey:
     active_guide_version: str | None
     guide_sha8: str | None                # 그 기준서 본문 SHA-256 앞 8자 (표시용)
     roster_kinds: dict                    # project.json labelers[]: labeler_id → 맡긴 세션 종류 tuple
-    plans: tuple = ()                     # relabel_io.PlanSummary 들 (relabel/RP-*.json 요약, 이름 순)
+    plans: tuple = ()                     # 직접 준 PlanSummary 들(시험). root 가 있으면 쓰지 않고 plans_of 가 색인으로 읽는다
+    root: str | None = None               # survey_project 가 채움: plans_of 가 relabel/index.json 을 읽을 프로젝트
+    _by_labeler: dict = field(default_factory=dict, compare=False, repr=False)
 
     def mine(self, labeler_id: str) -> list[str]:
         return [s for s in self.session_ids if s.startswith(labeler_id + "-")
                 and SESSION_ID_RE.match(s).group(1) == labeler_id]
+
+    def plans_of(self, labeler_id: str | None) -> tuple:
+        """그 라벨러가 볼 계획 요약(D-12 2). relabel/index.json 을 읽고 **그 라벨러의 계획 파일만** 연다
+        (app.relabel.plans_for_labeler). 색인이 없거나 깨졌으면 그 자리에서 다시 만들고, 못 만들면 계획을 열지
+        않는다(각 계획 파일에 그 사유를 단 '읽지 못함' 요약). 읽지 못한 계획(누구 것인지 모름)은
+        사유를 보이려고 함께 돌려준다(본문 없음). root 가 없으면(시험이 직접 만든 survey) plans 를 그대로 쓴다."""
+        if self.root is None:
+            return tuple(self.plans)
+        if not labeler_id:
+            return ()
+        got = self._by_labeler.get(labeler_id)
+        if got is None:
+            try:
+                ip = relabel_io.plans_for_labeler(self.root, labeler_id)
+                got = tuple(ip.plans) + tuple(ip.unreadable)
+            except OSError:
+                got = ()
+            self._by_labeler[labeler_id] = got
+        return got
 
 
 def _names(d: str) -> list[str]:
@@ -484,11 +539,8 @@ def survey_project(project_root: str, project_data: dict | None) -> ProjectSurve
         if isinstance(e, dict) and isinstance(e.get("labeler_id"), str):
             kinds = e.get("assigned_session_kinds")
             roster[e["labeler_id"]] = tuple(k for k in kinds if isinstance(k, str)) if isinstance(kinds, list) else ()
-    try:
-        summaries = tuple(relabel_io.list_plans(project_root))
-    except OSError:
-        summaries = ()
-    return ProjectSurvey(tuple(sids), locked, plans, origin, engine, gv, sha8, roster, summaries)
+    # 계획 본문은 여기서 열지 않는다(D-12 2): 라벨러를 고른 뒤 plans_of 가 색인으로 그 라벨러 것만 연다
+    return ProjectSurvey(tuple(sids), locked, plans, origin, engine, gv, sha8, roster, (), root=project_root)
 
 
 def _first_record_meta(path: str) -> tuple[str | None, str | None]:
@@ -557,11 +609,15 @@ def _relabel_choice(kind: str, survey: ProjectSurvey, labeler_id: str | None, mi
                     this_machine4: str | None, now: datetime) -> KindChoice:
     """재라벨 2종 하나의 KindChoice. 쓸 수 있는 계획 가운데 이름 순 첫 번째를 고른다."""
     label = KIND_LABELS[kind]
-    if not survey.plans:
+    plans = survey.plans_of(labeler_id)
+    if not plans:
+        if survey.root is not None and survey.relabel_plans:
+            return KindChoice(kind, label, False, "이 라벨러에게 맡긴 재라벨 계획이 없습니다")
         return KindChoice(kind, label, False, "재라벨 계획(relabel\\)이 없습니다")
-    usable = [p for p in survey.plans if p.usable]
+    usable = [p for p in plans if p.usable]
     if not usable:
-        return KindChoice(kind, label, False, f"읽을 수 있는 재라벨 계획이 없습니다: {survey.plans[0].problem}")
+        why = next((p.problem for p in plans if p.problem), None) or "취소되었거나 쓸 수 없는 계획입니다"
+        return KindChoice(kind, label, False, f"읽을 수 있는 재라벨 계획이 없습니다: {why}")
     used = {s.relabel_plan_id for s in mine if s.relabel_plan_id}
     reasons: list[str] = []
     for p in usable:
@@ -653,7 +709,7 @@ def reopen_refusal(entry: ExistingSession, labeler_id: str | None, survey: Proje
     if not entry.locked or entry.session_kind != "primary":
         return None
     mine = list(mine)
-    for p in survey.plans:
+    for p in survey.plans_of(labeler_id):
         if not p.usable or p.session_kind != rp.RELABEL_SAME:
             continue
         if p.labeler_id != labeler_id or p.source_session_id != entry.session_id:

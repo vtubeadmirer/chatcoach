@@ -28,7 +28,8 @@ _LOCK_RE = re.compile(r"\A(.+)\.json\Z")
 
 
 def locked_comparable_sessions(project_root: str) -> list[str]:
-    """locks/ 의 **파일 이름**에서 비교할 수 있는 잠긴 세션 ID (1차·재라벨 2종). 내용은 열지 않는다."""
+    """locks/ 의 **파일 이름**에서 비교할 수 있는 잠긴 세션 ID (1차·재라벨 2종 + 출처 판정). 내용은 열지 않는다.
+    두 세션 쌍이 비교할 수 있는지(라벨링끼리·출처 판정끼리)는 ar.pair_family 로 본다."""
     from ..core.ids import SESSION_ID_RE
     try:
         names = sorted(os.listdir(os.path.join(project_root, "locks")))
@@ -38,7 +39,7 @@ def locked_comparable_sessions(project_root: str) -> list[str]:
     for n in names:
         m = _LOCK_RE.match(n)
         sid = m.group(1) if m else None
-        if sid and SESSION_ID_RE.match(sid) and vis.session_kind_of_id(sid) in ar.COMPARABLE_KINDS:
+        if sid and SESSION_ID_RE.match(sid) and vis.session_kind_of_id(sid) in (ar.COMPARABLE_KINDS | ar.ORIGIN_KINDS):
             out.append(sid)
     return out
 
@@ -114,7 +115,10 @@ class AgreementDialog(QDialog):
 
     def _refresh(self) -> None:
         a, b = self.box_a.currentData(), self.box_b.currentData()
-        self.btn_make.setEnabled(bool(a) and bool(b) and a != b)
+        ok = bool(a) and bool(b) and a != b and ar.pair_family(a, b) is not None
+        self.btn_make.setEnabled(ok)
+        if a and b and a != b and ar.pair_family(a, b) is None:
+            self.msg.setText(tr("라벨링 세션끼리 또는 출처 판정 세션끼리만 비교합니다 (06 4-7)."))
 
     def run(self, session_a: str, session_b: str, out_root: str | None = None) -> ar.ReportResult | None:
         """보고서를 만든다(시험·통합용 직접 호출). 성공하면 ReportResult, 실패하면 None 과 화면 문장."""

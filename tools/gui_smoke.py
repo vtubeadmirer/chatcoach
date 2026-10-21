@@ -35,6 +35,15 @@
   보기 전용으로 열어 '보고 → 일치도 보고서' (사본 옆 임시 폴더, 프로젝트 밖) → L01 분석 세션으로 열어 잠긴 1차 라벨이
   타임라인(보라 트랙·구간)과 채팅 표에 보이는지(엔진 트랙은 비어 있음). 스크린샷 _agree_b · _agree_analysis. 끝나면 다 지운다.
 
+--adjudication-flow (08 D-12 2~7, 06 2-9·4-6·4-7·5장·7-1, 03 6-10~6-12·12-1·12-3): 같은 모양의 사본에서
+  L01 1차(구간 2·표본 판정·③ 완료, 1차에는 ④ 단추가 없음) → 잠그기 → 계획(L02, relabel/index.json 1줄) →
+  L02 재라벨(열기 감시: L01 기록·잠금·samples/ 0건): 블록 안 구간·③ 3건 → ③ 완료 표시 → ④ 놓친 후보 2건(후보 1·사유 C 1,
+  잠그기 전) → 잠그기 → 보기 전용에서 일치도 보고서(놓친 후보·연결 줄) → 조정 세션: 불일치 2건을 한쪽 고르기 + pattern_tag
+  (조정자 = 라벨러 표시) → L01 1차를 다시 열어 별도 계획(같은 사람 재라벨) → 보고서 메뉴가 막힘 → 조정 세션에서
+  '세션 → 재라벨 계획 취소…' → 보고서 메뉴가 다시 켜짐(계획 파일은 남고 취소 기록·색인 cancelled) →
+  합성 출처 대상 파일(사본의 origin/OT-*.json, 3건·자동 1건) → 출처 판정 세션에서 3건(다른 세션 기록·samples/·relabel/ 을
+  열지 않음). 스크린샷 _adj_missed · _adj · _adj_origin. 끝나면 다 지운다.
+
 지키는 것
 - 원본 프로젝트에는 쓰지 않는다: 영상 연결은 persist=False, 세션 없이(보기 전용) 열어 라벨 기록도 열지 않는다.
   열기 잠금(locks/open.lock)만 잡았다 푼다. 끝에 project.json 수정 시각과 크기가 그대로인지 확인한다.
@@ -72,6 +81,8 @@ def parse_args(argv=None):
                     help="사본(project.json·guide·messages.jsonl)에서 세션→구간→반응→표본→내보내기→다시 열기")
     ap.add_argument("--agreement-flow", action="store_true",
                     help="사본에서 L01 1차→잠그기→재라벨 계획→L02 두 번째 사람(열기 감시)→잠그기→일치도 보고서→분석 세션")
+    ap.add_argument("--adjudication-flow", action="store_true",
+                    help="사본에서 L01 1차·L02 재라벨(④ 놓친 후보 포함) 잠금→보고서→조정 2건→계획 취소→출처 판정 3건")
     ap.add_argument("--window-size", help="--labeling-flow 동안 메인 창 크기 (예: 1366x768, 테두리 포함)")
     ap.add_argument("--data-dir", help="임시 데이터 폴더 (기본 %%TEMP%%\\chatcoach_smoke)")
     ap.add_argument("--timeout", type=float, default=60.0, help="단계 하나의 대기 상한(초)")
@@ -466,12 +477,15 @@ class Smoke:
 
     FLOW_LABELER = "L99"
 
-    def _flow_open(self, dst: str, key: str, labeler: str | None = None):
-        """메인 창의 열기 길(ProjectView.open_path → 세션 선택 → 작업대 → store)로 사본을 연다."""
+    def _flow_open(self, dst: str, key: str, labeler: str | None = None, on_chosen=None):
+        """메인 창의 열기 길(ProjectView.open_path → 세션 선택 → 작업대 → store)로 사본을 연다.
+        on_chosen() 을 주면 세션 화면이 끝난 뒤(작업대를 만들기 전) 부른다 — 열기 감시를 세션 화면 뒤부터 걸 때."""
         holder = {}
 
         def chooser(outcome):
             holder["ctx"] = self._flow_session(outcome.project.root, outcome.project.data, key, labeler)
+            if on_chosen is not None:
+                on_chosen()
             return holder["ctx"]
         old = self.win.session_chooser
         self.win.session_chooser = chooser
@@ -1106,6 +1120,402 @@ class Smoke:
                 self.check("agree_cleanup", True, time.perf_counter(),
                            f"사본·보고서 지움 (흐름 전체 {time.perf_counter() - t0:.1f}초)")
 
+    # ---------------------------------------------------------------- --adjudication-flow
+    def _watch_opens(self, forbidden: tuple[str, ...]):
+        """builtins.open·io.open·os.open 을 감시한다. (멈추는 함수, 상태 dict{seen, bad}) 를 돌려준다."""
+        import builtins
+        import io
+        real_open, real_io_open, real_os_open = builtins.open, io.open, os.open
+        state = {"seen": 0, "bad": []}
+
+        def note(p):
+            try:
+                s = os.path.normcase(os.path.abspath(os.fspath(p)))
+            except TypeError:
+                return
+            state["seen"] += 1
+            if any(s.startswith(x) for x in forbidden):
+                state["bad"].append(s)
+
+        def w_open(file, *a, **k):
+            note(file)
+            return real_open(file, *a, **k)
+
+        def w_os_open(path, *a, **k):
+            note(path)
+            return real_os_open(path, *a, **k)
+        builtins.open, io.open, os.open = w_open, w_open, w_os_open
+
+        def stop():
+            builtins.open, io.open, os.open = real_open, real_io_open, real_os_open
+        return stop, state
+
+    def _adj_primary(self, dst: str) -> dict | None:
+        """--agreement-flow 의 A 단계와 같다: L01 1차(구간 2개·구간마다 표본 3건 판정) → 메뉴로 잠그기 → 계획(L02)."""
+        from app import locking
+        from app.core import phase as ph
+        from app.core import sampling as sp
+        t1 = time.perf_counter()
+        ok, ctx_a = self._flow_open(dst, "new:primary", self.AGREE_A)
+        wb = self.wb
+        ok = ok and ctx_a is not None and not wb.store.read_only
+        if ok and self.args.video and os.path.isfile(self.args.video):
+            wb.connect_media(self.args.video, persist=True)
+            self.wait(lambda: wb._file_duration > 0 and "media_ref" not in wb._jobs, 60)
+        cov = wb.media_coverage() or [] if ok else []
+        ok = ok and len(cov) == 1
+        self.check("adj_open_a", ok, t1, f"coverage_vod_ms={cov}")
+        if not ok:
+            return None
+        c_lo, c_hi = cov[0]
+        if self.args.window_size:
+            self._resize(self.args.window_size)
+        t1 = time.perf_counter()
+        cut = (c_lo // 600_000 + 1) * 600_000
+        if not (c_lo + 120_000 < cut < c_hi - 120_000):
+            cut = (c_lo + c_hi) // 2
+        ok = wb.set_mode(ph.SEGMENTS)
+        f = wb.segment_form
+        ok = ok and f.add_boundary(cut) and len(f.model.segments) == 2
+        for i, s in enumerate(f.model.segments):
+            f.select_segment(s.id)
+            ok = ok and f.set_category("just_chatting") and f.set_confidence("certain") and \
+                f.set_rationale(f"{_hms(max(c_lo, s.start_ms) + 5_000)} smoke 저스트채팅 {i + 1}")
+        recs = f.save()
+        ok = ok and recs is not None and len(recs) == 2 and wb.mark_phase_done() is not None
+        ok = ok and wb.set_mode(ph.REACTIONS) and wb.mark_phase_done() is not None
+        ok = ok and wb.set_mode(ph.SAMPLES)
+        box = wb.sample_seg_box
+        judged_a: dict[str, list[str]] = {}
+        a_items: dict[str, list[str]] = {}
+        for i in range(box.count() if ok else 0):
+            box.setCurrentIndex(i)
+            self.pump(10)
+            wb._on_sample_target(sync=True)
+            wb.draw_sample(sync=True)
+            q = wb.queue
+            good = self.wait(lambda: "sample_draw" not in wb._jobs and q.manifest is not None, 60)
+            man = q.manifest or {}
+            ok = ok and good and man.get("algorithm") == sp.ALGORITHM_V2
+            eid = box.itemData(i)
+            a_items[eid] = [it["chat_id"] for it in man.get("items") or []]
+            judged_a[eid] = self._judge_three(wb, ["direct", "certain", "probably"], "A")
+            ok = ok and len(judged_a[eid]) == 3
+        ok = ok and wb.mark_phase_done() is not None                 # ③ 완료 표시 (1차에는 ④ 가 없다, D-12 5)
+        no_missed = ph.MISSED not in wb.mode_buttons and not wb.gates()[ph.MISSED].allowed
+        self.check("adj_a_label", ok and no_missed, t1,
+                   f"segments={len(recs or [])} items={[len(v) for v in a_items.values()]} "
+                   f"judged={[len(v) for v in judged_a.values()]} missed_mode_in_primary={not no_missed}")
+        if not (ok and no_missed):
+            return None
+        t1 = time.perf_counter()
+        doc_a = self._lock_via_menu()
+        sid_a = ctx_a.session_id
+        locked_a = doc_a is not None and locking.is_locked(dst, sid_a)
+        self.win.update_session_actions()
+        plan = self.win.relabel_plan_dialog(run=lambda d: d.make("relabel_second", self.AGREE_B)) \
+            if self.win.a_plan.isEnabled() else None
+        idx = None
+        try:
+            from app import relabel as relabel_io
+            idx = relabel_io.read_index(dst)
+        except (OSError, ValueError):
+            idx = None
+        ok = locked_a and plan is not None and idx is not None and len(idx["plans"]) == 1
+        self.check("adj_a_lock_plan", ok, t1, f"locked={locked_a} plan_blocks={len((plan or {}).get('selected') or [])} "
+                                              f"index_entries={len(idx['plans']) if idx else '-'}")
+        self.win.show_home()
+        self.pump(50)
+        if not ok:
+            return None
+        return {"sid_a": sid_a, "plan": plan, "a_items": a_items, "judged_a": judged_a}
+
+    def _adj_second(self, dst: str, plan: dict, sid_a: str, n_missed: int = 2) -> dict | None:
+        """L02 두 번째 사람: 블록 안 구간(끝 2분은 게임) → ③ 3건 → ③ 완료 → ④ 놓친 후보 n 건(잠그기 전) → 잠그기.
+        L01 기록·잠금·samples/·L01 계획 본문을 한 번도 열지 않는지 감시한다."""
+        from app import locking
+        from app.core import missed as mc
+        from app.core import phase as ph
+        forbidden = (os.path.normcase(os.path.join(dst, "labels", sid_a)),
+                     os.path.normcase(os.path.join(dst, "locks", sid_a)),
+                     os.path.normcase(os.path.join(dst, "samples")))
+        stop, st = self._watch_opens(forbidden)
+        locked_b, saved = False, []
+        try:
+            t1 = time.perf_counter()
+            ok, ctx_b = self._flow_open(dst, "new:relabel_second", self.AGREE_B)
+            wb = self.wb
+            ok = ok and ctx_b is not None and wb.relabel_plan is not None and ph.MISSED in wb.mode_buttons
+            scope = wb.relabel_scope() if ok else []
+            lo, hi = scope[0] if scope else (0, 0)
+            ok = ok and wb.set_mode(ph.SEGMENTS)
+            f = wb.segment_form
+            if ok and lo > 0:
+                ok = f.add_boundary(lo)
+            if ok and hi < f.model.duration_ms:
+                ok = f.add_boundary(hi)
+            g_cut = hi - 120_000
+            ok = ok and f.add_boundary(g_cut) and f.select_at((lo + g_cut) // 2)
+            ok = ok and f.set_category("just_chatting") and f.set_confidence("certain") and \
+                f.set_rationale(f"{_hms(lo + 5_000)} smoke B 저스트채팅")
+            ok = ok and f.select_at((g_cut + hi) // 2) and f.set_category("game") and f.set_confidence("probably") \
+                and f.set_rationale(f"{_hms(g_cut + 5_000)} smoke B 게임")
+            recs = f.save() if ok else None
+            ok = ok and recs is not None and wb.mark_phase_done() is not None
+            ok = ok and wb.set_mode(ph.REACTIONS) and wb.mark_phase_done() is not None and wb.set_mode(ph.SAMPLES)
+            q = wb.queue
+            good = ok and self.wait(lambda: "sample_msgs" not in wb._jobs and q.manifest is not None, 60)
+            judged_b = self._judge_three(wb, ["direct", "certain", "undeterminable"], "B") if good else []
+            gate_before = wb.gates()[ph.MISSED].allowed
+            ok = good and len(judged_b) == 3 and not gate_before and wb.mark_phase_done() is not None
+            self.check("adj_b_label", ok, t1, f"block_ms={lo}~{hi} items={len((q.manifest or {}).get('items') or [])} "
+                                              f"judged={len(judged_b)} missed_gate_before_samples_mark={gate_before}")
+            if not ok:
+                return None
+            # ---- ④ 놓친 후보 (잠그기 전, 블록 안만 — D-12 5)
+            t1 = time.perf_counter()
+            ok = wb.gates()[ph.MISSED].allowed and wb.set_mode(ph.MISSED)
+            ok = ok and self.wait(lambda: "missed" not in wb._jobs and wb.missed_selection() is not None, 60)
+            mf = wb.missed_form
+            sel = wb.missed_selection()
+            targets = list(sel.targets) if sel is not None else []
+            inside = all(lo <= t.t_ms < hi for t in targets)
+            self.pump(30)
+            self._shot("_adj_missed")
+            fit_m = self._fit(mf) if mf is not None else "-"
+            saved = []
+            plans = [mc.Answers(True, True, True, None, True, "certain", "{t} smoke 질문 후보"),
+                     mc.Answers(True, False, True, "C", False, "probably", "{t} smoke 인사")]
+            for t, a in zip(targets, plans[:n_missed]):
+                if not mf.select_chat(t.chat_id):
+                    break
+                mf.set_answers(mc.Answers(a.cond2, a.cond3, a.cond4, a.reason_code, a.check_question, a.confidence,
+                                          a.rationale.format(t=_hms(t.t_ms))))
+                rec = mf.save()
+                if rec is None:
+                    break
+                saved.append(rec)
+            ok = ok and inside and len(saved) == min(n_missed, len(targets)) and len(saved) >= 1
+            ok = ok and wb.mark_phase_done() is not None
+            self.check("adj_b_missed", ok, t1,
+                       f"targets={len(targets)} skipped={dict((k, v) for k, v in (sel.counts if sel else {}).items() if v)} "
+                       f"saved={len(saved)} candidates={sum(1 for r in saved if r['body']['is_candidate'])} "
+                       f"all_in_block={inside} fit={fit_m}")
+            if not ok:
+                return None
+            t1 = time.perf_counter()
+            doc_b = self._lock_via_menu()
+            sid_b = ctx_b.session_id
+            locked_b = doc_b is not None and locking.is_locked(dst, sid_b)
+            self.win.show_home()
+            self.pump(50)
+        finally:
+            stop()
+        ok = locked_b and not st["bad"] and st["seen"] > 0
+        self.check("adj_b_lock_blind", ok, t1, f"locked={locked_b} opens_watched={st['seen']} "
+                                               f"forbidden_opens={len(st['bad'])}")
+        return {"sid_b": sid_b, "n_missed": len(saved)} if ok else None
+
+    def step_adjudication_flow(self) -> bool:
+        t0 = time.perf_counter()
+        if not self.args.adjudication_flow:
+            return self.check("adjudication_flow", True, t0, "skip (--adjudication-flow 없음)")
+        from app import agreement_report as ar
+        from app import relabel as relabel_io
+        from app import session as sess
+        from app.core import origin as og
+        from app.core import phase as ph
+        tmp = tempfile.mkdtemp(prefix="chatcoach_smoke_adj_")
+        dst = os.path.join(tmp, "한글 사본", "projects", "프로젝트")
+        out_root = os.path.join(tmp, "보고서")
+        ok_all = True
+        try:
+            done = copy_for_flow(self.args.project, dst)
+            for lid in (self.AGREE_A, self.AGREE_B):
+                if not sess.load_labelers(self.data_root).get(lid):
+                    sess.add_labeler(self.data_root, lid)
+            self.check("adj_copy", bool(done), time.perf_counter(), f"copied={len(done)}")
+            a = self._adj_primary(dst)
+            if a is None:
+                return False
+            b = self._adj_second(dst, a["plan"], a["sid_a"])
+            if b is None:
+                return False
+            sid_a, sid_b = a["sid_a"], b["sid_b"]
+            # ---- 보고서 (보기 전용으로 연 뒤 메뉴 길): 연결·놓친 후보 줄
+            t1 = time.perf_counter()
+            old = self.win.session_chooser
+            self.win.session_chooser = lambda outcome: None
+            try:
+                self.win.project_view.open_path(dst)
+            finally:
+                self.win.session_chooser = old
+            self.wait(lambda: self.wb is not None and not ({"chat", "media_check"} & set(self.wb._jobs)))
+            self.win.update_session_actions()
+            res = self.win.agreement_dialog(run=lambda d: d.run(sid_a, sid_b, out_root)) \
+                if self.win.a_agreement.isEnabled() else None
+            rep = res.report if res else {}
+            md = ""
+            if res and res.out_dir:
+                with open(os.path.join(res.out_dir, "report.md"), encoding="utf-8") as fh:
+                    md = fh.read()
+            ms = (rep.get("missed") or {}).get("judged") or {}
+            lk = rep.get("links") or {}
+            ok = res is not None and ms.get("b") == b["n_missed"] and "links" in rep and "놓친" in md and "연결" in md
+            ok_all &= self.check("adj_report", ok, t1,
+                                 f"missed_judged_a={ms.get('a')} missed_judged_b={ms.get('b')} "
+                                 f"links_a={lk.get('a_links')} links_b={lk.get('b_links')} "
+                                 f"md_missed_line={'놓친' in md} md_links_line={'연결' in md} "
+                                 f"format_rev={rep.get('format_rev')}")
+            self.win.show_home()
+            self.pump(50)
+            if not ok:
+                return False
+            # ---- 조정 세션: 불일치 2건 조정 + pattern_tag (근거 한 줄은 화면에만, D-12 4)
+            t1 = time.perf_counter()
+            ok, ctx_ad = self._flow_open(dst, "new:adjudication", self.AGREE_A)
+            wb = self.wb
+            av = wb.adjudication_view if ok else None
+            ok = ok and wb.mode == ph.ADJUDICATE and av is not None
+            n_cases = av.load_cases() if ok else 0
+            banner = "조정자 = 라벨러" in av.banner.text() if av else False
+            saved = []
+            for i, c in enumerate((av.cases if av else [])[:2]):
+                av.select_case(i)
+                side_ok = len(av.side_texts(c)) == 2
+                if not (side_ok and av.choose_decision(f"pick:{c.sides[0].session_id}")):
+                    break
+                av.cause_box.setCurrentIndex(av.cause_box.findData("guide_unclear"))
+                av.tag_edit.setText("smoke-경계흐림")
+                rec = av.save_current()
+                if rec is None:
+                    break
+                saved.append(rec)
+            self.pump(30)
+            self._shot("_adj")
+            fit_a = self._fit(av) if av is not None else "-"
+            kinds = sorted({c.target_kind for c in (av.cases if av else [])})
+            ok = ok and n_cases >= 2 and banner and len(saved) == 2 and \
+                all(r["body"].get("pattern_tag") == "smoke-경계흐림" for r in saved)
+            ok_all &= self.check("adj_adjudicate", ok, t1,
+                                 f"cases={n_cases} kinds={kinds} saved={len(saved)} adjudicator_is_labeler={banner} "
+                                 f"fit={fit_a}")
+            sid_ad = ctx_ad.session_id if ctx_ad else None
+            self.win.show_home()
+            self.pump(50)
+            if not ok:
+                return False
+            # ---- 계획 취소 (별도 계획: L01 같은 사람 재라벨) → 보고서 메뉴가 막혔다가 다시 켜지는지
+            t1 = time.perf_counter()
+            ok, _c = self._flow_open(dst, "resume:" + sid_a, self.AGREE_A)
+            self.win.update_session_actions()
+            plan2 = self.win.relabel_plan_dialog(run=lambda d: d.make("relabel_same", self.AGREE_A)) \
+                if ok and self.win.a_plan.isEnabled() else None
+            self.win.show_home()
+            self.pump(50)
+            ok = plan2 is not None and ar.pending_relabel_plans(dst) == [plan2["plan_id"]]
+            ok2, _c2 = self._flow_open(dst, "resume:" + sid_ad, self.AGREE_A) if ok else (False, None)
+            self.win.update_session_actions()
+            blocked = not self.win.a_agreement.isEnabled()
+            cancel_on = self.win.a_cancel_plan.isEnabled()
+
+            def run_cancel(d):
+                d.plan_box.setCurrentIndex(d.plan_box.findData(plan2["plan_id"]))
+                d.confirm.setChecked(True)
+                d.cancel_plan(reason="smoke: 같은 사람 재라벨을 하지 않음")
+            doc = self.win.plan_cancel_dialog(run=run_cancel) if ok2 and cancel_on else None
+            self.win.update_session_actions()
+            unblocked = self.win.a_agreement.isEnabled()
+            idx = relabel_io.read_index(dst)
+            st = {e["plan_id"]: e["status"] for e in (idx or {}).get("plans", [])}
+            kept = bool(plan2) and os.path.isfile(relabel_io.plan_path(dst, plan2["plan_id"]))
+            ok = ok and ok2 and blocked and cancel_on and doc is not None and unblocked and kept and \
+                relabel_io.is_cancelled(dst, plan2["plan_id"]) and st.get(plan2["plan_id"]) == "cancelled"
+            ok_all &= self.check("adj_cancel_plan", ok, t1,
+                                 f"report_blocked_before={blocked} cancel_menu={cancel_on} cancelled={doc is not None} "
+                                 f"report_enabled_after={unblocked} plan_file_kept={kept} "
+                                 f"index_status={st.get(plan2['plan_id']) if plan2 else '-'} "
+                                 f"canceller_is_labeler={(doc or {}).get('canceller_is_labeler')}")
+            self.win.show_home()
+            self.pump(50)
+            if not ok:
+                return False
+            # ---- 출처 판정: 합성 대상 파일(사본의 origin/) → 출처 판정 세션에서 3건
+            t1 = time.perf_counter()
+            from app.ui.origin_view import write_targets_file
+            ids = [c for v in a["judged_a"].values() for c in v][:3]
+            tgt = og.build_targets(chat_ids=ids, created_at="2026-10-22T10:00:00+09:00", created_by=self.AGREE_A,
+                                   basis="smoke", note="합성 시험 대상",
+                                   auto={ids[0]: {"origin": "virtual", "method": "generation_log_match",
+                                                  "generation_ref": {"file": "gen-smoke.jsonl", "gen_id": "g1"},
+                                                  "score": 0.9, "second_score": 0.2}})
+            write_targets_file(os.path.join(dst, "origin"), tgt)
+            # 감시는 세션 화면 뒤부터(세션 화면은 고른 라벨러 자기 세션 첫 줄과 relabel/index.json 을 읽는다, D-12 2):
+            # 출처 판정 세션은 다른 세션 기록·samples/·relabel/ 을 열지 않는다(03 12-1)
+            forbidden = (os.path.normcase(os.path.join(dst, "labels", sid_a)),
+                         os.path.normcase(os.path.join(dst, "labels", sid_b)),
+                         os.path.normcase(os.path.join(dst, "samples")),
+                         os.path.normcase(os.path.join(dst, "relabel")))
+            watch: dict = {}
+
+            def start_watch():
+                watch["stop"], watch["st"] = self._watch_opens(forbidden)
+
+            def stop():
+                if "stop" in watch:
+                    watch["stop"]()
+            try:
+                ok, _co = self._flow_open(dst, "new:origin_review", self.AGREE_A, on_chosen=start_watch)
+                wst = watch.get("st") or {"seen": 0, "bad": ["감시 안 걸림"]}
+                wb = self.wb
+                ov = wb.origin_view if ok else None
+                ok = ok and wb.mode == ph.ORIGIN and ov is not None and \
+                    self.wait(lambda: "origin_msgs" not in wb._jobs and ov.progress() is not None, 30)
+                pr0 = ov.progress() if ov else None
+                n = 0
+                if ok and ov.take_auto():
+                    ov.set_confidence("probably")
+                    n += ov.save_current() is not None
+                for origin, conf in (("real", "certain"), ("undeterminable", None)):
+                    if not ok:
+                        break
+                    ov.set_origin(origin)
+                    if conf:
+                        ov.set_confidence(conf)
+                    ov.rationale.setText(f"{_hms(1_000)} smoke 출처 {origin}")
+                    n += ov.save_current() is not None
+                pr = ov.progress() if ov else None
+                marked = wb.mark_phase_done() is not None if ok else False
+                self.pump(30)
+                self._shot("_adj_origin")
+                fit_o = self._fit(ov) if ov is not None else "-"
+                self.win.show_home()
+                self.pump(50)
+            finally:
+                stop()
+            ok = ok and pr0 is not None and pr0.total == 3 and n == 3 and pr is not None and pr.done == 3 and \
+                pr.auto == 1 and marked and not wst["bad"] and wst["seen"] > 0
+            ok_all &= self.check("adj_origin", ok, t1,
+                                 f"targets={pr0.total if pr0 else '-'} saved={n} auto={pr.auto if pr else '-'} "
+                                 f"by_origin={dict(pr.by_origin) if pr else '-'} forbidden_opens={len(wst['bad'])} "
+                                 f"{sorted({os.path.basename(p) for p in wst['bad']})[:4] if wst['bad'] else ''}"
+                                 f"fit={fit_o}")
+            return ok_all
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc(limit=6)
+            return self.check("adjudication_flow", False, t0, type(e).__name__)
+        finally:
+            if self.wb is not None and getattr(self.wb, "project", None) is not None and \
+                    _inside(self.wb.project.root, tmp):
+                self.win.show_home()
+                self.pump(50)
+            leftover = remove_tree_checked(tmp)
+            if leftover:
+                self.check("adj_cleanup", False, t0, f"임시 사본을 다 지우지 못함({len(leftover)}개, {tmp}) — 직접 지우세요")
+            else:
+                self.check("adj_cleanup", True, time.perf_counter(),
+                           f"사본·보고서 지움 (흐름 전체 {time.perf_counter() - t0:.1f}초)")
+
     def _resize(self, spec: str) -> None:
         """--window-size '1366x768': 메인 창 바깥 크기(테두리 포함)를 그 크기로 맞춘다(노트북 화면 확인, 11 4-2 의 2)."""
         w, h = (int(x) for x in spec.lower().split("x", 1))
@@ -1209,7 +1619,7 @@ class Smoke:
         steps = [self.step_window, self.step_open, self.step_chat, self.step_timeline, self.step_video, self.step_waveform,
                  self.step_seek, self.step_chat_activate, self.step_play, self.step_zoom, self.step_filter,
                  self.step_store_copy, self.step_shot, self.step_labeling_flow, self.step_agreement_flow,
-                 self.step_close]
+                 self.step_adjudication_flow, self.step_close]
         t_all = time.perf_counter()
         for st in steps:
             try:

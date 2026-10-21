@@ -206,7 +206,8 @@
             "asr_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]}
           }
         },
-        "dataset_split": {"enum": ["dev", "test"], "description": "세션을 만들 때의 project.dataset_split 사본(03 6-1·6-4). 나중에 프로젝트 값을 바꿔도 이 세션의 값은 그대로라, 세션마다 dev / test 가 남는다(06 9-4)."}
+        "dataset_split": {"enum": ["dev", "test"], "description": "세션을 만들 때의 project.dataset_split 사본(03 6-1·6-4). 나중에 프로젝트 값을 바꿔도 이 세션의 값은 그대로라, 세션마다 dev / test 가 남는다(06 9-4)."},
+        "reopen_note": {"type": "string", "minLength": 1, "maxLength": 300, "pattern": "^\\S(.*\\S)?$", "description": "선택. 앞 세션을 잘못 잠갔을 때 그 사유(08 D-11 7·D-12 2). 잠금은 풀지 않으므로 다음 세션의 첫 줄에 적는다. 한 줄, 앞뒤 공백 없음. 세션 선택 화면이 새 세션을 만들 때만 넣는다."}
       }
     },
     "runStartBody": {
@@ -587,11 +588,19 @@
         },
         "score": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "second_score": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "2위 후보 점수(차이가 작으면 판별 불가)."},
-        "confidence": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/confidence"}], "description": "확신도. origin 이 real·virtual 이면 필수(null 불가). undeterminable 이면 null 허용 — v0.2 개정안 5장 [제안] '어느 쪽도 정할 수 없으면 확신도를 따로 적지 않고 판별 불가를 고른다'. 확신도 '판단 불가'(undeterminable)와 출처 '판별 불가'는 다른 칸이다."},
+        "confidence": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/confidence"}], "description": "확신도. origin 이 real·virtual 이면 certain·probably 중 하나(필수). undeterminable 이면 null — v0.2 개정안 5장 [제안] '어느 쪽도 정할 수 없으면 확신도를 따로 적지 않고 판별 불가를 고른다'. 출처 판정 화면(app/core/origin.py)의 규칙과 같다(다섯째 묶음 통합에서 맞춤). 확신도 '판단 불가'(undeterminable)와 출처 '판별 불가'는 다른 칸이다."},
         "rationale": {"$ref": "#/$defs/rationale"}
       },
-      "if": {"properties": {"origin": {"enum": ["real", "virtual"]}}, "required": ["origin"]},
-      "then": {"properties": {"confidence": {"$ref": "#/$defs/confidence"}}}
+      "allOf": [
+        {
+          "if": {"properties": {"origin": {"enum": ["real", "virtual"]}}, "required": ["origin"]},
+          "then": {"properties": {"confidence": {"enum": ["certain", "probably"]}}}
+        },
+        {
+          "if": {"properties": {"origin": {"const": "undeterminable"}}, "required": ["origin"]},
+          "then": {"properties": {"confidence": {"type": "null"}}}
+        }
+      ]
     },
     "adjudicationBody": {
       "type": "object",

@@ -363,7 +363,8 @@ def test_create_read_and_never_overwrite(tmp_path):
     assert v.ok, v.problems
     assert relabel.session_args(p) == {"scope": p["scope"], "relabel_plan_id": p["plan_id"]}
     names = sorted(os.listdir(os.path.join(root, "relabel")))
-    assert names == ["RP-20261021-ab12.json", "RP-20261021-cd34.json"]      # 임시 파일이 남지 않음
+    # 임시 파일이 남지 않음. index.json 은 계획을 만들 때 같이 쓰는 색인(D-12 2, 다섯째 묶음)
+    assert names == ["RP-20261021-ab12.json", "RP-20261021-cd34.json", "index.json"]
 
 
 def test_create_requires_lock(tmp_path):

@@ -127,6 +127,57 @@
     "sessionId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}-(P|RS|R2|AD|OR|AN)-[0-9]{8}-[a-z0-9]{4}$"},
     "machine4": {"type": "string", "pattern": "^[a-z2-7]{4}$"},
     "datetime": {"type": "string", "format": "date-time"},
-    "range": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 0}, {"type": "integer", "minimum": 1}], "minItems": 2, "maxItems": 2, "description": "[start_ms, end_ms) 채팅 시계 ms."}
+    "range": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 0}, {"type": "integer", "minimum": 1}], "minItems": 2, "maxItems": 2, "description": "[start_ms, end_ms) 채팅 시계 ms."},
+    "planKind": {"enum": ["relabel_same", "relabel_second"]},
+    "cancelRecord": {
+      "title": "재라벨 계획 취소 기록 (relabel/<plan_id>.cancel.json)",
+      "description": "검토자가 사유와 함께 계획을 취소한 기록(08 D-12 7, 06 7-1). 계획 파일은 지우지도 고치지도 않고 이 파일을 한 번만 만든다(없을 때만 쓰기). 형식이 맞는 취소 기록이 있는 계획은 '남은 계획' 에서 빠져 보고서를 막지 않고, 세션 선택 화면에서도 빠진다. 형식이 틀린 취소 기록은 취소로 치지 않는다(보고서는 계속 막힘). 읽지 못하는 계획도 취소할 수 있다(plan_readable=false, 원 세션·종류·라벨러는 null). 쓰는 곳: app/relabel.py cancel_plan(조정 세션 또는 세션 밖 검토자 도구만).",
+      "type": "object",
+      "required": ["schema", "schema_version", "plan_id", "plan_sha256", "plan_readable", "source_session_id", "session_kind", "labeler_id", "reason", "cancelled_at", "cancelled_by", "cancelled_machine4", "canceller_is_labeler", "app_version"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "chatcoach/relabel-cancel"},
+        "schema_version": {"const": 1},
+        "plan_id": {"type": "string", "pattern": "^RP-[0-9]{8}-[a-z0-9]{4}$"},
+        "plan_sha256": {"$ref": "#/$defs/sha256", "description": "취소할 때 본 계획 파일 바이트의 SHA-256(계획이 나중에 바뀌지 않았음을 확인)."},
+        "plan_readable": {"type": "boolean", "description": "취소할 때 계획 파일을 relabel-plan v1 로 읽을 수 있었는가."},
+        "source_session_id": {"oneOf": [{"$ref": "#/$defs/sessionId"}, {"type": "null"}]},
+        "session_kind": {"oneOf": [{"$ref": "#/$defs/planKind"}, {"type": "null"}]},
+        "labeler_id": {"oneOf": [{"$ref": "#/$defs/labelerId"}, {"type": "null"}], "description": "그 계획의 재라벨러."},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 1000, "description": "검토자 사유(필수, 앞뒤 공백 제거). 채팅 내용·닉네임은 적지 않는다."},
+        "cancelled_at": {"$ref": "#/$defs/datetime"},
+        "cancelled_by": {"$ref": "#/$defs/labelerId"},
+        "cancelled_machine4": {"$ref": "#/$defs/machine4"},
+        "canceller_is_labeler": {"type": "boolean", "description": "취소한 사람이 그 계획의 재라벨러 또는 원 세션 라벨러(1인 작업이면 true, 08 D-12 3 과 같은 표시)."},
+        "app_version": {"type": "string"}
+      }
+    },
+    "planIndex": {
+      "title": "재라벨 계획 색인 (relabel/index.json)",
+      "description": "계획마다 plan_id·원 세션·라벨러·종류·상태만 둔다(08 D-12 2). 블록 범위·시각·τ 는 넣지 않는다. 세션 선택 화면은 이 색인만 읽고 그 라벨러 자기 계획 파일만 연다(다른 라벨러 계획 본문을 열지 않는다). 계획을 만들거나 취소할 때 만드는 자리가 계획 파일들로 통째로 다시 만든다(임시 파일 → fsync → 바꿔 넣기, 원자적). 파생물이라 지워도 다시 만들 수 있다. 색인에 없는 계획 파일은 세션 화면이 옛 길로 열어 본다.",
+      "type": "object",
+      "required": ["schema", "schema_version", "plans"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "chatcoach/relabel-index"},
+        "schema_version": {"const": 1},
+        "plans": {
+          "type": "array",
+          "description": "plan_id 순.",
+          "items": {
+            "type": "object",
+            "required": ["plan_id", "source_session_id", "labeler_id", "session_kind", "status"],
+            "additionalProperties": false,
+            "properties": {
+              "plan_id": {"type": "string", "pattern": "^RP-[0-9]{8}-[a-z0-9]{4}$"},
+              "source_session_id": {"oneOf": [{"$ref": "#/$defs/sessionId"}, {"type": "null"}], "description": "status 가 active 면 필수. cancelled(읽지 못한 계획을 취소한 경우)·unreadable 이면 null 일 수 있다(labeler_id·session_kind 도 같다)."},
+              "labeler_id": {"oneOf": [{"$ref": "#/$defs/labelerId"}, {"type": "null"}]},
+              "session_kind": {"oneOf": [{"$ref": "#/$defs/planKind"}, {"type": "null"}]},
+              "status": {"enum": ["active", "cancelled", "unreadable"], "description": "active = 쓸 수 있음, cancelled = 취소 기록 있음, unreadable = 계획 파일을 읽지 못함(취소되지 않음, 보고서를 막는다)."}
+            }
+          }
+        }
+      }
+    }
   }
 }

@@ -186,7 +186,10 @@ flowchart TB
 | `app/core/rules.py` | 등급 조건 충족 계산(등급을 미리 고르지 않음, [01](01-analysis-and-ideas.md) 3-1), 시간 창 판정, 이어짐 제안·절단, 완충 판정, 노출 추정 보조값 | thresholds | 순수 함수 | MVP |
 | `app/core/sampling.py` | 표본 추출 (`sha256-tau-v2` 기본: 순서 키, 임계 키 τ 와 불감소, 전수 전환, `draw_no`·`sample_rev`, 분류가 바뀌는 경계에만 완충, 영상 밖 제외), 재현 검증 (옛 판 `sha256-tau-v1` 매니페스트도 v1 규칙으로 재현만 — D-11 5) | ids | 순수 함수. 규칙은 [06](06-evaluation-and-agreement.md) | MVP |
 | `app/core/resolve.py` | 라벨 레코드 묶음 → '현재 유효 라벨' 뷰. supersedes 체인·철회·포크·순환·무효 참조 표시 | schema | 순수 함수, 골든 테스트 (S-10) | MVP |
-| `app/core/agreement.py` | 세션 쌍 정렬과 일치도 계산 | resolve | 순수 Python (numpy 없음) | v1 |
+| `app/core/agreement.py` | 세션 쌍 정렬과 일치도 계산 (구간 κ·핵심 일치율·경계 \|Δt\|, 반응 있음 이진 κ·등급 κ_w, 10분 블록 부트스트랩) | resolve | 순수 Python (numpy 없음) | C단계 넷째 묶음 (D-12 1) |
+| `app/core/relabel_plan.py` | 재라벨 계획 고르기 `sha256-relabel-v1`(블록 seed = `sample_seed\|relabel\|원 세션 ID`, τ_block), 재현 검증, 시작 관문(3일 간격) | sampling, ids | 순수 함수 ([06](06-evaluation-and-agreement.md) 3장) | 넷째 묶음 (D-12 1) |
+| `app/locking.py` · `app/relabel.py` · `app/agreement_report.py` | 세션 잠금 파일 만들기·검사(풀기 없음), 계획 파일 입출력(재라벨 세션은 자기 계획만), 일치도 보고서(잠금 확인 → 06 7-1 관문 → 계산 → 프로젝트 밖에 report.json·report.md) | store, core | Qt 없음 | 넷째 묶음 (D-12 1) |
+| `app/ui/lock_dialog.py` · `relabel_dialog.py` · `agreement_dialog.py` | 잠그기 2단계 화면, 계획 만들기, 보고서 고르기·보기 | 위 입출력 | 메뉴 '세션'(`&N`)·'보고'(`&B`) | 넷째 묶음 (D-12 1) |
 | `app/jsonl.py` | JSONL 안전 읽기(BOM·잘린 마지막 줄·중간 깨짐)와 한 줄 append(끝 개행 확인 → `os.write` 1회 → `fsync`) | validate | stdlib (S-30) | MVP |
 | `app/store.py` | 프로젝트 폴더 입출력의 유일한 통로. 열기(잠금·검증·로드), 라벨 append, 철회, `project.json` 저장(rev 비교), 가시성에 따른 파일 선택 | core 전부, jsonl | 6-3 의 순서 | MVP |
 | `app/export.py` | 내보내기 zip(JSONL·CSV·manifest), 허용 목록 방식, CSV 셀 보호 | store, resolve | csv(utf-8-sig) (S-27) | MVP (라벨러 패키지는 v1) |
@@ -246,7 +249,7 @@ class ProjectStore:
     @classmethod
     def open(cls, path: str, session: SessionContext) -> "ProjectStore": ...  # 잠금·검증·로드
     def append_label(self, draft: LabelDraft) -> LabelRecord: ...           # 메타 채움 → append → 되읽기 → 뷰 갱신
-    def retract_last(self) -> LabelRecord: ...                              # Ctrl+Z: 철회 레코드 1건 append
+    def retract_last(self) -> LabelRecord: ...                              # 기록 층 되돌리기: 이 PC 의 마지막 라벨 줄 하나(새 대상 → retract(undo), 고친 판 → 앞 판 body 로 새 판). 화면의 ②·③ Ctrl+Z 는 이것이 아니라 작업대가 반응 저장 한 번을 통째로 되돌린다(7-6, D-10 9, D-12 2)
     def update_project(self, mutate: Callable[[dict], None]) -> None: ...   # rev 비교 후 저장
 
 # app/updater.py
@@ -302,7 +305,8 @@ chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 │  │  ├─ rules.py
 │  │  ├─ sampling.py
 │  │  ├─ resolve.py
-│  │  └─ agreement.py                       (v1)
+│  │  ├─ relabel_plan.py                    (넷째 묶음, D-12 1)
+│  │  └─ agreement.py                       (넷째 묶음, D-12 1)
 │  └─ ui/
 │     ├─ __init__.py
 │     ├─ mainwindow.py
@@ -455,7 +459,7 @@ ChatCoach\                          = <앱>
 │  │  ├─ sealed\<sha256>.bin            봉인된 원본. 내용을 화면에 내지 않는다
 │  │  ├─ seal.jsonl                     봉인·해제 기록 (해시·크기·시각)
 │  │  └─ runs\<run_id>.json             봉인 해제 뒤 푼 결과
-│  ├─ reports\<project_id>\<report_id>\ (v1) 비교 보고서: report.json · tables\*.csv · manifest.json (06 6-7)
+│  ├─ reports\<project_id>\<report_id>\ 비교 보고서: report.json · report.md (AI 비교 때 tables\*.csv · manifest.json, 06 6-7). 프로젝트가 '…\projects\<slug>' 면 data 대신 그 옆 '…\reports' 가 기본 (03 2-2, D-12 1)
 │  ├─ disposal_log.jsonl                프로젝트 파기 기록
 │  └─ projects\<slug>\                  기본 프로젝트 위치 (5-4)
 ├─ _update\<임의 이름>\                 업데이트 준비 폴더 (같은 볼륨). 끝나면 지운다
@@ -501,9 +505,9 @@ ChatCoach\                          = <앱>
 ├─ labels\<session_id>.<machine4>.jsonl   세션 × PC 마다 하나, append-only. 모든 라벨 종류가 한 스트림
 ├─ samples\<sample_set_id>.json  표본 매니페스트 (불변. 경계가 바뀌면 sample_rev 를 올린 새 파일, 06 2-6·2-7)
 ├─ locks\
-│  ├─ open.lock                  프로젝트 잠금 (QLockFile). 잡지 못하면 읽기 전용 (S-32, 03 13-5)
-│  └─ <session_id>.json          세션 잠금 (기록 파일 해시·시각)
-├─ relabel\<plan_id>.json        (v1)
+│  ├─ open.lock                  프로젝트 잠금 (QLockFile). 잡지 못하면 읽기 전용 (S-32, 03 13-5). 잠긴 세션을 다시 열 때는 읽기 전용이라 잡지 않는다 (03 12-1, D-12 1)
+│  └─ <session_id>.json          세션 잠금 (기록 파일 해시·시각, 한 번만 만들고 풀지 않음)
+├─ relabel\<plan_id>.json        재라벨 계획 (불변, 03 6-14)
 ├─ origin\                       (v1) ★ 보호 구역: 가상 채팅 생성 기록·대조 결과
 └─ derived\                      (v1) 다시 만들기 비싼 보조 도구 결과: asr.json · vad.json · ocr.jsonl — asr·ocr 는 보호 구역
 ```
@@ -1174,7 +1178,7 @@ A·B단계 첫 측정 (2026-10-21, 개발 PC, RTX 4060 Ti, VOD 1편 `<VOD-A>`(�
 | 여러 트랙 타임라인 다시 그리기 비용 | 정적 트랙 그림 캐시, 재생 위치만 다시 그림 | — |
 | '들은 범위' 경고를 습관적으로 닫음 | 경고 무시 횟수를 세션에 기록. 직접·높음은 재확인 2회 없으면 '재확인 필요' 상태로 남고 잠금(v1)을 막는다 | 경고 자체는 차단이 아니다 |
 | 표본 100개의 시간 비용 | 기본 1.0배속, 2.0배까지 인정, '반응 미확인 → 다음' 한 키. 시범에서 배율을 잰다 | 층화 추출 여부는 [06](06-evaluation-and-agreement.md) |
-| 라벨 단위 실행 취소가 없음 | `Ctrl+Z` = 직전 라벨 철회 레코드 1건 추가 | 철회도 기록에 남는다(의도) |
+| 라벨 단위 실행 취소가 없음 | `Ctrl+Z` = ① 구간은 폼의 실행 취소, ②·③ 은 마지막 반응 저장 한 번(발화·반응·이어짐·영상 확인)을 통째로 되돌린다. 새로 만든 것은 철회, 고친 것은 앞 판으로 되돌린 새 판을 덧붙인다(7-6, D-10 9, D-12 2) | 철회·되돌린 판도 기록에 남는다(의도) |
 | 필터 뒤 선택·스크롤을 잃음 | `chat_panel` 책임으로 명시 (9장) | — |
 | 가변 프레임률 파일의 프레임 번호 과신 | 가변이면 프레임 번호를 끈다 | 실제 치지직 VOD 가 가변인지는 확인 필요 |
 | 블라인드가 소프트하다 | 재라벨 세션은 다른 세션 파일을 디스크에서 열지 않는다 | 메모장으로 여는 것은 못 막는다. 앱은 '앱 안에서 보지 않았음' 과 열람 기록까지 보장 |

@@ -10,7 +10,21 @@
   난수는 쓰지 않는다. 입력 해시에서 만든 시드로 도는 결정적 의사난수(splitmix64)를 순수 함수로 둔다(06 1장).
 - 5장 해석 문구: 1인 재라벨(intra)·2인(inter), 기준 통과·미달·불확실·건수 부족, 같은 machine_id 표시(D-11 6).
 
-이번에 하지 않는 것: 연결(±5초)·반응 시각·이어짐·확신도·놓친 후보·출처, 세 세션 이상의 Krippendorff α (D-11 8).
+다섯째 묶음(08 D-11 8 '다음 묶음', D-12 2·3·5·6)에서 더한 것
+- 연결 대상(06 4-0·4-3): 같은 chat_id 안에서 연결 발화 시작 차이 ≤ ±5초면 짝. 연결 F1 = 2×짝 ÷ (A 연결 + B 연결),
+  한쪽만 찾은 수, 반응 시각 |Δt| 중앙값·90분위·±2초 안 비율.
+- 이어짐(06 4-5): 둘 다 직접·높음인 같은 chat_id 짝에서 4값 명목 κ·혼동표, 비움·판단 불가 따로 셈, 원시값(이어진 길이
+  차이 중앙값, 다른 시청자 채팅 수 차이 중앙값, '잘림' 일치율).
+- 놓친 채팅 후보(06 4-6, 2-9): 두 세션 모두 scope=sample 로 판정한 채팅. 후보 여부 κ·AC1(Gwet)·유병률, 조건 ②③④ 일치율,
+  사유 코드 명목 κ·혼동표(둘 다 '후보 아님' 이고 사람이 고른 B·C·D·E·G 만. 자동 A·F 와 source=auto 는 건수만).
+  표본 밖에서 따로 찾은 것(extra)은 비교하지 않고 센다.
+- 출처(06 4-7, D-12 6): 실제·가상·판별 불가 3×3 혼동표·명목 κ. 생성 기록·봇 가명 대조로 정한 것(method)은 '자동' 으로
+  따로 세고, 사람이 정한 것끼리의 κ 를 함께 낸다. 이 함수는 통합 때 core/origin 쪽 같은 함수와 하나로 합친다.
+- 표본에서 빠진 판정(D-12 2): 세션의 현재 구간표로 다시 보면 표본 적격 자리(저스트채팅 구간 안 · 경계 완충 밖)가 아닌
+  from_sample 판정과 scope=sample 놓친 후보는 일치도에서 빼고 수만 센다. 판정 자체는 그대로 남는다.
+- 보고서 머리의 '조정자 = 라벨러' 자리(D-12 3, 입력 플래그).
+
+이번에도 하지 않는 것: 확신도(4-4), 세 세션 이상의 Krippendorff α, 층(무작위·어려움) 나눠 보기, 새 지표의 신뢰구간.
 
 입력은 resolve 결과(현재 유효 라벨)의 레코드 dict(또는 body dict)다. 본문·닉네임·근거(rationale)는 결과에 넣지 않는다
 — 근거 한 줄에는 '13:42 ○○님 호명' 처럼 닉네임이 들어갈 수 있다. 결과에 남는 것은 숫자·분류·등급·chat_id·시각뿐이다.
@@ -25,7 +39,7 @@ import hashlib
 from collections import Counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from .segments import is_transition
+from .segments import is_transition, record_buffers
 
 # ----------------------------------------------------------------------------- 값
 CATEGORIES = ("just_chatting", "game", "singing", "other", "undeterminable")
@@ -50,6 +64,8 @@ DEFAULT_SETTINGS: dict = {
         "min_n_for_metric": 30,
         "block_minutes": 10,
         "ci_level": 0.95,
+        "utterance_match_tolerance_sec": 5,      # 06 10장 · 4-0 연결 짝 ±5초
+        "reaction_time_tolerance_sec": 2,        # 06 10장 · 4-3 반응 시각 ±2초 안 비율
     },
     "gate": {
         "segment_kappa": 0.80,
@@ -99,6 +115,9 @@ def merge_settings(override: Mapping | None = None) -> dict:
         raise AgreementError("agreement.boundary_tolerance_sec 는 0 이상의 수여야 합니다")
     if not _is_num(a.get("ci_level")) or not 0 < a["ci_level"] < 1:
         raise AgreementError("agreement.ci_level 은 0 과 1 사이여야 합니다")
+    for k in ("utterance_match_tolerance_sec", "reaction_time_tolerance_sec"):
+        if not _is_num(a.get(k)) or a[k] < 0:
+            raise AgreementError(f"agreement.{k} 는 0 이상의 수여야 합니다")
     for k in ("segment_kappa", "binary_kappa", "grade_kappa_w", "boundary_median_sec"):
         if not _is_num(g.get(k)):
             raise AgreementError(f"gate.{k} 는 수여야 합니다")
@@ -686,6 +705,496 @@ def _case(cid: str, ra: Mapping, chat_times, va: str, vb: str) -> dict:
     return {"chat_id": cid, "t_ms": t, "a": va, "b": vb}
 
 
+# ----------------------------------------------------------------------------- 공통: 레코드·범위
+def _eid(rec: Mapping) -> str | None:
+    """레코드의 entity_id (레코드 dict 에만 있다. body 만 받으면 None)."""
+    v = rec.get("entity_id") if isinstance(rec, Mapping) else None
+    return v if isinstance(v, str) and v else None
+
+
+def _chat_t(cid: str, body: Mapping, chat_times: Mapping[str, int] | None) -> int | None:
+    """채팅 시각: chat_times 에 있으면 그것, 없으면 그 라벨의 first_visible_ms. 모르면 None."""
+    t = (chat_times or {}).get(cid)
+    if _is_int(t):
+        return t
+    t = body.get("first_visible_ms") if isinstance(body, Mapping) else None
+    return t if _is_int(t) else None
+
+
+def _norm_scope(scope: Sequence | None) -> list[tuple[int, int]] | None:
+    if scope is None:
+        return None
+    return [(int(a), int(b)) for a, b in scope]
+
+
+def _in_scope(t: int | None, scope: list[tuple[int, int]] | None) -> bool:
+    """범위가 없거나 시각을 모르면 True(뺄 수 없어 남긴다 — compare_samples 와 같은 규칙)."""
+    if scope is None or t is None:
+        return True
+    return any(lo <= t < hi for lo, hi in scope)
+
+
+def _by_chat_records(records: Iterable[Mapping], keep=None) -> tuple[dict[str, Mapping], int]:
+    """chat_id → 레코드(또는 body). 같은 chat_id 가 둘 이상이면 그 chat_id 는 빼고 센다. keep(body) 가 거짓이면 건너뜀."""
+    seen: dict[str, Mapping] = {}
+    dup: set[str] = set()
+    for r in records:
+        b = _body(r)
+        cid = b.get("chat_id")
+        if not isinstance(cid, str) or not cid:
+            continue
+        if keep is not None and not keep(b):
+            continue
+        if cid in seen:
+            dup.add(cid)
+        else:
+            seen[cid] = r
+    for c in dup:
+        seen.pop(c, None)
+    return seen, len(dup)
+
+
+# ----------------------------------------------------------------------------- 표본에서 빠진 판정 (D-12 2)
+def sample_regions(segments: Iterable[Mapping], *, scope: Sequence | None = None,
+                   buffer_ms: int = DEFAULT_BUFFER_MS) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """세션의 현재 구간표 → (저스트채팅 구간 [(시작, 끝)], 경계 완충 [(시작, 끝)]). 표본 적격 자리(06 2-2 의 1·2번)를 다시 본다.
+
+    완충은 core.segments.record_buffers 의 v2 규칙(분류가 바뀌는 경계만, sha256-tau-v2).
+    - scope 가 있으면(재라벨 블록) 블록마다 그 안의 구간만으로 계산한다 — 블록 가장자리는 경계가 아니다(06 3-1,
+      작업대 relabel_buffers 와 같은 방법).
+    - scope 가 없으면 구간들의 가장 늦은 끝을 영상 끝으로 보고 계산한다(보고서는 영상을 열지 않는다).
+    영상 밖(D-10 3)은 보지 않는다 — 판정이 있었다면 그때 영상 안이었고, 구간을 고쳐도 바뀌지 않는다.
+    """
+    segs = []
+    for r in segments or ():
+        b = _body(r)
+        s, e, c = b.get("start_ms"), b.get("end_ms"), b.get("category")
+        if _is_int(s) and _is_int(e) and e > s:
+            segs.append({"start_ms": s, "end_ms": e, "category": c})
+    jc = sorted((s["start_ms"], s["end_ms"]) for s in segs if s["category"] == JUST_CHATTING)
+    sc = _norm_scope(scope)
+    bufs: list[tuple[int, int]] = []
+    if sc is None:
+        dur = max((s["end_ms"] for s in segs), default=0)
+        bufs = list(record_buffers(segs, dur, buffer_ms))
+    else:
+        for lo, hi in sc:
+            inside = [{"start_ms": s["start_ms"] - lo, "end_ms": s["end_ms"] - lo, "category": s["category"]}
+                      for s in segs if lo <= s["start_ms"] and s["end_ms"] <= hi]
+            bufs += [(a + lo, z + lo) for a, z in record_buffers(inside, hi - lo, buffer_ms)]
+    return jc, sorted(bufs)
+
+
+def split_current_sample(reactions: Iterable[Mapping], missed: Iterable[Mapping], segments: Iterable[Mapping], *,
+                         scope: Sequence | None = None, buffer_ms: int = DEFAULT_BUFFER_MS,
+                         chat_times: Mapping[str, int] | None = None,
+                         current_sample: Iterable[str] | None = None) -> dict:
+    """표본에서 빠진 판정을 가른다 (D-12 2: 판정은 남기고 일치도에서는 현재 표본 안만 센다, 빠진 수는 1줄).
+
+    - 대상: entry = from_sample 인 반응과 scope = sample 인 놓친 후보. ② 라벨(from_utterance)은 ② 라벨로 남는다(03 6-13).
+    - current_sample(chat_id 목록)을 주면 그 안인지로 가른다. 없으면 sample_regions 로 다시 본다: 채팅 시각이 저스트채팅 구간
+      안이고 경계 완충 밖이어야 '현재 표본 자리'. 구간표가 비었거나 시각을 모르면 가를 수 없어 남긴다.
+    결과 {reactions, missed, dropped_reactions, dropped_missed, method}. 입력 dict 는 고치지 않는다(같은 dict 를 가리킨다).
+    """
+    reactions, missed, segments = list(reactions or ()), list(missed or ()), list(segments or ())
+    if current_sample is not None:
+        cur = set(current_sample)
+
+        def in_sample(cid: str, b: Mapping) -> bool:
+            return cid in cur
+        method = "given"
+    elif any(_is_int(_body(s).get("start_ms")) for s in segments):
+        jc, bufs = sample_regions(segments, scope=scope, buffer_ms=buffer_ms)
+
+        def in_sample(cid: str, b: Mapping) -> bool:
+            t = _chat_t(cid, b, chat_times)
+            if t is None:
+                return True
+            return any(a <= t < z for a, z in jc) and not any(a <= t < z for a, z in bufs)
+        method = "segments"
+    else:
+        return {"reactions": reactions, "missed": missed, "dropped_reactions": 0, "dropped_missed": 0, "method": "none"}
+    kr, km = [], []
+    dr = dm = 0
+    for r in reactions:
+        b = _body(r)
+        cid = b.get("chat_id")
+        if b.get("entry") == "from_sample" and isinstance(cid, str) and not in_sample(cid, b):
+            dr += 1
+            continue
+        kr.append(r)
+    for r in missed:
+        b = _body(r)
+        cid = b.get("chat_id")
+        if b.get("scope") == "sample" and isinstance(cid, str) and not in_sample(cid, b):
+            dm += 1
+            continue
+        km.append(r)
+    return {"reactions": kr, "missed": km, "dropped_reactions": dr, "dropped_missed": dm, "method": method}
+
+
+def drop_missed_not_target(missed: Iterable[Mapping], reactions: Iterable[Mapping]) -> tuple[list, int]:
+    """④ 를 매긴 뒤 ③ 판정을 직접·높음으로 고쳐 06 2-9 대상(반응 미확인·관련성만 있음·불명확)이 아니게 된 채팅의
+    놓친 후보(scope=sample)를 일치도에서 뺀다. 기록은 남긴다(빼는 수만 센다).
+
+    reactions = 그 세션의 현재 유효 반응 전부(표본 자르기 전). 그 채팅의 유효 반응이 꼭 하나 있고 그것이 대상이 아닐 때만
+    뺀다 — 반응이 없거나 둘 이상이면 가를 수 없어 남긴다. 결과 (남긴 목록, 뺀 수)."""
+    from .missed import target_state
+    by: dict[str, list] = {}
+    for r in reactions or ():
+        cid = _body(r).get("chat_id")
+        if isinstance(cid, str):
+            by.setdefault(cid, []).append(r)
+    keep: list = []
+    n = 0
+    for m in missed or ():
+        b = _body(m)
+        cid = b.get("chat_id")
+        rs = by.get(cid) if isinstance(cid, str) else None
+        if b.get("scope") == "sample" and rs and len(rs) == 1 and target_state(_body(rs[0])) is None:
+            n += 1
+            continue
+        keep.append(m)
+    return keep, n
+
+
+# ----------------------------------------------------------------------------- 연결 대상 · 반응 시각 (06 4-0 · 4-3)
+def _links(reactions: Iterable[Mapping], utterances: Iterable[Mapping], scope, chat_times) -> tuple[dict, dict]:
+    """chat_id → {utt_start, rt}. 연결 = linked_utterance_id 가 있는 현재 유효 반응(직접·높음). 발화를 못 찾으면 broken."""
+    ustart: dict[str, int] = {}
+    for u in utterances or ():
+        e = _eid(u)
+        s = _body(u).get("start_ms")
+        if e and _is_int(s):
+            ustart[e] = s
+    out: dict[str, dict] = {}
+    cnt = {"broken": 0, "duplicate_chat": 0, "outside_scope": 0}
+    by, dup = _by_chat_records(reactions)
+    cnt["duplicate_chat"] = dup
+    for cid, r in by.items():
+        b = _body(r)
+        uid = b.get("linked_utterance_id")
+        if not isinstance(uid, str) or not uid:
+            continue
+        if not _in_scope(_chat_t(cid, b, chat_times), scope):
+            cnt["outside_scope"] += 1
+            continue
+        if uid not in ustart:
+            cnt["broken"] += 1
+            continue
+        rt = b.get("reaction_time_ms")
+        out[cid] = {"utt_start": ustart[uid], "rt": rt if _is_int(rt) else None}
+    return out, cnt
+
+
+def compare_links(reactions_a: Iterable[Mapping], reactions_b: Iterable[Mapping],
+                  utterances_a: Iterable[Mapping], utterances_b: Iterable[Mapping], *,
+                  settings: Mapping | None = None, scope: Sequence | None = None,
+                  chat_times: Mapping[str, int] | None = None) -> dict:
+    """연결 대상 일치 (06 4-0: (chat_id, 발화) 단위, 같은 chat_id 안에서 발화 시작 차이 ≤ ±5초면 짝).
+
+    반응 1건은 연결 발화가 하나라 chat_id 마다 연결은 많아야 1개다. 그래서 '차이가 작은 쌍부터' 는 같은 chat_id 의 두 연결이
+    창 안인지 보는 것과 같다. 창 밖이면 두 연결 모두 짝 없음(far 로도 센다).
+    연결 F1 = 2 × 짝 ÷ (A 연결 수 + B 연결 수) (4-3, 사람끼리는 어느 쪽도 정답이 아니라 대칭).
+    반응 시각: 짝지은 연결의 reaction_time_ms |Δt| 중앙값·90분위·±2초 안 비율.
+    입력 반응·발화는 레코드 dict(entity_id 필요). 발화 entity_id 는 세션마다 달라 시작 시각으로 맞춘다.
+    """
+    st = merge_settings(settings)
+    ag = st["agreement"]
+    tol = int(round(float(ag["utterance_match_tolerance_sec"]) * 1000))
+    rtol = int(round(float(ag["reaction_time_tolerance_sec"]) * 1000))
+    sc = _norm_scope(scope)
+    la, ca = _links(reactions_a, utterances_a, sc, chat_times)
+    lb, cb = _links(reactions_b, utterances_b, sc, chat_times)
+    matched = []
+    far = 0
+    for cid in sorted(set(la) & set(lb)):
+        d = abs(la[cid]["utt_start"] - lb[cid]["utt_start"])
+        if d <= tol:
+            matched.append(cid)
+        else:
+            far += 1
+    m = len(matched)
+    na, nb = len(la), len(lb)
+    rts = [abs(la[c]["rt"] - lb[c]["rt"]) for c in matched if la[c]["rt"] is not None and lb[c]["rt"] is not None]
+    utt = [abs(la[c]["utt_start"] - lb[c]["utt_start"]) for c in matched]
+    mn = int(ag["min_n_for_metric"])
+    return {
+        "a_links": na, "b_links": nb, "matched": m, "a_only": na - m, "b_only": nb - m,
+        "same_chat_far": far,
+        "f1": (2 * m / (na + nb)) if (na + nb) else None,
+        "tolerance_sec": tol / 1000,
+        "utterance_start_median_sec": _median_sec(utt),
+        "reaction_time": {
+            "n": len(rts),
+            "median_sec": _median_sec(rts),
+            "p90_sec": None if not rts else percentile(rts, 0.9) / 1000,
+            "within_tolerance_ratio": (sum(1 for x in rts if x <= rtol) / len(rts)) if rts else None,
+            "tolerance_sec": rtol / 1000,
+        },
+        "problems": {"a": ca, "b": cb},
+        "low_n": (na + nb) < mn,
+    }
+
+
+# ----------------------------------------------------------------------------- 이어짐 (06 4-5)
+CONTINUATION_TYPES = ("none", "short", "extended", "new_topic")
+MISSING = "missing"
+
+
+def _cont_map(continuations: Iterable[Mapping]) -> tuple[dict[str, Mapping], int]:
+    """reaction_entity_id → 이어짐 body. 한 반응에 유효 이어짐이 둘 이상이면 빼고 센다."""
+    seen: dict[str, Mapping] = {}
+    dup: set[str] = set()
+    for r in continuations or ():
+        b = _body(r)
+        rid = b.get("reaction_entity_id")
+        if not isinstance(rid, str):
+            continue
+        if rid in seen:
+            dup.add(rid)
+        else:
+            seen[rid] = b
+    for k in dup:
+        seen.pop(k, None)
+    return seen, len(dup)
+
+
+def _span_ms(b: Mapping) -> int | None:
+    s, e = b.get("span_start_ms"), b.get("span_end_ms")
+    return (e - s) if _is_int(s) and _is_int(e) and e >= s else None
+
+
+def compare_continuations(reactions_a: Iterable[Mapping], reactions_b: Iterable[Mapping],
+                          continuations_a: Iterable[Mapping], continuations_b: Iterable[Mapping], *,
+                          settings: Mapping | None = None, scope: Sequence | None = None,
+                          chat_times: Mapping[str, int] | None = None) -> dict:
+    """이어짐 일치 (06 4-5). 같은 chat_id 반응 짝 가운데 둘 다 직접·높음(판단 불가 아님)인 것만 비교한다.
+
+    - 이어짐 4값은 명목 척도 κ(Cohen)와 4×4 혼동표. 한쪽이라도 비운 것(D-10 7 선택)은 'missing' 으로 따로 센다.
+    - 이어짐 확신도가 판단 불가면 κ 에서 빼고 따로 센다(06 4-0).
+    - 원시값: 둘 다 span 이 있는 짝의 이어진 길이 차이 중앙값(초), 다른 시청자 채팅 수(related_chat_ids) 차이 중앙값,
+      '잘림'(truncated_at_segment_end) 일치율.
+    반응은 레코드 dict(entity_id 로 이어짐을 찾는다)여야 한다. body 만 주면 이어짐을 찾지 못해 missing 으로 센다.
+    """
+    st = merge_settings(settings)
+    sc = _norm_scope(scope)
+    ma, _ = _by_chat_records(reactions_a)
+    mb, _ = _by_chat_records(reactions_b)
+    conts_a, dup_a = _cont_map(continuations_a)
+    conts_b, dup_b = _cont_map(continuations_b)
+    table: Counter = Counter()
+    missing = {"both": 0, "a_only": 0, "b_only": 0}
+    und = {"both": 0, "a_only": 0, "b_only": 0}
+    span_d: list[int] = []
+    rel_d: list[int] = []
+    trunc_same = trunc_n = 0
+    pairs = 0
+    disagreements = []
+    for cid in sorted(set(ma) & set(mb)):
+        ra, rb = ma[cid], mb[cid]
+        ba, bb = _body(ra), _body(rb)
+        if reaction_value(ba) not in POSITIVE or reaction_value(bb) not in POSITIVE:
+            continue
+        if not _in_scope(_chat_t(cid, ba, chat_times), sc) or not _in_scope(_chat_t(cid, bb, chat_times), sc):
+            continue
+        pairs += 1
+        ca = conts_a.get(_eid(ra) or "")
+        cb = conts_b.get(_eid(rb) or "")
+        ta = ca.get("type") if ca and ca.get("type") in CONTINUATION_TYPES else None
+        tb = cb.get("type") if cb and cb.get("type") in CONTINUATION_TYPES else None
+        if ta is None or tb is None:
+            missing["both" if ta is None and tb is None else "a_only" if ta is None else "b_only"] += 1
+            continue
+        ua, ub = ca.get("confidence") == UNDETERMINABLE, cb.get("confidence") == UNDETERMINABLE
+        if ua or ub:
+            und["both" if ua and ub else "a_only" if ua else "b_only"] += 1
+            continue
+        table[(ta, tb)] += 1
+        if ta != tb:
+            disagreements.append({"chat_id": cid, "t_ms": _chat_t(cid, ba, chat_times), "a": ta, "b": tb})
+        sa, sb = _span_ms(ca), _span_ms(cb)
+        if ta != "none" and tb != "none" and sa is not None and sb is not None:
+            span_d.append(abs(sa - sb))
+        la, lb = ca.get("related_chat_ids"), cb.get("related_chat_ids")
+        if isinstance(la, list) and isinstance(lb, list):
+            rel_d.append(abs(len(la) - len(lb)))
+        xa, xb = ca.get("truncated_at_segment_end"), cb.get("truncated_at_segment_end")
+        if isinstance(xa, bool) and isinstance(xb, bool):
+            trunc_n += 1
+            trunc_same += int(xa == xb)
+    k = kappa_from_table(table, CONTINUATION_TYPES)
+    rel = percentile(rel_d, 0.5)
+    return {
+        "pairs_positive_both": pairs,
+        "n": k["n"],
+        "agreement": k["p_o"], "kappa": k["kappa"], "p_e": k["p_e"],
+        "confusion": _confusion(table, CONTINUATION_TYPES),
+        "missing": missing,
+        "undeterminable": und,
+        "duplicate_continuation": {"a": dup_a, "b": dup_b},
+        "raw": {
+            "span_n": len(span_d), "span_diff_median_sec": _median_sec(span_d),
+            "related_n": len(rel_d), "related_count_diff_median": rel,
+            "truncated_n": trunc_n, "truncated_agreement": (trunc_same / trunc_n) if trunc_n else None,
+        },
+        "disagreements": disagreements,
+        "low_n": k["n"] < int(st["agreement"]["min_n_for_metric"]),
+    }
+
+
+# ----------------------------------------------------------------------------- 놓친 채팅 후보 (06 4-6, 2-9)
+REASON_CODES = ("A", "B", "C", "D", "E", "F", "G")
+HUMAN_REASON_CODES = ("B", "C", "D", "E", "G")     # 사람이 고르는 코드 (06 4-6). A·F 는 자동이라 일치도를 부풀린다
+AUTO_REASON_CODES = frozenset({"A", "F"})
+
+
+def _cond(b: Mapping, key: str):
+    v = b.get(key)
+    if isinstance(v, Mapping):
+        v = v.get("value")
+    return v if isinstance(v, bool) else None
+
+
+def compare_missed(missed_a: Iterable[Mapping], missed_b: Iterable[Mapping], *, settings: Mapping | None = None,
+                   scope: Sequence | None = None, chat_times: Mapping[str, int] | None = None) -> dict:
+    """놓친 채팅 후보 일치 (06 4-6). 대상은 두 세션 모두 scope = sample(2-9 의 체계적 대상)로 판정한 같은 chat_id.
+
+    - 후보 여부(is_candidate) 2×2: 일치율·κ·Gwet AC1·유병률. 후보 비율이 낮을 것이라 AC1 을 늘 같이 보인다.
+    - 조건 ②③④ 각각의 일치율(둘 다 값이 있는 짝만). ① 은 자동 계산이라 뺀다.
+    - 사유 코드: 둘 다 '후보 아님' 인 짝 가운데 두 코드가 모두 B·C·D·E·G 이고 어느 쪽도 reason_code_source = auto 가 아닌 것만
+      명목 κ·5×5 혼동표. 자동 A·F(또는 source auto)가 낀 짝은 건수만(auto_excluded).
+    - extra(표본 밖에서 따로 찾은 후보)는 비교하지 않고 센다.
+    - scope(두 세션 범위의 교집합)를 주면 그 밖 채팅은 빼고 센다 — 놓친 후보는 재라벨 블록 안에서만 비교한다(D-12 5).
+    """
+    st = merge_settings(settings)
+    sc = _norm_scope(scope)
+
+    def sample_only(b: Mapping) -> bool:
+        return b.get("scope") == "sample"
+    extra = {"a": 0, "b": 0}
+    outside = {"a": 0, "b": 0}
+    maps = []
+    dups = []
+    for side, recs in (("a", missed_a), ("b", missed_b)):
+        recs = list(recs or ())
+        extra[side] = sum(1 for r in recs if _body(r).get("scope") == "extra")
+        m, d = _by_chat_records(recs, keep=sample_only)
+        n0 = len(m)
+        m = {c: r for c, r in m.items() if _in_scope(_chat_t(c, _body(r), chat_times), sc)}
+        outside[side] = n0 - len(m)
+        maps.append(m)
+        dups.append(d)
+    ma, mb = maps
+    both = sorted(set(ma) & set(mb))
+    cand: Counter = Counter()
+    conds = {k: {"n": 0, "same": 0} for k in ("cond2", "cond3", "cond4")}
+    reason: Counter = Counter()
+    auto_excl = 0
+    missing_code = 0
+    disagreements = []
+    for cid in both:
+        ba, bb = _body(ma[cid]), _body(mb[cid])
+        xa, xb = ba.get("is_candidate"), bb.get("is_candidate")
+        if not isinstance(xa, bool) or not isinstance(xb, bool):
+            continue
+        cand[(xa, xb)] += 1
+        for k in conds:
+            va, vb = _cond(ba, k), _cond(bb, k)
+            if va is not None and vb is not None:
+                conds[k]["n"] += 1
+                conds[k]["same"] += int(va == vb)
+        if xa != xb:
+            disagreements.append({"chat_id": cid, "t_ms": _chat_t(cid, ba, chat_times),
+                                  "a": "candidate" if xa else ba.get("reason_code"),
+                                  "b": "candidate" if xb else bb.get("reason_code")})
+        if xa or xb:
+            continue
+        code_a, code_b = ba.get("reason_code"), bb.get("reason_code")
+        if code_a not in REASON_CODES or code_b not in REASON_CODES:
+            missing_code += 1
+            continue
+        if (code_a in AUTO_REASON_CODES or code_b in AUTO_REASON_CODES
+                or ba.get("reason_code_source") == "auto" or bb.get("reason_code_source") == "auto"):
+            auto_excl += 1
+            continue
+        reason[(code_a, code_b)] += 1
+        if code_a != code_b:
+            disagreements.append({"chat_id": cid, "t_ms": _chat_t(cid, ba, chat_times), "a": code_a, "b": code_b})
+    kc = kappa_from_table(cand, (True, False))
+    ac = ac1_binary(cand)
+    kr = kappa_from_table(reason, HUMAN_REASON_CODES)
+    mn = int(st["agreement"]["min_n_for_metric"])
+    disagreements.sort(key=lambda d: (d["t_ms"] if d["t_ms"] is not None else -1, d["chat_id"]))
+    return {
+        "judged": {"a": len(ma), "b": len(mb), "both": len(both), "a_only": len(set(ma) - set(mb)),
+                   "b_only": len(set(mb) - set(ma)), "extra_a": extra["a"], "extra_b": extra["b"],
+                   "outside_scope_a": outside["a"], "outside_scope_b": outside["b"],
+                   "duplicate_chat_a": dups[0], "duplicate_chat_b": dups[1]},
+        "candidate": {
+            "n": kc["n"],
+            "both_candidate": cand.get((True, True), 0), "a_only": cand.get((True, False), 0),
+            "b_only": cand.get((False, True), 0), "both_not": cand.get((False, False), 0),
+            "agreement": kc["p_o"], "kappa": kc["kappa"], "prevalence": ac["prevalence"], "ac1": ac["ac1"],
+            "low_n": kc["n"] < mn,
+        },
+        "conditions": {k: {"n": v["n"], "agreement": (v["same"] / v["n"]) if v["n"] else None} for k, v in conds.items()},
+        "reason_code": {
+            "n": kr["n"], "agreement": kr["p_o"], "kappa": kr["kappa"], "p_e": kr["p_e"],
+            "confusion": _confusion(reason, HUMAN_REASON_CODES),
+            "auto_excluded": auto_excl, "missing_code": missing_code,
+            "low_n": kr["n"] < mn,
+        },
+        "disagreements": disagreements,
+    }
+
+
+# ----------------------------------------------------------------------------- 출처 (06 4-7, D-12 6)
+ORIGIN_VALUES = ("real", "virtual", "undeterminable")
+AUTO_ORIGIN_METHODS = frozenset({"generation_log_match", "viewer_id_match"})   # 기록 대조로 정한 것 = '자동'
+
+
+def compare_origins(origins_a: Iterable[Mapping], origins_b: Iterable[Mapping], *,
+                    settings: Mapping | None = None) -> dict:
+    """출처 판정 일치 (06 4-7). 입력은 출처 판정 라벨(03 6-11 origin body: chat_id·origin·method …)의 레코드 또는 body.
+
+    - 같은 chat_id 짝. 실제·가상·판별 불가 3×3 혼동표(행 A, 열 B)와 명목 κ(판별 불가도 한 값).
+    - 한쪽이라도 method 가 자동(생성 기록 대조·봇 가명 대조)이면 '자동' 짝으로 센다. 자동 결정은 표시만 한다(D-12 6):
+      전체 κ 와 함께 사람이 정한 짝끼리의 κ(human)를 따로 낸다.
+    - 출처 값이 셋 밖이면 invalid 로 센다.
+    계산은 app.core.origin.compare_origins 하나다(통합에서 합침, strict=False: 저장된 라벨의 출처 값만 본다).
+    이 함수는 그 결과를 보고서 모양(judged·n·agreement·kappa·human·auto_pairs)으로 바꾸기만 한다. origin 은 이
+    모듈의 kappa_from_table 을 쓰므로 맨 위에서 import 하면 순환이 된다 — 함수 안에서 늦게 import 한다.
+    """
+    from . import origin as og          # 순환 import 를 피해 늦게 (origin → agreement.kappa_from_table)
+    st = merge_settings(settings)
+    r = og.compare_origins(list(origins_a or ()), list(origins_b or ()), strict=False)
+    both = r["pairs"] + r["invalid_pairs"]
+    mn = int(st["agreement"]["min_n_for_metric"])
+    al, hu = r["all"], r["human"]
+    return {
+        "compared": r["labels_a"] > 0 and r["labels_b"] > 0,
+        "judged": {"a": r["labels_a"], "b": r["labels_b"], "both": both, "a_only": r["labels_a"] - both,
+                   "b_only": r["labels_b"] - both, "duplicate_chat_a": r["duplicate_a"],
+                   "duplicate_chat_b": r["duplicate_b"], "invalid_pairs": r["invalid_pairs"]},
+        "n": al["n"], "agreement": al["p_o"], "kappa": al["kappa"], "p_e": al["p_e"],
+        "confusion": _confusion(_table_of(al["confusion"]), ORIGIN_VALUES),
+        "auto_pairs": r["auto"]["n"],
+        "human": {"n": hu["n"], "agreement": hu["p_o"], "kappa": hu["kappa"],
+                  "confusion": _confusion(_table_of(hu["confusion"]), ORIGIN_VALUES), "low_n": hu["n"] < mn},
+        "auto_methods": sorted(AUTO_ORIGIN_METHODS),
+        "undeterminable": dict(r["undeterminable"]),
+        "disagreements": [dict(d) for d in r["disagreements"]],
+        "low_n": al["n"] < mn,
+    }
+
+
+def _table_of(conf: Mapping) -> dict[tuple, int]:
+    """origin.confusion_from_pairs 모양({labels, rows}) → {(A, B): 건수}."""
+    labs = list(conf["labels"])
+    return {(labs[i], labs[j]): conf["rows"][i][j] for i in range(len(labs)) for j in range(len(labs))}
+
+
 # ----------------------------------------------------------------------------- 판정과 해석 (5장)
 def gate_verdict(value: float | None, ci: Mapping | None, gate: float, *, n: int, min_n: int,
                  higher_is_better: bool = True) -> str:
@@ -735,7 +1244,7 @@ def comparison_type(a: Mapping, b: Mapping) -> str:
 
 
 def interpret(ctype: str, gate_rows: Sequence[Mapping], header: Mapping, settings: Mapping,
-              sample: Mapping | None = None) -> list[str]:
+              sample: Mapping | None = None, origin: Mapping | None = None) -> list[str]:
     """06 5장의 해석 문구. 사람이 읽는 줄 목록(본문·닉네임 없음)."""
     lines: list[str] = []
     verdicts = {r["key"]: r["verdict"] for r in gate_rows}
@@ -743,8 +1252,13 @@ def interpret(ctype: str, gate_rows: Sequence[Mapping], header: Mapping, setting
     failed = [r for r in gate_rows if r["verdict"] == V_FAIL]
     if header.get("same_machine"):
         lines.append("두 세션이 같은 machine_id 에서 매겨졌다. 기능 시험용이며 실제 일치도로 쓰면 안 된다 (08 D-11 6).")
+    if header.get("adjudicator_is_labeler"):
+        lines.append("조정자 = 라벨러: 1인 작업이라 라벨러가 조정을 겸한다. 불일치 원인 판단에 본인 판정 쪽 쏠림이 있을 수 있다 (08 D-12 3).")
     if not header.get("representative", True):
-        lines.append("노출 기록(view.exposed 또는 분석 세션 열람)이 있는 세션이 있어 일치도 대표값으로 쓰지 않고 따로 보고한다 (06 3-4).")
+        if header.get("view_exposed_sessions", True):
+            lines.append("노출 기록(view.exposed 또는 분석 세션 열람)이 있는 세션이 있어 일치도 대표값으로 쓰지 않고 따로 보고한다 (06 3-4).")
+        if header.get("cancelled_plan_sessions"):
+            lines.append("재라벨 계획이 취소된 세션이 있어 일치도 대표값으로 쓰지 않고 따로 보고한다 (06 7-1, 08 D-12 7).")
     if ctype == "intra":
         lines.append("같은 사람 재라벨(intra-rater): 한 사람이 기준을 일관되게 쓰는지를 잰다. 높아도 기준이 명확하다는 증거는 "
                      "아니고, 다른 사람과의 일치의 '상한' 으로만 읽는다.")
@@ -774,6 +1288,9 @@ def interpret(ctype: str, gate_rows: Sequence[Mapping], header: Mapping, setting
         lines.append(f"직접 반응이 들어간 짝이 {sample.get('direct_pairs', 0)}건이다. 이 정도에서는 κ 신뢰구간이 넓으니 결론을 미룬다 (06 4-8).")
     if header.get("engine_author_included"):
         lines.append("라벨러 가운데 엔진 작성자가 있다. 엔진 규칙을 아는 사람의 라벨에는 블라인드로도 막을 수 없는 쏠림이 있다 (06 5장).")
+    if origin is not None and origin.get("compared") and origin.get("kappa") is not None:
+        lines.append("출처 일치도가 낮으면 라벨러 문제보다 생성 기록·OCR 정렬 문제일 가능성이 크다 (06 4-7). "
+                     f"자동(기록 대조)으로 정한 짝 {origin.get('auto_pairs', 0)}건은 '자동' 으로 따로 셌다 (08 D-12 6).")
     lines.append("층(무작위·어려움) 정보는 아직 읽지 않는다. 이 판은 비교한 범위 전체를 하나로 보고 판단했다 (06 3-2 는 무작위 층으로만 판단).")
     return lines
 
@@ -781,11 +1298,16 @@ def interpret(ctype: str, gate_rows: Sequence[Mapping], header: Mapping, setting
 # ----------------------------------------------------------------------------- 묶음
 def build_agreement(side_a: Mapping, side_b: Mapping, *, settings: Mapping | None = None,
                     buffer_ms: int = DEFAULT_BUFFER_MS, seed_material: str = "",
-                    sample_chat_ids: Iterable[str] | None = None, chat_times: Mapping[str, int] | None = None) -> dict:
+                    sample_chat_ids: Iterable[str] | None = None, chat_times: Mapping[str, int] | None = None,
+                    adjudicator_is_labeler: bool | None = None) -> dict:
     """두 세션 → 일치도 결과(보고서 본체). 잠금 확인·파일 읽기는 app 층이 하고, 여기서는 계산만 한다.
 
     side: {session_id, labeler_id, session_kind, machine_id, scope(None 또는 [(시작, 끝)]), segments[], reactions[],
            view_exposed(목록), analysis_exposed(bool), engine_author(bool)}. segments·reactions 는 현재 유효 라벨.
+    선택 칸(다섯째 묶음): utterances[], continuations[], missed[](missed_candidate), origins[](origin),
+           current_sample(chat_id 목록 — 주면 D-12 2 의 '현재 표본' 을 구간표 대신 이것으로 본다),
+           plan_cancelled(bool — 취소된 재라벨 계획으로 만든 세션이면 대표값에서 뺀다, 06 7-1).
+    adjudicator_is_labeler: 보고서 머리의 '조정자 = 라벨러' (D-12 3). None 이면 표시하지 않음(모름).
     """
     st = merge_settings(settings)
     seg = compare_segments(side_a.get("segments") or (), side_b.get("segments") or (),
@@ -793,25 +1315,63 @@ def build_agreement(side_a: Mapping, side_b: Mapping, *, settings: Mapping | Non
                            settings=st, seed_material=seed_material)
     sc_a, sc_b = side_a.get("scope"), side_b.get("scope")
     sample_scope = None if sc_a is None and sc_b is None else _clip_ranges(sc_a, sc_b, (0, 1 << 62))
-    smp = compare_samples(side_a.get("reactions") or (), side_b.get("reactions") or (), chat_ids=sample_chat_ids,
+    # D-12 2: 각 세션의 현재 구간표로 보면 표본 자리가 아닌 판정은 일치도에서 뺀다(판정은 남김, 수만 셈)
+    cut = {}
+    for key, side in (("a", side_a), ("b", side_b)):
+        cut[key] = split_current_sample(side.get("reactions") or (), side.get("missed") or (),
+                                        side.get("segments") or (), scope=side.get("scope"), buffer_ms=buffer_ms,
+                                        chat_times=chat_times, current_sample=side.get("current_sample"))
+    smp = compare_samples(cut["a"]["reactions"], cut["b"]["reactions"], chat_ids=sample_chat_ids,
                           chat_times=chat_times, settings=st, seed_material=seed_material, scope=sample_scope)
+    smp["dropped_from_sample"] = {"a": cut["a"]["dropped_reactions"], "b": cut["b"]["dropped_reactions"],
+                                  "method_a": cut["a"]["method"], "method_b": cut["b"]["method"]}
+    links = compare_links(cut["a"]["reactions"], cut["b"]["reactions"], side_a.get("utterances") or (),
+                          side_b.get("utterances") or (), settings=st, scope=sample_scope, chat_times=chat_times)
+    cont = compare_continuations(cut["a"]["reactions"], cut["b"]["reactions"], side_a.get("continuations") or (),
+                                 side_b.get("continuations") or (), settings=st, scope=sample_scope,
+                                 chat_times=chat_times)
+    # 06 2-9: ③ 를 직접·높음으로 고쳐 대상이 아니게 된 채팅의 놓친 후보는 남겨 두고 일치도에서 뺀다(수만 셈)
+    m_keep, m_not = {}, {}
+    for key, side in (("a", side_a), ("b", side_b)):
+        m_keep[key], m_not[key] = drop_missed_not_target(cut[key]["missed"], side.get("reactions") or ())
+    missed = compare_missed(m_keep["a"], m_keep["b"], settings=st, scope=sample_scope, chat_times=chat_times)
+    missed["dropped_from_sample"] = {"a": cut["a"]["dropped_missed"], "b": cut["b"]["dropped_missed"]}
+    missed["dropped_not_target"] = {"a": m_not["a"], "b": m_not["b"]}
+    origin = compare_origins(side_a.get("origins") or (), side_b.get("origins") or (), settings=st)
     ctype = comparison_type(side_a, side_b)
     exposed = sorted(s["session_id"] for s in (side_a, side_b) if s.get("view_exposed") or s.get("analysis_exposed"))
+    plan_cancelled = sorted(s["session_id"] for s in (side_a, side_b) if s.get("plan_cancelled"))
     header = {
         "comparison": ctype,
         "intra_only": ctype == "intra",
         "same_machine": bool(side_a.get("machine_id")) and side_a.get("machine_id") == side_b.get("machine_id"),
         "engine_author_included": bool(side_a.get("engine_author") or side_b.get("engine_author")),
         "view_exposed_sessions": exposed,
-        "representative": not exposed,
+        "cancelled_plan_sessions": plan_cancelled,
+        "representative": not exposed and not plan_cancelled,
+        "adjudicator_is_labeler": None if adjudicator_is_labeler is None else bool(adjudicator_is_labeler),
     }
     grows = gates(seg, smp, st)
+    interp = interpret(ctype, grows, header, st, smp, origin)
+    dr = smp["dropped_from_sample"]["a"] + smp["dropped_from_sample"]["b"] + sum(missed["dropped_from_sample"].values())
+    if dr:
+        interp.append(f"구간을 고쳐 표본에서 빠진 판정 {dr}건(반응 A {smp['dropped_from_sample']['a']} · B "
+                      f"{smp['dropped_from_sample']['b']}, 놓친 후보 A {missed['dropped_from_sample']['a']} · B "
+                      f"{missed['dropped_from_sample']['b']})은 남겨 두고 일치도에서는 뺐다 (08 D-12 2).")
+    nt = missed["dropped_not_target"]
+    if nt["a"] or nt["b"]:
+        interp.append(f"③ 판정을 고쳐 4단계 대상이 아니게 된 채팅의 놓친 후보 {nt['a'] + nt['b']}건(A {nt['a']} · B {nt['b']})"
+                      "은 남겨 두고 일치도에서는 뺐다 (06 2-9).")
     return {
         "header": header,
         "segments": seg,
         "samples": smp,
+        "links": links,
+        "continuation": cont,
+        "missed": missed,
+        "origin": origin,
         "gates": grows,
-        "interpretation": interpret(ctype, grows, header, st, smp),
+        "interpretation": interp,
         "settings": st,
         "buffer_ms": buffer_ms,
     }
@@ -822,5 +1382,8 @@ __all__ = [
     "AgreementError", "merge_settings", "kappa_from_table", "linear_weight", "weighted_kappa_from_table", "ac1_binary",
     "percentile", "seed_from", "SplitMix64", "bootstrap_ci", "match_boundaries", "compare_segments",
     "reaction_value", "compare_samples", "gate_verdict", "gates", "comparison_type", "interpret", "build_agreement",
+    "sample_regions", "split_current_sample", "compare_links", "compare_continuations", "compare_missed",
+    "compare_origins", "CONTINUATION_TYPES", "REASON_CODES", "HUMAN_REASON_CODES", "ORIGIN_VALUES",
+    "AUTO_ORIGIN_METHODS",
     "V_PASS", "V_PASS_POINT", "V_UNCERTAIN", "V_FAIL", "V_LOW_N", "V_NA", "VERDICT_KO",
 ]

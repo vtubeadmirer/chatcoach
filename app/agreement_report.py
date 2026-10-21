@@ -20,6 +20,15 @@
 
 이 모듈은 비교하는 사람(검토자) 쪽 도구다. 라벨링 세션 안에서 부르지 않는다(06 7-3: 라벨링 세션은 data\\reports 를 열지 않음).
 보고서에는 채팅 본문·닉네임·근거 한 줄(rationale)·메모가 들어가지 않는다. 남는 것은 숫자·분류·등급·chat_id·시각·ID 뿐이다.
+
+다섯째 묶음(08 D-12 2·3·5·6)
+- 연결(±5초)·반응 시각·이어짐·놓친 후보(scope=sample)·출처를 더 계산한다. 새 칸은 report.json 의 `links`·`continuation`·
+  `missed`·`origin` 이고, 앞 판의 칸은 그대로 둔다(하위 호환, `format_rev` 2).
+- 출처는 두 출처 판정 세션(origin_review)끼리 비교한다. 비교 세션 쌍은 '라벨링 세션끼리'(COMPARABLE_KINDS) 또는
+  '출처 판정 세션끼리'(ORIGIN_KINDS) 만 된다. 출처 판정 세션은 재라벨 계획 조건을 보지 않는다(계획이 없다).
+- 구간을 고쳐 표본에서 빠진 판정은 일치도에서 빼고 수를 경고·보고서에 1줄 적는다(D-12 2).
+- 보고서 머리에 '조정자 = 라벨러' (D-12 3): adjudicator_is_labeler 플래그. 주지 않으면 created_by 가 두 세션의 라벨러
+  가운데 하나일 때 참으로 본다(그 근거를 header.adjudicator_source 에 적는다).
 """
 from __future__ import annotations
 
@@ -50,13 +59,15 @@ MANIFEST_MAX_BYTES = 64 << 20
 SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 REPORT_ID_RE = re.compile(r"\AR-[0-9]{8}-[a-z0-9]{4}\Z")
 COMPARABLE_KINDS = frozenset({vis.PRIMARY, vis.RELABEL_SAME, vis.RELABEL_SECOND})
+ORIGIN_KINDS = frozenset({vis.ORIGIN_REVIEW})       # 출처 판정 세션끼리만 짝 (06 4-7)
+FORMAT_REV = 2                                      # 1: 구간·표본만, 2: + 연결·이어짐·놓친 후보·출처 (칸 추가만)
 
 __all__ = [
     "ReportError", "NotLockedError", "RelabelPendingError", "SampleVerifyError", "ReportBlindError",
     "LockMismatchError", "GuideMismatchError", "ReportLocationError",
     "LockedSession", "ReportResult", "load_locked_session", "build_report", "write_report", "make_report",
     "render_markdown", "check_out_root", "default_out_root", "reader_block_reason", "pending_relabel_plans",
-    "comparison_gate",
+    "comparison_gate", "COMPARABLE_KINDS", "ORIGIN_KINDS", "FORMAT_REV",
 ]
 
 
@@ -367,6 +378,10 @@ def _side(ls: LockedSession, view: rs.EffectiveView, project_data: Mapping, expo
         "scope": _scope_ranges(ls.meta),
         "segments": view.items(kind="segment", session_id=ls.session_id),
         "reactions": view.items(kind="reaction", session_id=ls.session_id),
+        "utterances": view.items(kind="utterance", session_id=ls.session_id),
+        "continuations": view.items(kind="continuation", session_id=ls.session_id),
+        "missed": view.items(kind="missed_candidate", session_id=ls.session_id),
+        "origins": view.items(kind="origin", session_id=ls.session_id),
         "view_exposed": whats,
         "analysis_exposed": exposure.is_exposed(ls.session_id),
         "engine_author": _engine_author(project_data, ls.labeler_id),
@@ -382,8 +397,20 @@ def reader_block_reason(reader_kind: str | None) -> str | None:
     scope = vis.files_to_open(reader_kind)
     if not scope.can_write("reports"):
         return "이 세션 종류에서는 일치도 보고서를 만들지 않습니다 — 보기 전용이나 조정 세션에서 여세요 (03 12-1, 06 7-3)"
-    if not all(scope.may_read_other_session(True, k) for k in COMPARABLE_KINDS):
+    if not all(scope.may_read_other_session(True, k) for k in COMPARABLE_KINDS | ORIGIN_KINDS):
         return "이 세션 종류는 다른 세션의 라벨을 읽지 않습니다 (06 7-3)"
+    if not scope.can_read("origin"):
+        return "이 세션 종류는 출처 라벨을 읽지 않습니다 (03 12-1)"
+    return None
+
+
+def pair_family(session_a: str, session_b: str) -> str | None:
+    """비교할 수 있는 세션 쌍의 갈래: 'labeling'(1차·재라벨끼리) · 'origin'(출처 판정끼리). 섞였거나 모르면 None."""
+    ka, kb = vis.session_kind_of_id(session_a), vis.session_kind_of_id(session_b)
+    if ka in COMPARABLE_KINDS and kb in COMPARABLE_KINDS:
+        return "labeling"
+    if ka in ORIGIN_KINDS and kb in ORIGIN_KINDS:
+        return "origin"
     return None
 
 
@@ -451,17 +478,29 @@ def comparison_gate(project_root: str, project_data: Mapping, session_ids: Itera
     - 그 1차 세션을 원 세션으로 하는 계획마다 잠긴 재라벨 세션이 있어야 한다. 아니면 RelabelPendingError.
     - 관련 잠금(1차·계획 세션·비교하는 두 세션)의 sample_verify 가 모두 ok 이고, 표본 매니페스트가 있는 잠금은
       검증 결과가 비어 있지 않아야 한다. 계획은 verify_plan_on_disk 로 다시 골라 맞아야 한다. 아니면 SampleVerifyError.
+    - 비교하는 재라벨 세션의 계획은 **취소됐어도** 다시 골라 맞아야 한다(취소는 '남은 계획' 에서 빼는 것이지 재현 검증을
+      면제하지 않는다). 취소된 계획으로 만든 세션은 경고 1줄을 달고 대표값에서 뺀다(build_report, 06 7-1).
     """
+    return _comparison_gate(project_root, project_data, session_ids)[0]
+
+
+def _comparison_gate(project_root: str, project_data: Mapping,
+                     session_ids: Iterable[str]) -> tuple[list[str], list[str]]:
+    """comparison_gate 본체. (경고 문장 목록, 계획이 취소된 비교 세션 ID 목록)."""
     from . import relabel as relabel_io
     root = os.path.abspath(project_root)
     sids = list(session_ids)
     docs = {sid: _read_lock_doc(root, sid) for sid in sids}
     warnings: list[str] = []
     primaries: set[str] = set()
+    compared_plans: set[str] = set()
+    cancelled_sids: list[str] = []
     for sid in sids:
         if vis.session_kind_of_id(sid) == vis.PRIMARY:
             primaries.add(sid)
             continue
+        if vis.session_kind_of_id(sid) in ORIGIN_KINDS:
+            continue                      # 출처 판정 세션은 재라벨 계획이 없다 (06 4-7)
         pid = docs[sid].get("relabel_plan_id")
         if not isinstance(pid, str):
             warnings.append(f"{sid}: 재라벨 계획 없이 연 세션입니다 (계획 조건을 보지 못함)")
@@ -471,15 +510,19 @@ def comparison_gate(project_root: str, project_data: Mapping, session_ids: Itera
         except (OSError, ValueError):
             raise SampleVerifyError(f"{sid} 의 재라벨 계획 {pid} 를 읽지 못했습니다") from None
         primaries.add(plan["source_session_id"])
+        compared_plans.add(pid)
+        if relabel_io.is_cancelled(root, pid):
+            cancelled_sids.append(sid)
+            warnings.append(f"{sid}: 재라벨 계획 {pid} 가 취소되었습니다 — 대표값으로 쓰지 않고 따로 보고합니다 (06 7-1)")
     pending = pending_relabel_plans(root, primaries)
     if pending:
         raise RelabelPendingError(pending)
     locked = _locked_relabel_plan_ids(root)
     related = set(sids) | primaries
     bad: list[str] = []
-    for p in relabel_io.list_plans(root):
-        if not p.usable or p.source_session_id not in primaries:
-            continue
+    for p in relabel_io.list_plans(root, include_cancelled=True):
+        if p.plan_id not in compared_plans and (not p.usable or p.source_session_id not in primaries):
+            continue                      # 비교하지 않는 취소·읽지 못한 계획은 보지 않는다 (취소로 막힘을 푼다, D-12 7)
         related.update(locked.get(p.plan_id, ()))
         v = relabel_io.verify_plan_on_disk(root, project_data, p.plan_id, creator_kind=None)
         if not v.ok:
@@ -493,23 +536,25 @@ def comparison_gate(project_root: str, project_data: Mapping, session_ids: Itera
             bad.append(f"{sid}: 표본 매니페스트가 있는데 재현 검증 없이 잠갔습니다")
     if bad:
         raise SampleVerifyError("재현 검증이 통과하지 않아 보고서를 만들지 않습니다(06 7-1): " + "; ".join(bad))
-    return warnings
+    return warnings, cancelled_sids
 
 
 def build_report(project_root: str, session_a: str, session_b: str, *, eval_settings: Mapping | None = None,
                  samples_only: bool = False, now: datetime | None = None, app_version: str | None = None,
-                 created_by: str | None = None, reader_kind: str | None = None) -> ReportResult:
+                 created_by: str | None = None, reader_kind: str | None = None,
+                 adjudicator_is_labeler: bool | None = None) -> ReportResult:
     """잠긴 두 세션 → 보고서 dict · Markdown (아직 쓰지 않음). 잠기지 않았으면 NotLockedError(라벨 파일을 열기 전에).
 
     reader_kind: 보고서를 여는 자리의 세션 종류(None = 세션 밖). reader_block_reason 이 막으면 ReportBlindError.
     06 7-1 조건(comparison_gate)이 안 되면 RelabelPendingError·SampleVerifyError — 모두 라벨 파일을 열기 전에.
+    adjudicator_is_labeler: '조정자 = 라벨러' 표시(D-12 3). None 이면 created_by 가 두 세션 라벨러 가운데 하나인지로 정한다.
     """
     sa, sb = _check_sid(session_a), _check_sid(session_b)
     if sa == sb:
         raise ReportError("같은 세션끼리는 비교하지 않습니다")
-    for s in (sa, sb):
-        if vis.session_kind_of_id(s) not in COMPARABLE_KINDS:
-            raise ReportError("비교할 수 있는 세션 종류가 아닙니다(1차·같은 사람 재라벨·두 번째 사람)")
+    family = pair_family(sa, sb)
+    if family is None:
+        raise ReportError("비교할 수 있는 세션 쌍이 아닙니다(1차·같은 사람 재라벨·두 번째 사람끼리, 또는 출처 판정끼리)")
     why = reader_block_reason(reader_kind)
     if why:
         raise ReportBlindError(why)
@@ -522,7 +567,7 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
     if proj.data is None:
         raise ReportError("project.json 을 읽지 못했습니다")
     # 1-2) 06 7-1 비교 조건 — 잠금·계획·표본 매니페스트만 본다(라벨 파일은 아직 열지 않음)
-    gate_warnings = comparison_gate(root, proj.data, (sa, sb))
+    gate_warnings, plan_cancelled = _comparison_gate(root, proj.data, (sa, sb))
     la = load_locked_session(root, sa)
     lb = load_locked_session(root, sb)
     for ls in (la, lb):
@@ -544,6 +589,8 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
     view_b = rs.resolve(lb.records)
     side_a = _side(la, view_a, proj.data, exposure)
     side_b = _side(lb, view_b, proj.data, exposure)
+    for s in (side_a, side_b):
+        s["plan_cancelled"] = s["session_id"] in plan_cancelled      # 취소된 계획으로 만든 세션 → 대표값에서 뺌
 
     def sess_input(ls: LockedSession, side: Mapping) -> dict:
         return {"session_id": ls.session_id, "labeler_id": ls.labeler_id, "session_kind": ls.session_kind,
@@ -562,8 +609,14 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
     inputs_sha = hashlib.sha256(canonical_json(inputs)).hexdigest()
     inputs["bootstrap_seed"] = inputs_sha[:16]
 
+    if adjudicator_is_labeler is None:
+        adj = bool(created_by) and created_by in {la.labeler_id, lb.labeler_id}
+        adj_src = "inferred_created_by" if created_by else "unknown"
+    else:
+        adj, adj_src = bool(adjudicator_is_labeler), "flag"
     res = ag.build_agreement(side_a, side_b, settings=settings, buffer_ms=buffer_ms, seed_material=inputs_sha,
-                             sample_chat_ids=sample_ids, chat_times=chat_times)
+                             sample_chat_ids=sample_ids, chat_times=chat_times,
+                             adjudicator_is_labeler=None if adj_src == "unknown" else adj)
     when = now or datetime.now().astimezone()
     report_id = f"R-{when.strftime('%Y%m%d')}-{inputs_sha[:4]}"
     warnings = list(gate_warnings)
@@ -580,11 +633,24 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
             warnings.append(f"{side['session_id']}: 충돌(조정 대기) 라벨 {n_conf}건은 계산에서 빠졌습니다")
     if res["samples"]["judged"]["duplicate_chat_a"] or res["samples"]["judged"]["duplicate_chat_b"]:
         warnings.append("같은 채팅에 유효 반응 라벨이 둘 이상인 채팅은 비교에서 뺐습니다")
+    dr, dm = res["samples"]["dropped_from_sample"], res["missed"]["dropped_from_sample"]
+    if dr["a"] or dr["b"] or dm["a"] or dm["b"]:
+        warnings.append(f"구간을 고쳐 표본에서 빠진 판정: 반응 A {dr['a']} · B {dr['b']}, 놓친 후보 A {dm['a']} · B {dm['b']}"
+                        " — 남겨 두고 일치도에서 뺐습니다 (08 D-12 2)")
+    nt = res["missed"].get("dropped_not_target") or {}
+    if nt.get("a") or nt.get("b"):
+        warnings.append(f"③ 판정을 고쳐 4단계 대상이 아니게 된 놓친 후보: A {nt.get('a', 0)} · B {nt.get('b', 0)}"
+                        " — 남겨 두고 일치도에서 뺐습니다 (06 2-9)")
+    for key, label in (("a", "A"), ("b", "B")):
+        p = res["links"]["problems"][key]
+        if p["broken"]:
+            warnings.append(f"세션 {label}: 연결 발화를 찾지 못한 반응 {p['broken']}건은 연결 비교에서 뺐습니다")
 
     from . import __version__
     report = {
         "schema": "chatcoach.report.agreement",
         "schema_version": 1,
+        "format_rev": FORMAT_REV,
         "report_id": report_id,
         "report_type": REPORT_TYPE,
         "created_at": when.isoformat(timespec="seconds"),
@@ -593,6 +659,8 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
         "inputs": inputs,
         "inputs_sha256": inputs_sha,
         "header": {**res["header"],
+                   "pair_family": family,
+                   "adjudicator_source": adj_src,
                    "sessions": [{"session_id": s["session_id"], "labeler_id": s["labeler_id"],
                                  "session_kind": s["session_kind"], "machine4": ls.machine4s,
                                  "view_exposed": s["view_exposed"], "analysis_exposed": s["analysis_exposed"],
@@ -600,10 +668,15 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
                                 for s, ls in ((side_a, la), (side_b, lb))]},
         "segments": res["segments"],
         "samples": res["samples"],
+        "links": res["links"],
+        "continuation": res["continuation"],
+        "missed": res["missed"],
+        "origin": res["origin"],
         "gates": res["gates"],
         "interpretation": res["interpretation"],
         "warnings": warnings,
-        "not_computed": ["연결(±5초)·반응 시각", "이어짐", "확신도", "놓친 채팅 후보", "출처", "Krippendorff α(세 세션 이상)"],
+        "not_computed": ["확신도", "Krippendorff α(세 세션 이상)", "층(무작위·어려움) 나눠 보기",
+                         "연결·이어짐·놓친 후보·출처의 신뢰구간"],
     }
     return ReportResult(report, render_markdown(report), None, warnings)
 
@@ -668,13 +741,15 @@ def write_report(result: ReportResult, out_root: str, project_root: str) -> str:
 
 def make_report(project_root: str, session_a: str, session_b: str, *, out_root: str | None = None,
                 eval_settings: Mapping | None = None, samples_only: bool = False, now: datetime | None = None,
-                created_by: str | None = None, reader_kind: str | None = None) -> ReportResult:
+                created_by: str | None = None, reader_kind: str | None = None,
+                adjudicator_is_labeler: bool | None = None) -> ReportResult:
     """build_report + write_report. out_root 가 없으면 default_out_root. 출력 위치는 읽기 전에 먼저 검사한다."""
     root = os.path.abspath(project_root)
     out = out_root or default_out_root(root)
     check_out_root(out, root)
     res = build_report(root, session_a, session_b, eval_settings=eval_settings, samples_only=samples_only,
-                       now=now, created_by=created_by, reader_kind=reader_kind)
+                       now=now, created_by=created_by, reader_kind=reader_kind,
+                       adjudicator_is_labeler=adjudicator_is_labeler)
     write_report(res, out, root)
     return res
 
@@ -736,9 +811,15 @@ def render_markdown(rep: Mapping) -> str:
     if h.get("same_machine"):
         L.append("- **같은 machine_id** — 두 세션이 같은 PC 에서 매겨졌다. 기능 시험용이며 실제 일치도로 쓰지 않는다.")
     if not h.get("representative", True):
-        L.append("- **노출 기록 있음** — 대표값으로 쓰지 않고 따로 보고: " + ", ".join(h.get("view_exposed_sessions") or []))
+        if h.get("view_exposed_sessions"):
+            L.append("- **노출 기록 있음** — 대표값으로 쓰지 않고 따로 보고: " + ", ".join(h["view_exposed_sessions"]))
+        if h.get("cancelled_plan_sessions"):
+            L.append("- **재라벨 계획 취소됨** — 대표값으로 쓰지 않고 따로 보고: " + ", ".join(h["cancelled_plan_sessions"]))
     if h.get("engine_author_included"):
         L.append("- **엔진 작성자 포함**")
+    if h.get("adjudicator_is_labeler"):
+        src = {"flag": "입력 플래그", "inferred_created_by": "만든 사람 = 라벨러"}.get(h.get("adjudicator_source"), "")
+        L.append(f"- **조정자 = 라벨러** — 1인 작업이라 라벨러가 조정을 겸한다 (08 D-12 3{', ' + src if src else ''})")
     L.append("")
     L.append("| 세션 | labeler_id | 종류 | machine4 | 노출 |")
     L.append("|---|---|---|---|---|")
@@ -746,6 +827,8 @@ def render_markdown(rep: Mapping) -> str:
         ex = ", ".join(s["view_exposed"]) + (" · 분석 세션" if s["analysis_exposed"] else "")
         L.append(f"| {s['session_id']} | {s['labeler_id']} | {s['session_kind']} | {', '.join(s['machine4'])} | {ex or '없음'} |")
     L.append("")
+    if h.get("pair_family") == "origin":
+        return _render_origin_only(rep, L)
     L.append("## 판단 기준 (06 5장)")
     L.append("")
     L.append("| 라벨 종류 | 지표 | 값 | 기준 | 비교 건수 | 95% 구간 | 판정 |")
@@ -820,6 +903,94 @@ def render_markdown(rep: Mapping) -> str:
     if len(dis) > 200:
         L.append(f"- … {len(dis) - 200}건 더 (report.json)")
     L.append("")
+    dfs = sm.get("dropped_from_sample")
+    dmf = (rep.get("missed") or {}).get("dropped_from_sample")
+    if dfs is not None:
+        L.append(f"구간을 고쳐 표본에서 빠진 판정 (남겨 두고 일치도에서 뺌, 08 D-12 2): 반응 A {dfs['a']} · B {dfs['b']}"
+                 + (f" · 놓친 후보 A {dmf['a']} · B {dmf['b']}" if dmf else ""))
+        L.append("")
+    _render_ext(rep, L)
+    _render_tail(rep, L)
+    return "\n".join(L)
+
+
+def _table(L: list[str], conf: Mapping, names: Mapping) -> None:
+    labs = conf["labels"]
+    L.append("| A \\ B | " + " | ".join(str(names.get(x, x)) for x in labs) + " |")
+    L.append("|---" * (len(labs) + 1) + "|")
+    for x, row in zip(labs, conf["rows"]):
+        L.append(f"| {names.get(x, x)} | " + " | ".join(str(v) for v in row) + " |")
+    L.append("")
+
+
+_CONT_KO = {"none": "이어지지 않음", "short": "짧게", "extended": "확장", "new_topic": "새 주제"}
+_ORIGIN_KO = {"real": "실제", "virtual": "가상", "undeterminable": "판별 불가"}
+_LOW = " (건수 부족 — 판단에 쓰지 않음)"
+
+
+def _render_ext(rep: Mapping, L: list[str]) -> None:
+    """다섯째 묶음 칸(연결·이어짐·놓친 후보). 앞 판 보고서(칸 없음)는 건너뛴다."""
+    lk = rep.get("links")
+    if lk:
+        rt = lk["reaction_time"]
+        L.append("## 연결 대상 · 반응 시각 (06 4-0 · 4-3)")
+        L.append("")
+        L.append(f"- 연결: A {lk['a_links']} · B {lk['b_links']} · 짝 {lk['matched']} (발화 시작 ±{lk['tolerance_sec']:g}초) · "
+                 f"A 만 {lk['a_only']} · B 만 {lk['b_only']} (같은 채팅인데 창 밖 {lk['same_chat_far']})")
+        L.append(f"- 연결 F1 {_f(lk['f1'])}{_LOW if lk.get('low_n') else ''} · 짝의 발화 시작 |Δt| 중앙값 "
+                 f"{_f(lk['utterance_start_median_sec'], 1)}초")
+        L.append(f"- 반응 시각 n={rt['n']}: |Δt| 중앙값 {_f(rt['median_sec'], 1)}초 · 90분위 {_f(rt['p90_sec'], 1)}초 · "
+                 f"±{rt['tolerance_sec']:g}초 안 {_pct(rt['within_tolerance_ratio'])}")
+        L.append("")
+    ct = rep.get("continuation")
+    if ct:
+        L.append("## 이어짐 (06 4-5)")
+        L.append("")
+        mi, ud, raw = ct["missing"], ct["undeterminable"], ct["raw"]
+        L.append(f"- 둘 다 직접·높음인 짝 {ct['pairs_positive_both']} 가운데 비교 {ct['n']} · 비움: 둘 다 {mi['both']} · "
+                 f"A 만 {mi['a_only']} · B 만 {mi['b_only']} · 판단 불가: 둘 다 {ud['both']} · A 만 {ud['a_only']} · B 만 {ud['b_only']}")
+        L.append(f"- 일치율 {_pct(ct['agreement'])} · κ {_f(ct['kappa'])}{_LOW if ct.get('low_n') else ''}")
+        L.append(f"- 원시값: 이어진 길이 차이 중앙값 {_f(raw['span_diff_median_sec'], 1)}초 (n={raw['span_n']}) · 다른 시청자 채팅 수 "
+                 f"차이 중앙값 {_f(raw['related_count_diff_median'], 1)} (n={raw['related_n']}) · 잘림 일치 "
+                 f"{_pct(raw['truncated_agreement'])} (n={raw['truncated_n']})")
+        L.append("")
+        _table(L, ct["confusion"], _CONT_KO)
+    ms = rep.get("missed")
+    if ms:
+        j, c, rc = ms["judged"], ms["candidate"], ms["reason_code"]
+        L.append("## 놓친 채팅 후보 (06 4-6 · 2-9, 재라벨 블록 안 — 08 D-12 5)")
+        L.append("")
+        L.append(f"- 판정(scope=sample): A {j['a']} · B {j['b']} · 둘 다 {j['both']} · A 만 {j['a_only']} · B 만 {j['b_only']} · "
+                 f"표본 밖에서 찾은 것(extra, 비교 안 함) A {j['extra_a']} · B {j['extra_b']}")
+        L.append(f"- 후보 여부 n={c['n']}: 둘 다 후보 {c['both_candidate']} · A 만 {c['a_only']} · B 만 {c['b_only']} · 둘 다 아님 {c['both_not']}")
+        L.append(f"  - 일치율 {_pct(c['agreement'])} · κ {_f(c['kappa'])} · AC1 {_f(c['ac1'])} · 유병률 {_pct(c['prevalence'])}"
+                 f"{_LOW if c.get('low_n') else ''}")
+        cd = ms["conditions"]
+        L.append("- 조건 일치율: " + " · ".join(f"{k[-1]}번 {_pct(cd[k]['agreement'])} (n={cd[k]['n']})"
+                                            for k in ("cond2", "cond3", "cond4")) + " (①은 자동이라 뺌)")
+        L.append(f"- 사유 코드(사람이 고른 B·C·D·E·G) n={rc['n']}: 일치율 {_pct(rc['agreement'])} · κ {_f(rc['kappa'])}"
+                 f"{_LOW if rc.get('low_n') else ''} · 자동(A·F·auto)이 낀 짝 {rc['auto_excluded']}건은 건수만")
+        L.append("")
+        _table(L, rc["confusion"], {})
+    og = rep.get("origin")
+    if og and og.get("compared"):
+        _render_origin(og, L)
+
+
+def _render_origin(og: Mapping, L: list[str]) -> None:
+    j, hu = og["judged"], og["human"]
+    L.append("## 출처 (06 4-7 · 08 D-12 6)")
+    L.append("")
+    L.append(f"- 판정: A {j['a']} · B {j['b']} · 둘 다 {j['both']} · A 만 {j['a_only']} · B 만 {j['b_only']}")
+    L.append(f"- 전체 n={og['n']}: 일치율 {_pct(og['agreement'])} · κ {_f(og['kappa'])}{_LOW if og.get('low_n') else ''}"
+             f" · 자동(기록 대조) 짝 {og['auto_pairs']}건")
+    L.append(f"- 사람이 정한 짝끼리 n={hu['n']}: 일치율 {_pct(hu['agreement'])} · κ {_f(hu['kappa'])}{_LOW if hu.get('low_n') else ''}")
+    L.append("- 출처 일치도가 낮으면 라벨러 문제보다 생성 기록·OCR 정렬 문제일 가능성이 크다.")
+    L.append("")
+    _table(L, og["confusion"], _ORIGIN_KO)
+
+
+def _render_tail(rep: Mapping, L: list[str]) -> None:
     if rep.get("warnings"):
         L.append("## 경고")
         L.append("")
@@ -828,4 +999,20 @@ def render_markdown(rep: Mapping) -> str:
         L.append("")
     L.append("이번 판에서 계산하지 않은 것: " + ", ".join(rep.get("not_computed") or []))
     L.append("")
+
+
+def _render_origin_only(rep: Mapping, L: list[str]) -> str:
+    """출처 판정 세션끼리의 보고서: 해석 · 출처 · 경고만."""
+    L.append("## 해석")
+    L.append("")
+    for line in rep["interpretation"]:
+        L.append(f"- {line}")
+    L.append("")
+    og = rep.get("origin") or {}
+    if og.get("compared"):
+        _render_origin(og, L)
+    else:
+        L.append("두 세션 가운데 출처 판정이 없는 세션이 있어 출처 일치도를 내지 않았다.")
+        L.append("")
+    _render_tail(rep, L)
     return "\n".join(L)

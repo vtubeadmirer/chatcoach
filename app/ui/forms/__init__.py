@@ -10,7 +10,8 @@
 """
 from .continuation_editor import ContinuationEditor
 from .evidence_widget import EvidenceWidget
+from .missed_form import MissedForm
 from .reaction_editor import ReactionEditor
 from .segment_form import SegmentForm
 
-__all__ = ["SegmentForm", "ReactionEditor", "ContinuationEditor", "EvidenceWidget"]
+__all__ = ["SegmentForm", "ReactionEditor", "ContinuationEditor", "EvidenceWidget", "MissedForm"]
