@@ -858,6 +858,50 @@ def drop_missed_not_target(missed: Iterable[Mapping], reactions: Iterable[Mappin
     return keep, n
 
 
+def drop_missed_stale(missed: Iterable[Mapping], reactions: Iterable[Mapping]) -> tuple[list, dict]:
+    """놓친 후보(scope=sample) 가운데 지금 ③ 판정으로 보면 06 2-9 대상이 아닌 것을 일치도에서 뺀다 (14 4-2 의 4번, 08 D-13 2).
+
+    - not_target: 그 채팅의 유효 반응이 꼭 하나이고 그것이 대상(미확인·관련성만·불명확)이 아니다(③ 을 직접·높음으로 고침).
+    - no_reaction: 그 채팅의 유효 반응이 없다(③ 을 물렀음 — ④ 는 ③ 이 대상일 때만 생기므로 근거가 없어졌다).
+    유효 반응이 둘 이상이면 가를 수 없어 남긴다. extra(표본 밖 후보)는 ③ 과 상관없이 남긴다. 기록은 남기고 수만 센다.
+    reactions = 그 세션의 현재 유효 반응 전부(표본 자르기 전). 결과 (남긴 목록, {not_target, no_reaction}).
+    drop_missed_not_target 은 앞 판 동작(반응 없음은 남김) 그대로 둔다(하위 호환).
+    """
+    from .missed import target_state
+    by: dict[str, list] = {}
+    for r in reactions or ():
+        cid = _body(r).get("chat_id")
+        if isinstance(cid, str):
+            by.setdefault(cid, []).append(r)
+    keep: list = []
+    cnt = {"not_target": 0, "no_reaction": 0}
+    for m in missed or ():
+        b = _body(m)
+        cid = b.get("chat_id")
+        if b.get("scope") == "sample" and isinstance(cid, str):
+            rs = by.get(cid)
+            if not rs:
+                cnt["no_reaction"] += 1
+                continue
+            if len(rs) == 1 and target_state(_body(rs[0])) is None:
+                cnt["not_target"] += 1
+                continue
+        keep.append(m)
+    return keep, cnt
+
+
+# 놓친 후보(④)가 있는 세션 종류 — 재라벨 세션만(08 D-12 5). 1차는 ④ 를 하지 않는다(D-13 4).
+MISSED_KINDS = frozenset({"relabel_same", "relabel_second"})
+MISSED_PRIMARY_NOTE = "1차는 ④ 없음(D-12 5)"
+
+
+def missed_pair_applicable(kind_a: str | None, kind_b: str | None) -> bool:
+    """놓친 후보 일치도를 낼 짝인가 (08 D-13 3). 한쪽이라도 1차면 아니다(1차는 ④ 가 없어 늘 '한쪽만').
+    두 쪽 다 재라벨이면 낸다(같은 블록 = 두 세션 범위의 교집합, build_agreement 의 sample_scope). 종류를 모르면(시험 입력)
+    앞 판처럼 낸다."""
+    return "primary" not in (kind_a, kind_b)
+
+
 # ----------------------------------------------------------------------------- 연결 대상 · 반응 시각 (06 4-0 · 4-3)
 def _links(reactions: Iterable[Mapping], utterances: Iterable[Mapping], scope, chat_times) -> tuple[dict, dict]:
     """chat_id → {utt_start, rt}. 연결 = linked_utterance_id 가 있는 현재 유효 반응(직접·높음). 발화를 못 찾으면 broken."""
@@ -1330,13 +1374,18 @@ def build_agreement(side_a: Mapping, side_b: Mapping, *, settings: Mapping | Non
     cont = compare_continuations(cut["a"]["reactions"], cut["b"]["reactions"], side_a.get("continuations") or (),
                                  side_b.get("continuations") or (), settings=st, scope=sample_scope,
                                  chat_times=chat_times)
-    # 06 2-9: ③ 를 직접·높음으로 고쳐 대상이 아니게 된 채팅의 놓친 후보는 남겨 두고 일치도에서 뺀다(수만 셈)
-    m_keep, m_not = {}, {}
+    # 06 2-9: ③ 를 직접·높음으로 고쳤거나 물러 대상이 아니게 된 채팅의 놓친 후보는 남겨 두고 일치도에서 뺀다(수만 셈)
+    m_keep, m_cnt = {}, {}
     for key, side in (("a", side_a), ("b", side_b)):
-        m_keep[key], m_not[key] = drop_missed_not_target(cut[key]["missed"], side.get("reactions") or ())
+        m_keep[key], m_cnt[key] = drop_missed_stale(cut[key]["missed"], side.get("reactions") or ())
     missed = compare_missed(m_keep["a"], m_keep["b"], settings=st, scope=sample_scope, chat_times=chat_times)
     missed["dropped_from_sample"] = {"a": cut["a"]["dropped_missed"], "b": cut["b"]["dropped_missed"]}
-    missed["dropped_not_target"] = {"a": m_not["a"], "b": m_not["b"]}
+    missed["dropped_not_target"] = {"a": m_cnt["a"]["not_target"], "b": m_cnt["b"]["not_target"]}
+    missed["dropped_no_reaction"] = {"a": m_cnt["a"]["no_reaction"], "b": m_cnt["b"]["no_reaction"]}
+    # 08 D-13 3: 놓친 후보 일치도는 재라벨 둘 사이에서만. 1차가 끼면 숫자는 남기되 '1차는 ④ 없음' 으로 표시한다
+    applicable = missed_pair_applicable(side_a.get("session_kind"), side_b.get("session_kind"))
+    missed["pair_applicable"] = applicable
+    missed["pair_note"] = None if applicable else MISSED_PRIMARY_NOTE
     origin = compare_origins(side_a.get("origins") or (), side_b.get("origins") or (), settings=st)
     ctype = comparison_type(side_a, side_b)
     exposed = sorted(s["session_id"] for s in (side_a, side_b) if s.get("view_exposed") or s.get("analysis_exposed"))
@@ -1362,6 +1411,10 @@ def build_agreement(side_a: Mapping, side_b: Mapping, *, settings: Mapping | Non
     if nt["a"] or nt["b"]:
         interp.append(f"③ 판정을 고쳐 4단계 대상이 아니게 된 채팅의 놓친 후보 {nt['a'] + nt['b']}건(A {nt['a']} · B {nt['b']})"
                       "은 남겨 두고 일치도에서는 뺐다 (06 2-9).")
+    nr = missed["dropped_no_reaction"]
+    if nr["a"] or nr["b"]:
+        interp.append(f"③ 반응을 물러 근거가 없어진 놓친 후보 {nr['a'] + nr['b']}건(A {nr['a']} · B {nr['b']})"
+                      "은 남겨 두고 일치도에서는 뺐다 (06 2-9).")
     return {
         "header": header,
         "segments": seg,
@@ -1382,7 +1435,8 @@ __all__ = [
     "AgreementError", "merge_settings", "kappa_from_table", "linear_weight", "weighted_kappa_from_table", "ac1_binary",
     "percentile", "seed_from", "SplitMix64", "bootstrap_ci", "match_boundaries", "compare_segments",
     "reaction_value", "compare_samples", "gate_verdict", "gates", "comparison_type", "interpret", "build_agreement",
-    "sample_regions", "split_current_sample", "compare_links", "compare_continuations", "compare_missed",
+    "sample_regions", "split_current_sample", "drop_missed_not_target", "drop_missed_stale",
+    "missed_pair_applicable", "MISSED_KINDS", "MISSED_PRIMARY_NOTE", "compare_links", "compare_continuations", "compare_missed",
     "compare_origins", "CONTINUATION_TYPES", "REASON_CODES", "HUMAN_REASON_CODES", "ORIGIN_VALUES",
     "AUTO_ORIGIN_METHODS",
     "V_PASS", "V_PASS_POINT", "V_UNCERTAIN", "V_FAIL", "V_LOW_N", "V_NA", "VERDICT_KO",

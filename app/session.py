@@ -704,12 +704,20 @@ def reopen_refusal(entry: ExistingSession, labeler_id: str | None, survey: Proje
     잠긴 1차 세션을 다시 열면 store 가 그 기록 파일을 열고 작업대가 구간·반응을 그린다. 같은 라벨러에게 그 세션을 원
     세션으로 하는 같은 사람 재라벨(relabel_same) 계획이 있고, 그 계획으로 연 자기 세션이 아직 잠기지 않았으면(만들기 전
     포함) 막는다 — 3일 간격(06 3-3)은 기억 효과를 줄이려는 것이고, 읽기 전용 보기에는 view.exposed 도 남지 않는다.
-    읽지 못한 계획은 원 세션을 알 수 없어 보지 않는다(세션 선택 화면이 그 계획의 문제를 따로 보인다).
+    이 라벨러가 볼 계획(plans_of: 자기 계획 + 누구 것인지 모르는 읽지 못한 계획) 가운데 읽지 못한 것이 하나라도 있으면
+    그 계획이 이 1차 세션의 같은 사람 재라벨일 수 있으므로 막는다(블라인드 쪽으로 실패, 14 4-2 의 3). 색인을 읽지도 다시
+    만들지도 못한 경우(모든 계획이 '읽지 못함')도 같다. 취소된 계획은 보지 않는다. 풀려면 조정 세션에서 그 계획을
+    취소하거나(D-12 7) 계획 파일을 고친다.
     """
     if not entry.locked or entry.session_kind != "primary":
         return None
     mine = list(mine)
-    for p in survey.plans_of(labeler_id):
+    plans = tuple(survey.plans_of(labeler_id))
+    bad = [p for p in plans if p.problem is not None and p.status != relabel_io.STATUS_CANCELLED]
+    if bad:
+        return (f"읽지 못한 재라벨 계획이 {len(bad)}개 있어(예: {bad[0].plan_id}) 이 1차 세션을 다시 열지 않습니다 "
+                "— 같은 사람 재라벨 계획일 수 있습니다. 조정 세션에서 그 계획을 취소하거나 고친 뒤 여세요 (06 3-3·3-4)")
+    for p in plans:
         if not p.usable or p.session_kind != rp.RELABEL_SAME:
             continue
         if p.labeler_id != labeler_id or p.source_session_id != entry.session_id:

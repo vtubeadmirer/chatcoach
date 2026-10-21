@@ -256,14 +256,26 @@ class MainWindow(QMainWindow):
         wb = self.workbench
         if wb is None:
             return None
+        if getattr(self, "busy_jobs", 0) > 0:         # 잠그기 전 검증이 도는 중 — 다시 들어와 워커를 겹치지 않는다
+            self.statusBar().showMessage(tr("잠그기 전 검증이 아직 도는 중입니다"), 5000)
+            return None
         why = wb.can_lock()
         if why:
             self.statusBar().showMessage(why, 5000)
             return None
         if not wb.prepare_lock():
             return None
+        prep = self.lock_prep(wb)
+        if prep is None:
+            return None
+        # 검증이 도는 동안 작업대가 닫혔거나(창 닫기·프로젝트 바꾸기) 닫기를 기다리는 중이면 잠그기 화면을 만들지 않는다
+        store = getattr(wb, "store", None)
+        if self.workbench is not wb or store is None or getattr(store, "closed", False) \
+                or getattr(self, "_close_pending", False):
+            return None
+        rows, current = prep
         from .lock_dialog import LockDialog
-        dlg = LockDialog(self, store=wb.store, sample_verify=wb.sample_verify_results())
+        dlg = LockDialog(self, store=wb.store, sample_verify=rows, current_sample=current)
         try:
             (run or (lambda d: d.exec()))(dlg)
             doc = dlg.lock_doc
@@ -274,6 +286,82 @@ class MainWindow(QMainWindow):
             self.update_session_actions()
             self.statusBar().showMessage(tr("세션 {0} 를 잠갔습니다").format(doc.get("session_id")), 5000)
         return doc
+
+    def run_job_modal(self, worker, *, title: str, label: str) -> str | None:
+        """JobWorker 를 UI 스레드 밖에서 돌리는 동안 바쁨 표시(진행 대화상자·바쁨 커서)와 [취소] 를 보인다(14 6-1 의 1).
+
+        끝날 때까지 이 자리에서 기다리되 이벤트 루프는 돈다(화면이 멈추지 않음). 끝난 결과 worker.outcome
+        ('done'·'failed'·'cancelled')를 돌려준다. 취소는 일과 일 사이(또는 일이 ctx.check() 를 부를 때) 먹힌다."""
+        from PySide6.QtCore import QEventLoop
+        prog = QProgressDialog(label, tr("취소"), 0, max(1, len(worker.jobs)), self)
+        prog.setWindowTitle(title)
+        prog.setWindowModality(Qt.WindowModal)
+        prog.setMinimumDuration(0)              # 처음부터 띄워 WindowModal 이 바로 걸리게(메인 창 입력을 막는다)
+        prog.setAutoClose(False)
+        prog.setAutoReset(False)
+        prog.setValue(0)
+        prog.show()
+        loop = QEventLoop(self)
+        ended = {"v": False}
+
+        def end(*_a):
+            ended["v"] = True
+            loop.quit()
+        worker.progress.connect(lambda n, _total, _key: prog.setValue(n))
+        worker.done.connect(end)
+        worker.failed.connect(end)
+        worker.cancelled.connect(end)
+
+        def on_cancel():
+            worker.cancel()
+            prog.setLabelText(tr("취소하는 중… (지금 하던 일이 끝나면 멈춥니다)"))
+        prog.canceled.connect(on_cancel)
+        self.busy_jobs = getattr(self, "busy_jobs", 0) + 1
+        jobs = getattr(self, "_modal_workers", None)
+        if jobs is None:
+            jobs = self._modal_workers = []
+        jobs.append(worker)
+        QApplication.setOverrideCursor(Qt.BusyCursor)
+        try:
+            worker.start()
+            if not ended["v"]:
+                loop.exec()
+            worker.wait()
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.busy_jobs -= 1
+            if worker in jobs:
+                jobs.remove(worker)
+            prog.close()
+            prog.deleteLater()
+            if self.busy_jobs == 0 and getattr(self, "_close_pending", False):
+                QTimer.singleShot(0, self.close)        # 도는 동안 미뤄 둔 창 닫기(closeEvent)를 이제 한다
+        return worker.outcome
+
+    def lock_prep(self, wb):
+        """잠그기 직전 재현 검증(1차: 표본 sample_verify)·자기 표본 목록(재라벨: current_sample)을 워커로 낸다.
+        (sample_verify 행 목록, current_sample 또는 None). 취소·실패면 None(잠그지 않는다, 상태 줄에 까닭)."""
+        from ..workers import JobWorker, SampleVerifyWorker, sample_verify_rows
+        job = wb.current_sample_job()
+        if job is not None:
+            w = JobWorker.single("current_sample", job, name="재라벨 표본 목록", parent=self)
+            label = tr("잠그기 전에 이 세션의 블록 표본 목록을 계산하는 중…")
+        else:
+            mans, verify_one = wb.sample_verify_plan()
+            if not mans:
+                return [], None
+            w = SampleVerifyWorker(mans, verify_one, parent=self)
+            label = tr("잠그기 전에 표본 {0}개의 재현 검증을 하는 중…").format(len(mans))
+        outcome = self.run_job_modal(w, title=tr("세션 잠그기"), label=label)
+        res = dict(w.results)
+        w.deleteLater()
+        if outcome != "done":
+            self.statusBar().showMessage(tr("잠그기 전 검증을 {0} — 잠그지 않았습니다").format(
+                tr("취소했습니다") if outcome == "cancelled" else tr("하지 못했습니다")), 6000)
+            return None
+        if job is not None:
+            return [], res.get("current_sample")
+        return sample_verify_rows(res), None
 
     def relabel_plan_dialog(self, *, run=None):
         """'세션 → 재라벨 계획 만들기…'. run(dlg) 을 주면 exec() 대신(시험). 만든 계획 dict 또는 None."""
@@ -301,7 +389,8 @@ class MainWindow(QMainWindow):
         from .agreement_dialog import AgreementDialog
         wb = self.workbench
         dlg = AgreementDialog(self, project_root=wb.project.root, created_by=wb.labeler_id,
-                              reader_kind=wb.session_kind if wb.session is not None else None)
+                              reader_kind=wb.session_kind if wb.session is not None else None,
+                              chat_times_provider=wb.chat_times_provider())
         try:
             (run or (lambda d: d.exec()))(dlg)
             return dlg.result
@@ -344,12 +433,14 @@ class MainWindow(QMainWindow):
         from .workbench import Workbench
         had = self.workbench is not None
         self._close_workbench("switch_project" if had else "user")   # 저장 안 한 구간 변경은 그 안에서 묻는다
+        self.refresh_relabel_index(outcome)
         try:
             self.session = self.choose_session(outcome)
         except Exception:  # noqa: BLE001 — 세션 화면이 실패해도 보기 전용으로는 연다
             LOG.exception("세션 선택 화면 실패 — 보기 전용으로 엽니다")
             self.session = None
         wb = Workbench(self, session=self.session)   # 세션이 있으면 작업대가 app.store 로 라벨 기록을 연다
+        wb.data_root = self.data_root                # 채팅 색인 캐시 자리(<data>\cache\<project_id>, 프로젝트 밖)
         self.workbench = wb
         self.stack.addWidget(wb)
         self.stack.setCurrentWidget(wb)
@@ -379,6 +470,33 @@ class MainWindow(QMainWindow):
         wb.open_project(outcome)
         wb.setFocus()
         self.update_session_actions()
+
+    def refresh_relabel_index(self, outcome) -> str:
+        """프로젝트를 열 때(세션을 고르기 전, 세션 밖) relabel/index.json 을 조용히 다시 만든다(14 4-2 의 2).
+
+        세션 화면(라벨러 자리)이 색인을 다시 만들면 모든 계획·취소 기록을 여는데, 그 일을 세션 밖에서 미리 해 둔다.
+        읽기 전용으로 열었거나 relabel/ 이 없으면 하지 않는다. 실패해도 열기는 계속한다(세션 화면이 그때 다시 본다).
+        색인이 이미 계획 파일과 같으면 쓰지 않는다(열 때마다 프로젝트 폴더를 고치지 않게).
+        로그에는 결과 종류·계획 수만. 돌려주는 값: 'rebuilt' · 'same' · 'skipped' · 'failed'(시험·점검용)."""
+        proj = getattr(outcome, "project", None)
+        if proj is None or getattr(outcome, "read_only", False) or getattr(proj, "read_only", False):
+            return "skipped"
+        from .. import relabel as relabel_io
+        if not os.path.isdir(os.path.join(proj.root, relabel_io.RELABEL_DIR)):
+            return "skipped"
+        try:
+            try:
+                cur = relabel_io.read_index(proj.root)
+            except ValueError:
+                cur = None
+            if cur is not None and cur == relabel_io.build_index(proj.root):
+                return "same"
+            doc = relabel_io.rebuild_index(proj.root, creator_kind=None)
+        except (OSError, ValueError) as e:
+            LOG.warning("재라벨 계획 색인을 다시 만들지 못했습니다: %s", type(e).__name__)
+            return "failed"
+        LOG.info("재라벨 계획 색인을 다시 만들었습니다: 계획 %d개", len(doc.get("plans") or []))
+        return "rebuilt"
 
     def _before_open(self, path: str) -> None:
         """열려는 폴더가 지금 작업대의 프로젝트면 작업대를 먼저 닫아 잠금(locks/open.lock)을 푼다.
@@ -427,6 +545,19 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(tr("준비"))
 
     def closeEvent(self, ev):  # noqa: N802
+        if getattr(self, "busy_jobs", 0) > 0:
+            # run_job_modal 이 안쪽 이벤트 루프를 도는 중 — 지금 store 를 닫으면 그 뒤 잠그기 화면이 닫힌 store 로 뜬다.
+            # 작업을 취소하고, 끝나면(run_job_modal 의 finally) 다시 닫는다.
+            self._close_pending = True
+            for w in list(getattr(self, "_modal_workers", None) or ()):
+                try:
+                    w.cancel()
+                except Exception:  # noqa: BLE001 — 닫는 길은 막지 않는다
+                    LOG.exception("작업 취소 실패")
+            self.statusBar().showMessage(tr("하던 작업을 멈추는 중입니다 — 끝나면 창을 닫습니다"))
+            ev.ignore()
+            return
+        self._close_pending = False
         self._close_workbench("app_exit")
         super().closeEvent(ev)
 

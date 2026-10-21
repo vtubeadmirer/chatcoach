@@ -66,12 +66,15 @@ class LockDialog(QDialog):
 
     sessionLocked = Signal(object)      # 잠금 내용(dict)
 
-    def __init__(self, parent=None, *, store, sample_verify: list[dict] | None = None):
+    def __init__(self, parent=None, *, store, sample_verify: list[dict] | None = None,
+                 current_sample: list[str] | None = None):
+        """current_sample: 재라벨 세션의 자기 표본 chat_id 목록(14 4-2 의 5). 주면 store.lock_session 에 그대로 넘긴다."""
         super().__init__(parent)
         self.setWindowTitle(tr("세션 잠그기"))
         self.setModal(True)
         self.store = store
         self._sample_verify = sample_verify
+        self._current_sample = current_sample
         self.lock_doc: dict | None = None
         self.summary = store.lock_summary()
 
@@ -174,7 +177,10 @@ class LockDialog(QDialog):
         if self.step != 2 or not self.confirm_box.isChecked() or not self.summary.can_lock or self.lock_doc is not None:
             return False
         try:
-            doc = self.store.lock_session(sample_verify=self._sample_verify)
+            if self._current_sample is not None:
+                doc = self.store.lock_session(sample_verify=self._sample_verify, current_sample=self._current_sample)
+            else:
+                doc = self.store.lock_session(sample_verify=self._sample_verify)
         except Exception as e:  # noqa: BLE001 — 사유를 화면에 보이고 열어 둔다
             LOG.warning("세션 잠그기 실패: %s", type(e).__name__)
             self.error_label.setText(tr("잠그지 못했습니다: ") + str(e))

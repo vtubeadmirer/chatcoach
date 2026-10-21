@@ -74,8 +74,9 @@
 │  └─ <session_id>.json              세션 잠금(기록 파일 해시)                      [원본 · 불변]
 ├─ samples\<sample_set_id>.json      무작위 표본 매니페스트                         [원본 · 불변]
 ├─ relabel\<plan_id>.json            재라벨 계획                                    [원본 · 불변]
-├─ relabel\<plan_id>.cancel.json     계획 취소 기록(검토자 사유, D-12 7 — 다섯째 묶음)              [원본 · 불변]
-├─ relabel\index.json                계획 색인(plan_id·종류·라벨러·원 세션만, D-12 2 — 다섯째 묶음)   [파생 · 다시 만들 수 있음]
+├─ relabel\<plan_id>.cancel.json     계획 취소 기록(검토자 사유, D-12 7)              [원본 · 불변]
+├─ relabel\index.json                계획 색인(plan_id·원 세션·라벨러·종류·상태, D-12 2)   [파생 · 다시 만들 수 있음]
+├─ origin\OT-<yyyymmdd>-<4자>.json   출처 판정 대상 파일(chat_id 목록만, 6-11, D-13 5)   [원본 · 불변]
 ├─ origin\                           ★보호 구역: 가상 채팅 생성 기록·대조 결과 (v1)
 └─ derived\                          비싼 파생: asr.json · vad.json · ocr.jsonl     [파생 · ★asr·ocr 는 보호]
 ```
@@ -190,7 +191,7 @@ erDiagram
 
 ## 5. 열거값
 
-코드 값은 영어 식별자, 화면 표시명은 `app/core/schema.py` 상수가 단일 출처다(`tr()` 번역 대상이 아니다. 모듈 위치는 [02](02-architecture.md) 3-2). 스키마 파일의 enum 과 `app/core/schema.py` 가 같은지 테스트로 묶는다(19장).
+코드 값은 영어 식별자다. 화면 표시명은 `tr()` 번역 대상이 아니다. 한곳에 모으는 상수 모듈(`app/core/schema.py`)은 두지 않는다(D-12 2, 13 4-2 3번). 값과 표시명은 그 값을 쓰는 core 모듈의 상수(예 `segments.CATEGORIES`, `origin.ORIGIN_KO`, `missed.REASON_NAMES`, `adjudicate.CAUSE_KO`)와 일부 ui 파일에 있다([02](02-architecture.md) 3-1·3-2). 스키마 enum 과 코드 상수가 같은지는 그 기능의 시험이 본다(19장) (D-13 2, 14 4-2 12번).
 
 ### 5-1. 활동 분류 (`category`, 안내서 3장)
 
@@ -245,6 +246,8 @@ erDiagram
 | `E` | 반복·도배 | — |
 | `F` | 후원·시스템 메시지 | 채팅 종류가 `text` 가 아니면 자동 |
 | `G` | 판단 불가 | — |
+
+- 사유-조건 맞춤(구현, D-13 1, 14 4-1 10번): A 는 ① 실패일 때만, F 는 일반 채팅(`kind = text`)이 아닐 때만 고를 수 있다. B·C·D·E 는 그 사유가 가리키는 조건(B↔②, C·E↔③, D↔④)을 '예' 로 표시했으면 거부한다. G 는 늘 고를 수 있다. 자세한 것은 6-10.
 
 ### 5-6. 채팅 출처 (`origin.origin`, 검토 의견 1, v1)
 
@@ -409,7 +412,7 @@ flowchart LR
 
 | kind | 언제 쓰나 | 주요 body 필드 |
 |---|---|---|
-| `session.open` | 기록 파일의 첫 줄(seq 1). 같은 세션의 다른 PC 파일에도 같은 메타가 반복된다. | `project_id`, `session_kind`, `session_created_at`, `machine_id`, `machine4`, `guide_version`, `guide_doc_sha256`, `thresholds_sha256`, `scope`(`whole`/`blocks`+`ranges`), `relabel_plan_id`, `blind`, `tool`(`heard_max_speed` 등), `tool_models`(VAD·ASR 모델), `dataset_split`(세션을 만들 때의 `project.dataset_split` 사본), `reopen_note`(선택 — 앞 세션을 잘못 잠갔을 때 그 사유. 잠금은 풀지 않으므로 다음 세션 첫 줄에 적는다, D-11 7·D-12 2. 한 줄·앞뒤 공백 없음·1~300자. 세션 선택 화면은 그 라벨러에게 잠긴 자기 세션이 있고 새 세션을 고를 때만 이 칸을 보인다. 다섯째 묶음에서 스키마·세션 화면에 넣었다) |
+| `session.open` | 기록 파일의 첫 줄(seq 1). 같은 세션의 다른 PC 파일에도 같은 메타가 반복된다. | `project_id`, `session_kind`, `session_created_at`, `machine_id`, `machine4`, `guide_version`, `guide_doc_sha256`, `thresholds_sha256`, `scope`(`whole`/`blocks`+`ranges`), `relabel_plan_id`, `blind`, `tool`(`heard_max_speed` 등), `tool_models`(VAD·ASR 모델), `dataset_split`(세션을 만들 때의 `project.dataset_split` 사본), `reopen_note`(선택 — 앞 세션을 잘못 잠갔을 때 그 사유. 잠금은 풀지 않으므로 다음 세션 첫 줄에 적는다, D-11 7·D-12 2. 한 줄·앞뒤 공백 없음·1~300자. 세션 선택 화면은 그 라벨러에게 잠긴 자기 세션이 있고 새 세션을 고를 때만 이 칸을 보인다) |
 | `run.start` | 앱을 켜고 세션을 열 때마다 | `utc_offset_min`, `tz_name`, `clock_skew_ms`, `clock_source`, `data_dir_mode`, `media_vfr`, `compat_mode`, `update_check_state`, `checked_at`, `latest_seen_version` |
 | `phase.mark` | 단계 완료(또는 다시 열기) 표시 | `phase`(`segments`·`reactions`·`samples`·`missed`·`origin`), `scope`(`all` 또는 구간 entity_id 목록), `done` |
 | `view.exposed` | 숨겨 둔 자료를 열어 봤을 때 | `what`(`nickname_raw`·`asr_text`·`other_session_labels`·`ai_results`·`origin_info`·`raw_chat_page`), `chat_id`, `entity_id`, `during_entity_id` |
@@ -536,25 +539,28 @@ flowchart LR
 | `check_question` | 점검 질문의 답. |
 | `confidence`, `rationale` | 확신도는 필수(안내서 6장). |
 
-다섯째 묶음 구현(D-12 5, `app/core/missed.py`·`app/ui/forms/missed_form.py`, 작업대 ④ 모드):
+구현(D-12 5, `app/core/missed.py`·`app/ui/forms/missed_form.py`, 작업대 ④ 모드):
 
-- **재라벨 세션에서만** 매긴다. 대상은 재라벨 블록 안 3단계 표본(계획의 τ_block 으로 메모리에서 다시 만든 것) 가운데 자기 판정이 반응 미확인·관련성만·불명확인 채팅이다. 1차 세션에는 ④ 모드가 없다.
+- **재라벨 세션에서만** 매긴다. 대상은 재라벨 블록 안 3단계 표본(계획의 τ_block 으로 메모리에서 다시 만든 것) 가운데 자기 판정이 반응 미확인·관련성만·불명확인 채팅이다. 1차 세션에는 ④ 모드가 없고, 1차는 ④ 를 하지 않는다(D-12 5 유지, D-13 4).
 - 단계 순서: 그 구간이 `phase.mark(samples)` 로 완료돼야 한다(12-3). ③ 표본 모드에 [표본 완료 표시] 가 있다.
-- 사유 코드와 조건 맞춤은 5-5 보다 좁다: A 는 ① 실패 때만, F 는 `kind ≠ text` 일 때만, B·C·D·E 는 그 사유가 가리키는 조건(B↔②, C·E↔③, D↔④)을 '예' 로 표시했으면 거부, G 는 늘 허용.
+- 사유 코드와 조건 맞춤은 5-5 의 맞춤 규칙을 따른다: A 는 ① 실패 때만, F 는 `kind ≠ text` 일 때만, B·C·D·E 는 그 사유가 가리키는 조건(B↔②, C·E↔③, D↔④)을 '예' 로 표시했으면 거부, G 는 늘 허용.
 - `reason_code_source`: F 는 `auto`, 앱 제안(A·B)을 그대로 받으면 `auto_suggested`, 그 밖은 `manual`. 일치도의 사유 코드 κ 는 사람이 고른 코드(B·C·D·E·G, `auto` 아님)만 쓴다([06](06-evaluation-and-agreement.md) 4-6).
-- ② 보조값: `chat_rate_10s` = [t − 10초, t) 의 모든 종류 채팅 수, `exposure_est_ms` 는 `visible_lines` 가 정해졌을 때만(v0.1 은 미정 → null).
+- ② 보조값: `chat_rate_10s` = [t − 10초, t) 의 모든 종류 채팅 수, `exposure_est_ms` 는 `visible_lines` 가 정해졌을 때만(v0.1 은 미정 → null, 그때는 B 자동 제안도 없다). `visible_lines` 는 시범에서 정한다 (D-13 1, 14 4-1 12번).
+- 조건 ① 은 저장 때의 값을 믿지 않고 **지금 구간표로 다시 센다.** ① 이 실패한 채팅도 대상에 남기고 사유 A 를 제안한다 (D-13 1, 14 4-1 13번).
+- 표본 밖 후보(`scope = extra`)를 적는 화면은 아직 없다. 비율 계산에서는 지금처럼 뺀다.
 
 ### 6-11. 채팅 출처 — `origin` (검토 의견 1)
 
 `origin_review` 세션에서만 만든다. 필드: `chat_id`, `origin`, `method`, `generation_ref`(생성 기록 파일·항목), `ocr_ref`(프레임 시각·줄), `score`, `second_score`, `confidence`, `rationale`. 반응 라벨링 중에는 보이지 않는다(출처를 알면 반응을 다르게 보는 편향 방지).
 
-다섯째 묶음 구현(D-12 6, `app/core/origin.py`·`app/ui/origin_view.py`, 작업대 '출처 판정' 모드):
+구현(D-12 6, `app/core/origin.py`·`app/ui/origin_view.py`, 작업대 '출처 판정' 모드):
 
 - 확신도: `real`·`virtual` 이면 `certain`·`probably` 중 하나, `undeterminable` 이면 `null`(스키마도 이렇게 맞췄다).
-- `generation_log_match` 는 `generation_ref`, `ocr_match` 는 `ocr_ref` 가 있어야 한다. `none` 은 판별 불가에만. 생성 기록 대조는 화면의 [자동 결과 받기] 로만 고른다(자동 대조기는 아직 없음 — '자동' 표시만, D-12 6).
-- '자동' 짝 = 한쪽이라도 method 가 `generation_log_match`·`viewer_id_match` 인 짝. 출처 κ 는 `app.core.origin.compare_origins` 하나로 계산하고 보고서(`app.core.agreement.compare_origins`)는 그 결과를 보고서 모양으로 바꾸기만 한다.
+- `generation_log_match` 는 `generation_ref`, `ocr_match` 는 `ocr_ref` 가 있어야 한다. `none` 은 판별 불가에만. 생성 기록 대조는 화면의 [자동 결과 받기] 로만 고른다(자동 대조기는 아직 없음 — '자동' 표시만, D-12 6). 화면에는 OCR 대조 고르기가 없다. OCR 이 생기면 그 칸을 단다 (D-13 1, 14 4-1 8번).
+- '자동' 짝 = 한쪽이라도 method 가 `generation_log_match`·`viewer_id_match` 인 짝. `ocr_match` 는 자동에 넣지 않고 사람 쪽으로 센다. OCR 대조가 생길 때 다시 정한다 (D-13 1·6, 14 4-1 9번).
+- 출처 κ 는 `app.core.origin.compare_origins` **하나**로 계산한다. 보고서(`app.core.agreement.compare_origins`)는 함수 안에서 늦게 import 해 그 결과를 보고서 모양으로 바꾸기만 한다 (D-13 2, 14 4-2 12번).
 
-**출처 판정 대상 파일 `origin/OT-<yyyymmdd>-<4자>.json`** (다섯째 묶음, 불변 — 이미 있으면 쓰지 않는다)
+**출처 판정 대상 파일 `origin/OT-<yyyymmdd>-<4자>.json`** (불변 — 이미 있으면 쓰지 않는다. D-13 1, 14 4-1 7번)
 
 | 필드 | 뜻 |
 |---|---|
@@ -564,7 +570,9 @@ flowchart LR
 | `chat_ids_sha256` | `items` 의 chat_id 를 order 순으로 줄바꿈으로 이은 UTF-8 의 SHA-256 |
 | `items[]` | `order`, `chat_id`, `auto`(자동 대조 결과 — `origin`·`method`·`generation_ref`·`score`·`second_score`, 없으면 null) |
 
-본문·닉네임은 넣지 않는다. 대상 파일이 여럿이면 `target_id` 순으로 합치고 겹친 chat_id 는 앞 것만 쓴다. 출처 판정 화면은 이 목록의 채팅만 보인다(대상 고르기 기능 없음). 누가 어떤 기준으로 대상 파일을 만드는지는 아직 정하지 않았다(지금은 시험·도구가 만든다).
+본문·닉네임은 넣지 않는다. 대상 파일이 여럿이면 `target_id` 순으로 합치고 겹친 chat_id 는 앞 것만 쓴다. 출처 판정 화면은 이 목록의 채팅만 보인다(대상 고르기 기능 없음).
+
+- **대상 파일은 조정 세션이 1차 매니페스트 표본으로 만든다**(`basis = sample_items`, 항목 = 1차 세션 표본 매니페스트들(계열마다 가장 큰 `sample_rev`)의 chat_id). 사람이 대상을 고르지 않게 한다. 출처 일치도 보고서 머리에 대상 파일 ID 목록과 각 `chat_ids_sha256` 을 적는다 (D-13 5, 14 4-3 3번·4-2 7번). 앱에서는 조정 화면의 [출처 판정 대상 만들기] 가 만든다(`core.origin.build_sample_targets` → `ProjectStore.write_origin_targets`, 없을 때만 원자적으로 쓰고 조정 세션이 아니면 막음). 같은 `chat_ids_sha256` 의 대상 파일이 이미 있으면 만들지 않는다.
 
 ### 6-12. 조정 — `adjudication`, 철회 — `retract`
 
@@ -573,14 +581,19 @@ flowchart LR
 | `adjudication` | `target_kind`, `targets[]`(세션·대상·판), `decision`(`final`·`exclude_from_eval`·`keep_as_ambiguous`), `final`, `cause`(`guide_unclear`·`simple_mistake`·`truly_ambiguous`·`other`), `pattern_tag`, `note` | 갈린 라벨의 최종값. 원 라벨은 그대로 남고, '최종 세트' 에서만 조정값이 우선한다. 잠긴 세션을 바로잡는 유일한 길이다. |
 | `retract` | `reason`(`undo`·`merged`·`split_cleanup`·`wrong_target`·`other`), `merged_into`, `note` | 삭제 대신 쓴다. `entity_id` = 대상, `supersedes` = 대상의 현재 판(필수). |
 
-조정 구현(다섯째 묶음, D-12 3·4, `app/core/adjudicate.py`·`app/ui/adjudication_view.py`, 작업대 '조정' 모드):
+조정 구현(D-12 3·4, `app/core/adjudicate.py`·`app/ui/adjudication_view.py`, 작업대 '조정' 모드):
 
-- 조정 세션은 잠긴 세션을 모두 읽고(12-1) 짝마다 불일치를 모은다: 표본(등급·한쪽만 불명확·한쪽만 판단 불가)과 구간(분류가 다름·짝지은 경계가 완충보다 크게 어긋남). 같은 두 구간 판의 불일치는 한 건으로 묶는다.
+- 조정 세션은 잠긴 세션을 모두 읽고(12-1) 짝마다 불일치를 모은다: 표본(등급·한쪽만 불명확·한쪽만 판단 불가)과 구간(분류가 다름·짝지은 경계가 완충보다 크게 어긋남). 세 세션 이상이면 짝마다 만든 목록을 합치고, 표본 건은 채팅마다 한 건이다.
+  - 한쪽만 '판단 불가' 인 짝은 일치도(`core.agreement`)에서는 세기만 하지만 조정 목록에는 넣는다. 판단 불가는 정답이 아니므로 조정에서 정한다 (D-13 1, 14 4-1 2번).
+  - 완충(10초) 이하로 어긋난 경계는 조정 목록에서 뺀다(옵션으로 넣을 수 있음). [06](06-evaluation-and-agreement.md) 4-1 핵심 일치율과 같은 뜻이다 (D-13 1, 14 4-1 3번).
+  - 같은 두 구간 판 사이의 여러 조각 불일치는 한 건으로 묶는다. 조각 단위가 필요해지면 `adjudication` 에 선택 칸 `span` 을 더한다 (D-13 1, 14 4-1 4번).
 - 고른 건의 두 판정·확신도·**근거 한 줄**을 나란히 보인다(D-12 4). 근거는 화면에만 있고 보고서·로그에는 쓰지 않는다.
 - 결정은 한쪽을 최종값으로(표본·구간) · 새 값(구간만) · 평가에서 제외 · 진짜 모호함. `cause` 필수. 다시 저장하면 그 조정의 새 판(supersedes)이다. 조정 뒤 대상 판이 바뀌면 '판 바뀜' 으로 보인다.
+- **대상 묶음이 바뀐 표본 건**: 세 번째 잠긴 세션이 생기거나 세션 체크를 풀어 표본 건의 대상 세션 묶음이 저장한 조정의 부분집합·상위집합이 되면, 같은 조정으로 잇고 `targets_changed`(판 바뀜과 같이 '바뀜' 표시)를 켠다. 다시 저장하면 그 기록을 supersedes 한다(유효한 조정이 둘 남지 않음). 구간 건은 열쇠가 같을 때만 잇는다 (D-13 2, 14 3-2 2번·4-2 13번).
 - 같은 `pattern_tag`(대소문자·공백 무시)가 3건 이상이면 기준서 개정 후보로 보인다([06](06-evaluation-and-agreement.md) 5장).
-- 1인 작업이면 본인이 조정자를 겸하고 화면·보고서 머리에 '조정자 = 라벨러' 를 표시한다(D-12 3). 이 표시는 기록에 칸으로 두지 않고 `labeler_id` 와 `targets` 의 세션으로 계산한다.
-- 반응(표본) 건의 '새 값' 은 이번 판에서 만들지 않는다(한쪽 고르기·제외·모호함만).
+- 1인 작업이면 본인이 조정자를 겸하고 화면·보고서 머리에 '조정자 = 라벨러' 를 표시한다(D-12 3). 이 표시는 조정 기록에 칸으로 두지 않고 `labeler_id` 와 `targets` 의 세션으로 계산한다. 계획 취소 기록에는 `canceller_is_labeler` 로 저장한다 (D-13 1, 14 4-1 5번).
+- 반응(표본) 건의 '새 값'(`final`)은 받지 않는다. 표본 건은 한쪽 고르기·제외·모호함만, '새 값' 은 구간 건만이다. 필요해지면 반응 편집기를 조정 모드로 여는 길을 나중에 둔다 (D-13 1, 14 4-1 1번).
+- 조정 기록을 최종 세트(내보내기·AI 비교)에 반영하는 길은 아직 없다. AI 결과 봉인 묶음에서 `case_states` 와 같은 열쇠로 한다 (D-13 2, 14 4-2 8번).
 
 ### 6-13. 무작위 표본 — `samples/<sample_set_id>.json` ([스키마](../../schemas/sample-manifest.schema.json))
 
@@ -644,8 +657,8 @@ flowchart LR
 - **1차 표본 목록(`sample_items`)은 넣지 않는다**(D-12 1, 13 4-1 1번, [06](06-evaluation-and-agreement.md) 3-5). 목록에서 빠진 채팅 자리로 1차 구간 경계와 완충이 드러나기 때문이다. 재라벨러는 자기 구간표와 블록의 τ_block 으로 표본을 다시 계산한다(12-2).
 - 같은 잠긴 1차 세션이면 `relabel_same` 계획과 `relabel_second` 계획이 같은 블록을 고른다(seed 에 세션 종류·계획 번호를 넣지 않음). 그래서 1차·같은 사람·다른 사람 세 판을 같은 블록에서 비교한다.
 - 계획 파일에서 드러나는 것: `candidate_blocks` 로 1차가 매긴 10분 블록이 어디인지, `source_manifests` 의 `sample_set_id` 로 블록 안 1차 구간 수 짐작. 둘 다 시각·경계는 없어 받아들였다(D-12 2, 13 4-2 4·5번).
-- **계획 색인 `relabel/index.json`** (D-12 2, 13 4-3 3번 — 다섯째 묶음에서 구현): 계획을 만들거나 취소할 때 `plan_id`·원 세션·라벨러·종류·상태(`active`·`cancelled`·`unreadable`) 다섯 칸만 담은 색인을 다시 만들어 원자적으로 바꿔 넣는다(`relabel-plan.schema.json` 의 `$defs/planIndex`). 세션 선택 화면은 라벨러를 고르기 전에는 계획을 열지 않고, 고른 뒤에는 색인으로 **그 라벨러의 계획 파일만** 연다(`ProjectSurvey.plans_of` → `app.relabel.plans_for_labeler`). 색인은 계획 파일에서 다시 만들 수 있는 파생 파일이다. 색인이 없거나 깨졌으면 옛 길(모든 계획 파일)로 물러난다. 색인에 없는 계획 파일(색인 뒤에 생긴 것)은 열어서 본다.
-- **계획 취소 `relabel/<plan_id>.cancel.json`** (D-12 7 — 다섯째 묶음에서 구현): 막힌 비교를 풀려고 검토자가 사유를 적고 계획을 취소한다(메뉴 '세션 → 재라벨 계획 취소…' 또는 조정 화면 아래 칸, 조정 세션에서만). 계획 파일은 지우지도 고치지도 않고 취소 기록을 한 번만 만든다. 형식은 `relabel-plan.schema.json` 의 `$defs/cancelRecord`(계획 sha256·읽을 수 있었는지·원 세션·종류·라벨러·사유·취소 시각·사람·machine4·`canceller_is_labeler`)다. 읽지 못한 계획도 취소할 수 있다. 취소된 계획은 세션 화면에서 고를 수 없고 보고서 관문의 '남은 계획' 에서 빠진다. 깨진 취소 기록은 취소로 치지 않는다(보고서는 계속 막힌다).
+- **계획 색인 `relabel/index.json`** (D-12 2, 13 4-3 3번): 계획을 만들거나 취소할 때 `plan_id`·원 세션·라벨러·종류·상태(`active`·`cancelled`·`unreadable`) 다섯 칸만 담은 색인을 다시 만들어 원자적으로 바꿔 넣는다(`relabel-plan.schema.json` 의 `$defs/planIndex`). 세션 선택 화면은 라벨러를 고르기 전에는 계획을 열지 않고, 고른 뒤에는 색인으로 **그 라벨러의 계획 파일만** 연다(`ProjectSurvey.plans_of` → `app.relabel.plans_for_labeler`). 색인은 계획 파일에서 다시 만들 수 있는 파생 파일이다. 색인이 없거나 깨졌거나 색인에 없는 계획 파일이 있으면 **그 자리에서 한 번 다시 만들고** 새 색인으로 고른다. 다시 만들기가 실패하면 계획을 하나도 열지 않고 재라벨 선택을 막는다(블라인드 쪽으로 실패). 다시 만든 뒤에도 색인에 없는 파일은 열지 않는다 (D-13 2, 14 3-2 3번·4-2 13번. 옛 '모든 계획 파일로 물러남' 은 없앴다). 다시 만드는 그 한 번은 모든 계획·취소 기록을 연다(이름에 라벨러가 없음). 이 자리를 세션 밖(프로젝트를 열 때)으로 옮기는 것은 14 4-2 2번 (D-13 1, 14 4-1 21번).
+- **계획 취소 `relabel/<plan_id>.cancel.json`** (D-12 7): 막힌 비교를 풀려고 검토자가 사유를 적고 계획을 취소한다. 길은 두 곳이다: 메뉴 '세션 → 재라벨 계획 취소…'(`app/ui/plan_cancel_dialog.py`)와 조정 화면 아래 칸. 둘 다 `app.relabel.cancel_plan` 을 부른다 (D-13 1, 14 4-1 19번). 권한은 **조정 세션만**이고 `role = reviewer` 는 검사하지 않는다(1인 겸임, D-12 3). 외부 검토자가 생기면 role 검사를 더한다 (D-13 1, 14 4-1 6번). 계획 파일은 지우지도 고치지도 않고 취소 기록을 한 번만 만든다. 형식은 `relabel-plan.schema.json` 의 `$defs/cancelRecord`(계획 sha256·읽을 수 있었는지·원 세션·종류·라벨러·사유·취소 시각·사람·machine4·`canceller_is_labeler`)다. 읽지 못한 계획도 취소할 수 있다. 취소된 계획은 세션 화면에서 고를 수 없고 보고서 관문의 '남은 계획' 에서 빠진다. 깨진 취소 기록은 취소로 치지 않는다(보고서는 계속 막힌다). 비교하는 재라벨 세션의 계획이 취소됐으면 그 세션은 대표값에서 빠진다([06](06-evaluation-and-agreement.md) 7-1).
 
 **가상 채팅 생성 기록** (v1) — 형식이 아직 없다(열린 질문). 지금 가정하는 최소 필드: `gen_id`, `wall_time`(ms 포함 ISO 8601), `text`, `nickname`, `account_user_id_hash`(봇 계정으로 실제 전송한 경우). 가져올 때 `account_user_id_hash` 는 같은 HMAC 로 `viewer_id` 로 바꿔 대조하고, 원본은 `origin/` 에 보호 구역으로 둔다.
 
@@ -674,7 +687,10 @@ flowchart LR
 | `inputs.data` | `messages_sha256`, 표본 매니페스트 `sample_set_id`·해시 목록, `dataset_split` | |
 | `inputs.ai` | 봉인 `sha256`, `run_id`, 봉인·해제 시각 | `ai_compare` 일 때만. |
 | `inputs.bootstrap_seed` | 위 입력의 해시에서 만든 값 | 06 1장. |
-| `header` | `comparison`(`intra`/`inter`), `intra_only`, `same_machine`(D-11 6), `engine_author_included`(명부 `engine_author`), `view_exposed_sessions[]`, `representative`, `sessions[]`(세션·라벨러·종류·machine4·노출), (v1) `pre_sealed`, `origin_judged`, `reinterpreted` | 06 6-7 '보고서 머리에 적는 것'. `view.exposed`(what 무관)나 분석 세션 열람이 하나라도 있는 세션이 끼면 `representative = false` 로 대표값에서 뺀다(숫자는 낸다, D-12 1, 13 4-1 10번). machine_id 원값은 넣지 않고 machine4 만 넣는다. |
+| `header` | `comparison`(`intra`/`inter`), `intra_only`, `same_machine`(D-11 6), `engine_author_included`(명부 `engine_author`), `view_exposed_sessions[]`, `representative`, `sessions[]`(세션·라벨러·종류·machine4·노출), (v1) `pre_sealed`, `origin_judged`, `reinterpreted` | 06 6-7 '보고서 머리에 적는 것'. `view.exposed`(what 무관)나 분석 세션 열람이 하나라도 있는 세션이 끼면 `representative = false` 로 대표값에서 뺀다(숫자는 낸다, D-12 1, 13 4-1 10번). machine_id 원값은 넣지 않고 machine4 만 넣는다. 그 밖에 `adjudicator_is_labeler`('조정자 = 라벨러', D-12 3), `cancelled_plan_sessions[]`(계획이 취소된 재라벨 세션 — 대표값에서 뺌, 06 7-1) (D-13 1·2, 14 1장·3-2 1번) |
+
+- **출처 보고서**(D-13 1, 14 4-1 17번): 출처 판정(OR) 세션끼리만 비교한다. 재라벨 계획 관문(06 7-1)은 건너뛴다(OR 세션은 계획이 없다). OR 세션과 라벨링 세션이 섞인 쌍은 거부한다. 머리에 대상 파일 ID 목록과 각 `chat_ids_sha256` 을 적는다 (D-13 5).
+- 놓친 후보: 1차 ↔ 재라벨 보고서는 놓친 후보 κ 를 내지 않고(늘 '한쪽만') 머리·md 에 '1차는 ④ 없음(D-12 5)' 1줄을 적는다. 놓친 후보 일치도는 같은 블록의 같은 사람 재라벨 ↔ 다른 사람 재라벨 보고서에서 낸다 (D-13 3, [06](06-evaluation-and-agreement.md) 4-6).
 
 ### 6-15. 안내서 7-1 항목 → 저장 위치
 
@@ -922,7 +938,7 @@ flowchart TD
 | `chat/protected/identities` | 토글(수집 PC, 기록) | 토글 | 토글 | 토글 | 열지 않음(viewer_id 로 대조) | 토글 |
 | `derived/asr*` | 토글(기록) | 토글 | 토글 | 읽기 | 열지 않음 | 읽기 |
 | 엔진 결과(`derived/link-*`) | 열지 않음 | 열지 않음 | 열지 않음 | 열지 않음 | 열지 않음 | 읽기 ('분석 보기') |
-| `origin/`, 출처 라벨 | 열지 않음 | 열지 않음 | 열지 않음 | 읽기 | 읽기·쓰기 | 읽기 |
+| `origin/`, 출처 라벨 | 열지 않음 | 열지 않음 | 열지 않음 | 읽기 · 대상 파일 만들기(1차 매니페스트 표본으로, D-13 5, store 경유) | 대상 파일 읽기 · 출처 라벨 쓰기 | 읽기 |
 | `<앱>\data\ai\` | 열지 않음 | 열지 않음 | 열지 않음 | 봉인·봉인 해제 뒤 읽기(6-14) | 열지 않음 | 열지 않음 |
 | `<앱>\data\reports\` | 열지 않음 | 열지 않음 | 열지 않음 | 읽기·쓰기 | 열지 않음 | 읽기 |
 
@@ -931,8 +947,8 @@ flowchart TD
 넷째 묶음 구현에서 정한 것 (D-12 1·2):
 
 - **보고서 열기.** '보고 → 일치도 보고서' 는 세션 없이 연 창(보기 전용)과 조정 세션에서만 켜진다(위 표의 `reports` 쓰기). 잠긴 1차를 다시 연 창·분석 창에서는 꺼진다. 같은 프로젝트에 아직 잠기지 않은 계획된 재라벨이 있으면 꺼진다([06](06-evaluation-and-agreement.md) 7-1).
-- **세션 선택 화면**(세션을 고르기 전)은 `locks/`·`relabel/` 의 이름과 `relabel/index.json` 을 읽어 고를 수 있는 종류를 정한다. 계획 본문은 고른 라벨러 것만 연다(6-14, D-12 2 — 다섯째 묶음에서 구현. 넷째 묶음 판은 계획 파일을 모두 열었다).
-- **조정·출처 판정·④ 는 작업대 모드다**(다섯째 묶음). 조정 세션의 모드 줄은 '둘러보기·조정', 출처 판정 세션은 '둘러보기·출처 판정' 이고 세션을 열면 그 화면이 바로 열린다. ④ 놓친 후보는 재라벨 세션에만 있다(D-12 5). 재라벨 계획 취소는 조정 세션에서만 된다(D-12 7).
+- **세션 선택 화면**(세션을 고르기 전)은 `locks/`·`relabel/` 의 이름과 `relabel/index.json` 을 읽어 고를 수 있는 종류를 정한다. 계획 본문은 고른 라벨러 것만 연다(6-14, D-12 2).
+- **조정·출처 판정·④ 는 작업대 모드다**(D-12 3~6). 조정 세션의 모드 줄은 '둘러보기·조정', 출처 판정 세션은 '둘러보기·출처 판정' 이고 세션을 열면 그 화면이 바로 열린다. ④ 놓친 후보는 재라벨 세션에만 있다(D-12 5). 재라벨 계획 취소는 조정 세션에서만 된다(D-12 7).
 - **출처 판정 세션**은 `origin/` 의 대상 파일과 그 대상 채팅(`messages.jsonl`)·자기 세션 출처 라벨만 읽는다. 다른 세션 기록·`samples/`·`relabel/` 은 열지 않는다(시험·gui_smoke 의 열기 감시로 확인).
 - **같은 사람 재라벨 대기 중에는 잠긴 1차를 다시 열 수 없다.** 같은 라벨러의 `relabel_same` 계획이 있고 그 세션이 아직 잠기지 않았으면 그 1차 세션을 고를 수 없다(`session.reopen_refusal`). 다시 열면 1차 라벨이 화면에 보이기 때문이다. 그래서 그동안 `relabel_second` 계획을 새로 만들려면 조정 세션에서 만든다(13 4-3 2번).
 - **분석 세션.** 잠긴 1차 세션만 읽는다(D-09 5). 잠긴 1차가 여럿이면 구간 트랙에는 첫 세션 구간만 그리고, 반응 표시는 모두 합친다. 1차가 여럿이 되면 고르는 목록을 단다(13 4-1 14번).
@@ -944,7 +960,8 @@ flowchart TD
 - 구간 표가 빈 상태로 시작한다(1차 세션의 마커를 불러오지 않음). 그래야 구간 일치도를 잴 수 있다.
 - 3단계 표본은 **재라벨러 자기 구간표와 계획 블록의 τ_block 으로 메모리에서 계산한다.** 블록 안 적격 채팅 중 `sort_key(selected[].seed_material, chat_id) ≤ selected[].tau_block_key` 인 것이다. 표본 파일은 만들지 않고, 1차 구간 경계가 들어 있는 `samples/` 는 열지도 쓰지도 않는다(D-12 1, 13 4-1 3번, [06](06-evaluation-and-agreement.md) 3-5). 계획에 1차 표본 목록은 없다(6-14).
 - 맞닿은 두 블록에 걸친 구간은 블록 조각으로 나눠 본다. 두 블록의 seed 가 같으면 τ_block 의 최댓값 하나를 쓴다(그래서 τ 가 작은 블록 쪽에서 몇 건이 더 들 수 있다. 일치도는 '둘 다 판정' 만 쓰므로 숫자는 같다). seed 가 다르면 블록 경계 시각을 알려 주며 구간을 나누게 한다(D-12 1, 13 4-1 7번).
-- 재라벨러가 자기 구간을 고치면 표본이 다시 계산된다. 빠진 채팅의 판정은 지우지 않는다. 일치도는 '현재 표본 안' 만 세고, 빠진 판정 수를 보고서에 1줄 적는다(D-12 2, 13 4-2 7번 — 보고서 줄은 다섯째 묶음에서 넣었다. 보고서는 영상을 열지 않으므로 '현재 표본' 은 각 세션의 구간표로 다시 본 근사다).
+- 재라벨러가 자기 구간을 고치면 표본이 다시 계산된다. 빠진 채팅의 판정은 지우지 않는다. 일치도는 '현재 표본 안' 만 세고, 빠진 판정 수를 보고서에 1줄 적는다(D-12 2, 13 4-2 7번). 보고서는 영상을 열지 않으므로 '현재 표본' 은 각 세션의 구간표(저스트채팅 안·v2 완충 밖)로 다시 본 근사다. 영상 밖·τ 변화는 보지 않는다 (D-13 1, 14 4-1 15번). 정확히 하려면 잠글 때 자기 표본 목록 해시를 잠금 파일에 넣는다(14 4-2 5번).
+- **색인으로 자기 계획만 연다**(D-13 2, 14 4-2 13번): 세션 화면은 `relabel/index.json` 으로 고른 라벨러의 계획만 연다. 색인이 없거나 깨졌거나 맞지 않으면 그 자리에서 한 번 다시 만들고, 실패하면 계획을 하나도 열지 않고 재라벨 선택을 막는다(6-14).
 - 원 세션 잠금 후 `min_interval_days`(시작값 3일)가 지나지 않았으면 경고(`relabel_too_early`)하고 기록한다. `relabel_second` 는 간격이 없다.
 - 세션 화면은 계획이 있어야 재라벨 종류를 켠다. 그래도 잠금의 `relabel_plan_id` 가 없는 재라벨 세션(예: 가져온 파일)이 오면 보고서는 거부하지 않고 '재라벨 계획 없이 연 세션' 경고 1줄을 남긴다(D-12 1, 13 4-1 15번).
 
@@ -960,6 +977,8 @@ flowchart TD
 | `adjudication` | 세션 종류가 `adjudication`. 대상은 잠긴 세션의 현재 판 |
 
 `phase.mark` 의 `phase` 는 모드마다 하나다: ① `segments` · ② `reactions` · ③ `samples` · ④ `missed` · 출처 판정 `origin`. 조정에는 단계 표시가 없다.
+
+③ 의 [표본 완료 표시](`phase.mark(samples)`)는 1차 세션에서도 보인다. 1차에는 ④ 가 없어서 그 표시가 여는 것은 없지만, 표본을 다 봤다는 기록으로 남긴다 (D-13 1, 14 4-1 22번).
 
 뒤 단계 진행 중에 앞 단계(구간 경계)를 고치는 것은 막지 않는다. 영향은 10-3 처럼 표시한다.
 
@@ -1344,6 +1363,7 @@ MVP 에는 4단계(`missed_candidate`) 입력 화면이 없다(v1). 그래서 �
 | 파일 | 대상 | 단계 | 필드 출처 |
 |---|---|---|---|
 | `schemas/ai-seal.schema.json` | `<앱>\data\ai\<project_id>\seal.jsonl` 한 줄 | v1 | 6-14 'AI 봉인 기록' |
+| `schemas/origin-targets.schema.json` | `origin/OT-*.json` 출처 판정 대상 파일. 지금은 `app.core.origin.parse_targets` 가 손으로 검사한다 | 필요해지면 (D-13 1, 14 4-1 7번) | 6-11 '출처 판정 대상 파일' |
 | `schemas/report.schema.json` | 보고서 폴더(2-2)의 `…\report.json` | v1 (일치도 보고서는 넷째 묶음에 스키마 없이 먼저 만들었다. `schema` = `chatcoach.report.agreement`) | 6-14 '보고서', [06](06-evaluation-and-agreement.md) 6-7 |
 | `schemas/eval-settings.schema.json` | 분석 설정(eval_settings: 일치도 허용 오차·판단 기준·보고서 경고값) | v1 (일치도·AI 비교를 앱 안에서 계산할 때) | [06](06-evaluation-and-agreement.md) 10장 분석 묶음. 기준서 시작값이 아니라 guide-config 에 넣지 않는다(9-3). 파일 위치는 그때 정한다(확인 필요) |
 

@@ -23,6 +23,8 @@
       ]
     }
   본문·닉네임은 넣지 않는다(채팅은 chat_id 로만 가리킨다).
+  누가 만드나(D-13 5): 조정 세션이 잠긴 1차 세션들의 표본 매니페스트로 만든다 — build_sample_targets(basis =
+  'sample_items'). 이 모듈은 dict 만 만들고, 파일 쓰기는 부르는 쪽(조정 화면의 콜백 → store/origin_view)이 한다.
 
 출처 일치도 (06 4-7, D-12 6: 혼동표·명목 κ 까지)
 - compare_origins(A 라벨들, B 라벨들, targets=…) → 3×3 혼동표(행 = A, 열 = B, 순서 real·virtual·undeterminable)와
@@ -44,6 +46,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .agreement import kappa_from_table
 from .ids import CHAT_ID_RE
+from .visibility import PRIMARY, session_kind_of_id
 
 # ----------------------------------------------------------------------------- 값 (03 5-6, label-event originBody)
 REAL = "real"
@@ -310,6 +313,117 @@ def build_targets(*, chat_ids: Sequence[str], created_at: str, created_by: str, 
     }
     parse_targets(obj)
     return obj
+
+
+# ----------------------------------------------------------------------------- 1차 표본으로 대상 만들기 (D-13 5)
+SAMPLE_BASIS = "sample_items"
+_SAMPLE_SET_RE = re.compile(r"\AS-([0-9a-f]{8})-d([0-9]+)-r([0-9]+)\Z")
+
+
+@dataclass(frozen=True)
+class SamplePick:
+    """1차 매니페스트에서 고른 출처 판정 대상(숫자·ID 만).
+
+    chat_ids: 대상 chat_id(채팅 시각 순, 같은 시각이면 chat_id 순, 겹친 것은 하나만).
+    manifests: 쓴 매니페스트 sample_set_id(원 구간마다 가장 큰 draw_no 의 가장 큰 sample_rev).
+    sessions: 그 매니페스트의 1차 세션 ID. skipped: 모양이 틀리거나 1차가 아니거나 고른 세션 밖이라 뺀 매니페스트 수.
+    older: 같은 원 구간의 더 작은 판(sample_rev·draw_no)이라 쓰지 않은 매니페스트 수.
+    bad_items: chat_id 형식이 틀려 뺀 항목 수. duplicates: 다른 매니페스트와 겹쳐 하나로 친 항목 수.
+    """
+    chat_ids: tuple[str, ...]
+    manifests: tuple[str, ...]
+    sessions: tuple[str, ...]
+    skipped: int = 0
+    older: int = 0
+    bad_items: int = 0
+    duplicates: int = 0
+
+
+def _primary_sid(m: Mapping) -> str | None:
+    sid = (m.get("source_segment") or {}).get("session_id") if isinstance(m.get("source_segment"), Mapping) else None
+    return sid if isinstance(sid, str) and session_kind_of_id(sid) == PRIMARY else None
+
+
+def sample_target_chat_ids(manifests: Iterable[Mapping], *, session_ids: Iterable[str] | None = None) -> SamplePick:
+    """1차 세션 표본 매니페스트들 → 출처 판정 대상 chat_id (D-13 5 '사람이 대상을 고르지 않게').
+
+    - source_segment.session_id 가 1차(primary)인 매니페스트만. session_ids 를 주면 그 세션 것만(보통 잠긴 1차 세션).
+    - 원 구간(source_segment.entity_id)마다 가장 큰 draw_no 의 가장 큰 sample_rev 하나만 쓴다(작업대의 '현재 표본' 과 같은 뜻).
+    - items 의 chat_id 를 모두(base·origin_extend) 모으고 겹치면 하나만. 순서는 t_ms(정수가 아니면 맨 뒤) → chat_id.
+    입력을 고치지 않는다. 파일·시계를 쓰지 않는다.
+    """
+    want = None if session_ids is None else frozenset(session_ids)
+    best: dict[str, tuple[int, int, Mapping]] = {}
+    skipped = older = 0
+    for m in manifests:
+        if not isinstance(m, Mapping):
+            skipped += 1
+            continue
+        ssid = m.get("sample_set_id")
+        mm = _SAMPLE_SET_RE.match(ssid) if isinstance(ssid, str) else None
+        sid = _primary_sid(m)
+        if mm is None or sid is None or (want is not None and sid not in want) or not isinstance(m.get("items"), list):
+            skipped += 1
+            continue
+        ent = (m.get("source_segment") or {}).get("entity_id")
+        key = f"{sid}|{ent if isinstance(ent, str) else mm.group(1)}"
+        rank = (int(mm.group(2)), int(mm.group(3)))
+        cur = best.get(key)
+        if cur is None:
+            best[key] = (rank[0], rank[1], m)
+        elif rank > cur[:2]:
+            best[key] = (rank[0], rank[1], m)
+            older += 1
+        else:
+            older += 1
+    pos: dict[str, tuple[int, int, str]] = {}
+    bad = dup = 0
+    used = sorted(best.values(), key=lambda x: x[2]["sample_set_id"])
+    for _d, _r, m in used:
+        for it in m["items"]:
+            c = it.get("chat_id") if isinstance(it, Mapping) else None
+            if not isinstance(c, str) or not CHAT_ID_RE.match(c):
+                bad += 1
+                continue
+            t = it.get("t_ms")
+            k = (0, int(t), c) if _is_int(t) else (1, 0, c)
+            if c in pos:
+                dup += 1
+                if k < pos[c]:
+                    pos[c] = k
+                continue
+            pos[c] = k
+    ids = tuple(c for c, _k in sorted(pos.items(), key=lambda x: x[1]))
+    sessions = tuple(sorted({(m.get("source_segment") or {}).get("session_id") for _d, _r, m in used}))
+    return SamplePick(ids, tuple(m["sample_set_id"] for _d, _r, m in used), sessions, skipped, older, bad, dup)
+
+
+def build_sample_targets(manifests: Iterable[Mapping], *, created_at: str, created_by: str,
+                         session_ids: Iterable[str] | None = None, note: str = "") -> tuple[dict, SamplePick]:
+    """1차 표본으로 대상 파일 dict(basis = 'sample_items')를 만든다. 쓰기는 부르는 쪽(콜백). (dict, 고른 결과).
+
+    대상이 0건이면 OriginError. 자동 대조 결과(auto)는 아직 대조기가 없어 모두 null(D-12 6).
+    note 가 비었으면 쓴 매니페스트 수·세션 수만 적는다(본문·닉네임 없음).
+    """
+    pick = sample_target_chat_ids(manifests, session_ids=session_ids)
+    if not pick.chat_ids:
+        raise OriginError("1차 표본(잠긴 1차 세션의 표본 매니페스트)에 대상 채팅이 없습니다")
+    if len(pick.chat_ids) > TARGETS_MAX_ITEMS:
+        raise OriginError(f"대상이 너무 많습니다 ({len(pick.chat_ids)} > {TARGETS_MAX_ITEMS})")
+    if not note:
+        note = f"1차 표본 매니페스트 {len(pick.manifests)}개 · 세션 {len(pick.sessions)}개"
+    obj = build_targets(chat_ids=pick.chat_ids, created_at=created_at, created_by=created_by,
+                        basis=SAMPLE_BASIS, note=note[:_NOTE_MAX])
+    return obj, pick
+
+
+def same_target_exists(existing: Iterable[OriginTargets], obj: Mapping) -> str | None:
+    """이미 있는 대상 파일 가운데 chat_ids_sha256 이 같은 것의 target_id(없으면 None). 같은 대상을 날을 바꿔 또 만들지 않게."""
+    want = obj.get("chat_ids_sha256") if isinstance(obj, Mapping) else None
+    for t in existing:
+        if isinstance(t, OriginTargets) and t.chat_ids_sha256 == want:
+            return t.target_id
+    return None
 
 
 @dataclass(frozen=True)
@@ -666,6 +780,7 @@ __all__ = [
     "CONFIDENCES", "CONF_KO", "RATIONALE_MAX", "INVALID", "TARGETS_SCHEMA", "TARGET_ID_RE",
     "OriginError", "AutoHint", "TargetItem", "OriginTargets", "CombinedTargets",
     "chat_ids_digest", "make_target_id", "parse_targets", "build_targets", "combine_targets",
+    "SAMPLE_BASIS", "SamplePick", "sample_target_chat_ids", "build_sample_targets", "same_target_exists",
     "validate_origin_body", "check_origin_body", "origin_draft", "draft_from_auto", "is_auto", "origin_value",
     "heads_by_chat", "Progress", "progress",
     "confusion_from_pairs", "nominal_kappa", "compare_origins", "LOW_AGREEMENT_NOTE", "AUTO_NOTE",

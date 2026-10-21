@@ -122,20 +122,23 @@ A 는 ③ 에서 가장 낮았다. 그래서 이 문서는 B·C 의 보안·견�
 ```mermaid
 flowchart TB
   subgraph UI["ui/  (PySide6 위젯·화면)"]
-    UI1["mainwindow · project_view · workbench · queue_view"]
+    UI1["mainwindow · project_view · session_dialog · workbench · queue_view"]
     UI2["timeline · chat_panel · review_player · forms/*"]
+    UI3["adjudication_view · origin_view · lock / relabel / agreement / plan_cancel 대화상자"]
   end
   PL["player.py  (MpvWidget, vendored)"]
   WK["workers.py  (QThread 묶음)"]
   subgraph IO["입출력·서비스  (Qt 위젯 없음)"]
-    IO1["store · jsonl · export · backup"]
+    IO1["store · project · jsonl · export"]
     IO2["session · chzzk_chat · media · analysis"]
-    IO3["updater"]
+    IO4["locking · relabel · agreement_report"]
+    IO3["updater · minisign"]
   end
   subgraph CORE["core/  (순수 Python: Qt·파일·네트워크 없음)"]
-    C1["schema · thresholds · validate · ids"]
+    C1["validate · ids"]
     C2["timecode · segments · phase · visibility"]
     C3["rules · sampling · resolve"]
+    C4["agreement · relabel_plan · adjudicate · missed · origin"]
   end
   subgraph INF["기반  (vendored·공통)"]
     INF1["appspec · paths · logging_setup · crashguard · report · i18n · style · selftest"]
@@ -158,11 +161,12 @@ flowchart TB
 | core | 열거형·표시명, 시작값, 검증, ID, 시각 변환, 구간 모델, 단계 규칙, 가시성, 등급 조건 충족 계산, 표본, 체인 해소 | 인자로 받은 값만 계산한다. 파일을 열지 않는다. 시각·난수도 인자로 받는다 |
 | 입출력 | 프로젝트 폴더 읽기·쓰기, 채팅 수집, 영상 지문, ffmpeg 호출, 업데이트 | Qt 위젯을 import 하지 않는다. 오래 걸리는 함수는 취소 콜백을 받는다 |
 | 워커 | 입출력 함수를 QThread 로 감싼다 | 라벨 파일에 쓰지 않는다 (8장) |
-| ui | 화면, 단축키, 폼 | 표시명·선택지는 `core/schema.py` 에서 만든다. 하드코딩하지 않는다 |
+| ui | 화면, 단축키, 폼 | 코드 값(영어 식별자)과 선택지는 core 모듈의 상수에서 가져온다. 표시명은 지금 각 core 모듈(`phase.MODE_LABELS`, `adjudicate.DECISION_KO`·`CAUSE_KO`, `origin.ORIGIN_KO`·`METHOD_KO`, `missed.REASON_NAMES` 등)과 일부 ui 파일(분류 이름이 `forms/segment_form.py`·`timeline.py`·`adjudication_view.py`·`agreement_report.py` 에 따로 있음)에 있다. 한곳에 모으는 `core/schema.py` 는 두지 않기로 했다(D-12 2). 같은 값이 여러 파일에 있으면 그 기능의 시험이 맞춰 본다 (D-13 2, 14 4-2 12번) |
 
 ### 3-2. 모듈 표
 
-'단계' 열: MVP = 첫 묶음에서 만든다. v1 = 그때 만든다(지금은 파일 없음).
+'단계' 열: MVP = 첫 묶음에서 만든다. C단계 = C단계 묶음에서 만들었다(괄호는 근거 결정). **계획 (파일 없음)** = 설계에는 있으나 아직 파일이 없다 — 지금 그 책임을 맡은 곳을 '책임' 칸에 적었다. v1 = 그때 만든다(지금은 파일 없음).
+이 표는 2026-10-21 의 실제 `app/` 파일 목록과 맞췄다(D-13 2, 14 4-2 12번). 파일이 생기거나 없어지면 이 표와 4장 트리를 같이 고친다.
 
 | 모듈 | 책임 | 의존 | 기술 | 단계 |
 |---|---|---|---|---|
@@ -175,44 +179,55 @@ flowchart TB
 | `app/style.py` | Fusion + 다크 팔레트 + QSS | — | QSS | MVP |
 | `app/selftest.py` | `--selftest <json> [--expect-version X] [--data-dir D]` 창 없이 점검 (11-3) | 거의 전부 | JSON + 종료 코드 | MVP |
 | `app/player.py` | libmpv 임베드 위젯(재생·탐색·프레임 이동·A-B 반복·속도·음량) | paths | python-mpv. 옵션 한 곳만 수정 (12장) | MVP |
-| `app/core/schema.py` | 라벨 값 열거형(영어 식별자 + 한국어 표시명), 공통 메타 필드, 레코드 dataclass | 없음 | dataclass, Enum | MVP |
-| `app/core/thresholds.py` | 시작값 로드·범위 검증·정규화 해시(`thresholds_sha256`) | validate | `assets/guide-config.v0.1.json` (스키마 `guide-config.schema.json`) | MVP |
-| `app/core/validate.py` | 엄격 JSON 규칙(NaN·Infinity 거부, 최상위 dict), 필드 표(타입·범위·열거형) | 없음 | 손 검증기 (S-29). jsonschema 의존 없음 | MVP |
+| `app/minisign.py` | 업데이트 매니페스트 minisign(Ed25519) 서명 검증. 서명·키 생성은 하지 않음(`tools/sign_manifest.py`) | 없음 | 표준 라이브러리만 (04 5장·9장) | MVP |
+| ~~`app/core/schema.py`~~ | **두지 않는다**(D-12 2, 13 4-2 3번). 열거형은 값을 쓰는 core 모듈(`segments.CATEGORIES`, `rules.GRADES`, `agreement.GRADE_SCALE`, `origin`·`missed`·`adjudicate` 의 상수)에, 표시명은 그 모듈과 일부 ui 파일에 있다(3-1 표 ui 행). 스키마 enum 과의 일치는 각 기능 시험이 본다([03](03-data-model.md) 19장) | — | — | 두지 않음 (D-12 2, D-13 2) |
+| `app/core/thresholds.py` | (계획) 시작값 로드·범위 검증·정규화 해시. 지금은 `app/project.py` 가 기준서 묶음을 읽고 `thresholds_sha256` 을 계산하며, 각 core 모듈이 자기 값을 읽는다(`segments.thresholds_from_guide`, `missed.thresholds_from_guide`, `rules.RuleConfig`) | validate | `assets/guide-config.v0.1.json` (스키마 `guide-config.schema.json`) | 계획 (파일 없음, D-13 2) |
+| `app/core/validate.py` | 엄격 JSON 규칙(NaN·Infinity·중복 키 거부, 최상위 dict), `project.json` 손 검증(`PROJECT_SPEC`), 해시용 정규화 JSON(`canonical_json`) | 없음 | 손 검증기 (S-29). jsonschema 의존 없음 | MVP |
 | `app/core/ids.py` | `chat_id` 값 기반 파생, `label_id`(uuid4), `session_id` 형식, 프로젝트 슬러그, 파일명용 ID 정규식 | 없음 | hashlib (S-14, S-46, S-49) | MVP |
 | `app/core/timecode.py` | 채팅 시계 ↔ 영상 시각 변환, 시각 문자열 파싱·표시 (`parse_time` 등 ClipSlicer 차용) | schema | 정수 ms | MVP |
 | `app/core/segments.py` | 활동 구간 모델: 마커 → 빈틈없는 구간, 경계 완충, 30초 미만 병합 제안, undo 200단계 | thresholds | ClipSlicer `segments.py` 개작 (Qt 없음) | MVP |
-| `app/core/phase.py` | 단계 규칙: 어떤 구간에서 어떤 단계 라벨을 만들 수 있는가, 시간 정렬 관문 | schema | 순수 함수 (6-2) | MVP |
+| `app/core/phase.py` | 단계 규칙: 어떤 구간에서 어떤 단계 라벨을 만들 수 있는가, 시간 정렬 관문. 작업대 모드 줄(`modes_for`): 1차·분석·보기 전용은 둘러보기·①~③, 재라벨(같은 사람·다른 사람)은 ①~④, 조정 세션은 둘러보기·조정, 출처 판정 세션은 둘러보기·출처 판정. ④ 단추는 재라벨 세션에만 있다(D-12 5). ③ 의 [표본 완료 표시] 는 1차에도 보인다(④ 를 여는 관문 `phase.mark(samples)`, 03 12-3) (D-13 1, 14 4-1 22번·4-2 12번) | — | 순수 함수 (6-2) | MVP (모드는 C단계, D-12 5) |
 | `app/core/visibility.py` | `can_show(item, phase, session_kind)`, `files_to_open(session_kind, phase)` | schema | 순수 함수 표 | MVP (재라벨 분기는 v1) |
 | `app/core/rules.py` | 등급 조건 충족 계산(등급을 미리 고르지 않음, [01](01-analysis-and-ideas.md) 3-1), 시간 창 판정, 이어짐 제안·절단, 완충 판정, 노출 추정 보조값 | thresholds | 순수 함수 | MVP |
 | `app/core/sampling.py` | 표본 추출 (`sha256-tau-v2` 기본: 순서 키, 임계 키 τ 와 불감소, 전수 전환, `draw_no`·`sample_rev`, 분류가 바뀌는 경계에만 완충, 영상 밖 제외), 재현 검증 (옛 판 `sha256-tau-v1` 매니페스트도 v1 규칙으로 재현만 — D-11 5) | ids | 순수 함수. 규칙은 [06](06-evaluation-and-agreement.md) | MVP |
 | `app/core/resolve.py` | 라벨 레코드 묶음 → '현재 유효 라벨' 뷰. supersedes 체인·철회·포크·순환·무효 참조 표시 | schema | 순수 함수, 골든 테스트 (S-10) | MVP |
-| `app/core/agreement.py` | 세션 쌍 정렬과 일치도 계산 (구간 κ·핵심 일치율·경계 \|Δt\|, 반응 있음 이진 κ·등급 κ_w, 10분 블록 부트스트랩) | resolve | 순수 Python (numpy 없음) | C단계 넷째 묶음 (D-12 1) |
-| `app/core/relabel_plan.py` | 재라벨 계획 고르기 `sha256-relabel-v1`(블록 seed = `sample_seed\|relabel\|원 세션 ID`, τ_block), 재현 검증, 시작 관문(3일 간격) | sampling, ids | 순수 함수 ([06](06-evaluation-and-agreement.md) 3장) | 넷째 묶음 (D-12 1) |
-| `app/locking.py` · `app/relabel.py` · `app/agreement_report.py` | 세션 잠금 파일 만들기·검사(풀기 없음), 계획 파일 입출력(재라벨 세션은 자기 계획만), 일치도 보고서(잠금 확인 → 06 7-1 관문 → 계산 → 프로젝트 밖에 report.json·report.md) | store, core | Qt 없음 | 넷째 묶음 (D-12 1) |
-| `app/ui/lock_dialog.py` · `relabel_dialog.py` · `agreement_dialog.py` | 잠그기 2단계 화면, 계획 만들기, 보고서 고르기·보기 | 위 입출력 | 메뉴 '세션'(`&N`)·'보고'(`&B`) | 넷째 묶음 (D-12 1) |
+| `app/core/agreement.py` | 세션 쌍 정렬과 일치도 계산 (구간 κ·핵심 일치율·경계 \|Δt\|, 반응 있음 이진 κ·등급 κ_w, 연결 F1·반응 시각 차, 이어짐 κ, 놓친 후보 κ·AC1·사유 코드 κ, 10분 블록 부트스트랩). 출처는 계산하지 않고 `core.origin.compare_origins` 를 함수 안에서 늦게 import 해 보고서 모양으로만 바꾼다(순환 import 없음) | segments (origin·missed 는 함수 안에서 늦게) | 순수 Python (numpy 없음) | C단계 (D-12 1) |
+| `app/core/relabel_plan.py` | 재라벨 계획 고르기 `sha256-relabel-v1`(블록 seed = `sample_seed\|relabel\|원 세션 ID`, τ_block), 재현 검증, 시작 관문(3일 간격). `plan_no` 는 기록용 순번이고 고르기에 쓰지 않는다. 1차 표본 목록(`sample_items`)은 계획에 넣지 않는다 | sampling, ids | 순수 함수 ([06](06-evaluation-and-agreement.md) 3장) | C단계 (D-12 1) |
+| `app/core/adjudicate.py` | 조정: 잠긴 세션 짝마다 불일치 건(표본·구간) 모으기·합치기, 조정 기록 본문, 건 상태(`case_states` — 판 바뀜·`targets_changed`), 개정 후보(같은 `pattern_tag` 3건 이상), '조정자 = 라벨러' 머리 | agreement, segments | 순수 함수 ([03](03-data-model.md) 6-12) | C단계 (D-12 3·4) |
+| `app/core/missed.py` | 놓친 채팅 후보(④): 대상 고르기(재라벨 블록 안 표본 중 미확인·관련성만·불명확), 조건 ① 다시 세기, ② 보조값, 사유 코드 제안·조건 맞춤 검사, `reason_code_source` | sampling, ids, timecode | 순수 함수 ([06](06-evaluation-and-agreement.md) 2-9·4-6) | C단계 (D-12 5) |
+| `app/core/origin.py` | 출처 판정: 대상 파일 해석·만들기, 판정 본문 검사, 출처 일치도(3×3 혼동표·명목 κ, 사람끼리 κ). **출처 κ 는 이 모듈 하나**(`compare_origins`)가 계산한다 (D-13 2, 14 4-2 12번) | agreement(`kappa_from_table`), ids | 순수 함수 ([06](06-evaluation-and-agreement.md) 4-7) | C단계 (D-12 6) |
+| `app/locking.py` · `app/relabel.py` · `app/agreement_report.py` | 세션 잠금 파일 만들기·검사(풀기 없음). 계획 파일 입출력(재라벨 세션은 자기 계획만), 계획 색인 `relabel/index.json`(세션 화면은 색인으로 고른 라벨러 계획만 연다. 색인이 없거나 깨지면 그 자리에서 한 번 다시 만들고, 실패하면 재라벨 선택을 막는다), 계획 취소 `cancel_plan`. 일치도 보고서(잠금 확인 → 06 7-1 관문 → 계산 → 프로젝트 밖에 report.json·report.md) | store, core | Qt 없음 | C단계 (D-12 1·2·7) |
+| `app/ui/lock_dialog.py` · `relabel_dialog.py` · `agreement_dialog.py` | 잠그기 2단계 화면, 계획 만들기, 보고서 고르기·보기(출처 판정 세션끼리의 쌍도 고를 수 있고 종류가 섞인 쌍은 막음) | 위 입출력 | 메뉴 '세션'(`&N`)·'보고'(`&B`) | C단계 (D-12 1) |
+| `app/ui/plan_cancel_dialog.py` | 재라벨 계획 취소(메뉴 '세션 → 재라벨 계획 취소…'). 조정 세션에서만 연다. 사유 필수, '되돌릴 수 없음' 체크. 조정 화면 아래 칸도 같은 `relabel.cancel_plan` 을 부른다(길이 두 곳) (D-13 1, 14 4-1 6·19번) | relabel | — | C단계 (D-12 7) |
+| `app/ui/adjudication_view.py` | 조정 화면: 잠긴 세션 고르기, 불일치 목록, 두 판정·확신도·근거 한 줄을 나란히, 결정·원인·태그 저장 | adjudicate, store | 작업대 '조정' 모드 | C단계 (D-12 3·4) |
+| `app/ui/origin_view.py` | 출처 판정 화면: 대상 채팅 한 건씩 실제·가상·판별 불가, '자동' 배지 받기 | origin, store | 작업대 '출처 판정' 모드 | C단계 (D-12 6) |
+| `app/ui/session_dialog.py` | 세션 선택: 라벨러 명부, 세션 종류, 이어 하기, `reopen_note`, 재라벨 계획 고르기(색인으로 자기 계획만) | session, relabel | — | C단계 (D-09) |
 | `app/jsonl.py` | JSONL 안전 읽기(BOM·잘린 마지막 줄·중간 깨짐)와 한 줄 append(끝 개행 확인 → `os.write` 1회 → `fsync`) | validate | stdlib (S-30) | MVP |
-| `app/store.py` | 프로젝트 폴더 입출력의 유일한 통로. 열기(잠금·검증·로드), 라벨 append, 철회, `project.json` 저장(rev 비교), 가시성에 따른 파일 선택 | core 전부, jsonl | 6-3 의 순서 | MVP |
+| `app/project.py` | 프로젝트 폴더 만들기·열기, `project.json` 저장(rev 비교 → 임시 파일 → `os.replace`), 기준서 묶음의 `thresholds_sha256` 계산. 프로젝트 쓰기 잠금(`open.lock`)은 잡지 않는다 | validate, ids, paths | stdlib (03 2-1·6-1·8-3) | MVP |
+| `app/store.py` | 세션 기록 파일 쓰기의 유일한 통로. 열기(잠금은 `lock_factory` 로 주입·검증·로드), 라벨 append, 철회, `project.json` 저장 위임(`update_project`), 가시성에 따른 파일 선택, 세션 잠금(`lock_session`) | project, core, jsonl, locking | 6-3 의 순서 | MVP |
 | `app/export.py` | 내보내기 zip(JSONL·CSV·manifest), 허용 목록 방식, CSV 셀 보호 | store, resolve | csv(utf-8-sig) (S-27) | MVP (라벨러 패키지는 v1) |
-| `app/backup.py` | 일 1회·업데이트 직전 백업 zip, 보존 개수 순환 | store | zipfile (S-06, S-39) | MVP |
+| `app/backup.py` | (계획) 일 1회·업데이트 직전 프로젝트 백업 zip, 보존 개수 순환. 지금은 백업 위치(`paths.backup_root`)와 업데이트의 `_backup` 만 있다 | store | zipfile (S-06, S-39) | 계획 (파일 없음, D-13 2) |
 | `app/session.py` | 라벨러 선택, 세션 생성·종료, 프로젝트 잠금, 기계 ID, 열람 이벤트 기록 | store, phase | QLockFile 은 ui 쪽에서 주입 | MVP |
 | `app/chzzk_chat.py` | 치지직 VOD 채팅 전량 수집, 원문 페이지 보존, 파싱·가명화 | ids, validate | urllib. ClipSlicer `chat.py` 의 재시도·커서 골격만 (S-28) | MVP |
 | `app/media.py` | 영상 참조(경로·크기·부분 지문·파일 ID·ffprobe 메타), 재연결, 경로 문자열 검사 | analysis | stdlib (S-13, S-26) | MVP |
 | `app/analysis.py` | ffprobe, 파형, 무음, 썸네일(파이프 출력), 프레임 1장 | paths | subprocess(bytes), timeout | MVP |
 | `app/updater.py` | 확인(3상태) → 준비(다운로드·검증·해제·자체 점검) → 적용(Applier). 상세는 [04](04-update-and-release.md) | appspec, paths | urllib, zipfile, PowerShell 5.1 | MVP |
-| `app/workers.py` | ChatFetch·ProjectLoad·Analyze·UpdateCheck·UpdateStage·Backup 워커 | 입출력 | QThread (8장) | MVP |
+| `app/workers.py` | 업데이트 확인·준비 워커. 공통 작업 워커 `JobWorker`(취소·진행·오류 시그널)와 재현 검증 워커 `SampleVerifyWorker`·`PlanVerifyWorker`. 잠그기 직전 표본 재현 검증(재라벨은 current_sample 계산)과 일치도 보고서(계획 재현 검증 포함)를 UI 스레드 밖에서 돌린다 — 그동안 바쁨 표시와 [취소] (14 6-1 의 1, `MainWindow.run_job_modal`·`AgreementDialog.run`). ChatFetch·ProjectLoad·Analyze·Backup 워커는 아직 없다(계획) | 입출력 | QThread (8장) | MVP |
 | `app/ui/mainwindow.py` | 창 골격, 메뉴, 상태바, 화면 전환, 단축키 등록, 업데이트 연동 | ui 전부 | QMainWindow | MVP |
-| `app/ui/project_view.py` · `new_project_wizard.py` | 최근 프로젝트, 새 프로젝트 5단계 | store, workers | 7-2 | MVP |
-| `app/ui/calibration_dialog.py` | 시간 정렬(앵커 입력·오프셋 확정·건너뛰기 사유) | timecode, store | 7-5 | MVP |
+| `app/ui/project_view.py` | 최근 프로젝트, 열기(쓰기 잠금 확인) | store | 7-2 | MVP |
+| `app/ui/new_project_wizard.py` | (계획) 새 프로젝트 5단계. 지금은 화면이 없고 `app/project.create` 와 도구로 만든다 | project, workers | 7-2 | 계획 (파일 없음, D-13 2) |
+| `app/ui/calibration_dialog.py` | (계획) 시간 정렬(앵커 입력·오프셋 확정·건너뛰기 사유). 지금은 작업대가 `project.json` 의 `calibration` 을 읽어 쓰기만 한다 | timecode, store | 7-5 | 계획 (파일 없음, D-13 2) |
 | `app/ui/workbench.py` | 작업대: 플레이어 + 타임라인 + 오른쪽 작업 칸 | ui 부품 | 7-3 | MVP |
 | `app/ui/queue_view.py` | 큐 모드: 표본 한 건씩 판정 | sampling, forms | 7-4 | MVP |
 | `app/ui/review_player.py` | 7-2 확인 범위 반복, 속도 프리셋, 프레임 번호(가변 프레임이면 끔), 들은 범위 기록, 화면 위 문구(OSD) | player, timecode | 7-3 | MVP |
 | `app/ui/timeline.py` | 여러 트랙 타임라인 | core.segments | QPainter. 재작성 (12장) | MVP |
 | `app/ui/chat_panel.py` | 수십만 건 채팅 표 | store 뷰 | Model/View (9장) | MVP |
-| `app/ui/shortcuts.py` | 단축키 표와 포커스 규칙 | — | 7-6 | MVP |
-| `app/ui/forms/segment_form.py` · `reaction_editor.py` · `continuation_editor.py` · `evidence_widget.py` | 단계별 입력 | rules, schema | 7-3 | MVP |
+| `app/ui/shortcuts.py` | (계획) 단축키 표와 포커스 규칙. 지금은 작업대·큐 모드·출처 판정 화면이 각자 `QShortcut` 을 단다 | — | 7-6 | 계획 (파일 없음, D-13 2) |
+| `app/ui/forms/segment_form.py` · `reaction_editor.py` · `continuation_editor.py` · `evidence_widget.py` | 단계별 입력 | rules, timecode, visibility | 7-3 | MVP |
+| `app/ui/forms/missed_form.py` | ④ 놓친 채팅 후보 폼(조건 ① 은 보이기만, ②③④·점검 질문·사유 코드·확신도·근거) | missed | 작업대 ④ 모드 | C단계 (D-12 5) |
 | `app/ui/update_dialog.py` | 새 버전 대화상자 | updater | ClipSlicer `UpdateDialog` 개작 (S-18) | MVP |
-| `app/ui/settings_dialog.py` | 설정, 라벨러 관리, 시작값 보기 | thresholds | — | MVP |
-| `missed_view` · `relabel_view` · `compare_view` · `origin_view` · `origin_match` · `ai_compare` | 놓친 채팅 후보, 재라벨, 비교, 출처 판정, AI 비교 | — | — | v1 |
+| `app/ui/settings_dialog.py` | (계획) 설정, 시작값 보기. 라벨러 명부는 지금 세션 선택 화면(`session_dialog`)의 [새 라벨러…] 로 관리한다 | project | — | 계획 (파일 없음, D-13 2) |
+| `compare_view` · `origin_match` · `ai_compare` | 비교 화면(4-9 첫 장), 가상 채팅 생성 기록 대조기, AI 비교. (옛 `missed_view` 는 `forms/missed_form.py`, `relabel_view` 는 `relabel_dialog.py`·`session_dialog.py`, `origin_view` 는 `ui/origin_view.py` 로 만들었다) | — | — | v1 |
 
 ### 3-3. 모듈 사이의 계약
 
@@ -283,19 +298,23 @@ chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 │  ├─ selftest.py                           ⟵* (골격 유지, 점검 항목 교체)
 │  ├─ player.py                             ⟵* (생성 옵션 한 곳)
 │  ├─ updater.py                            ⟵* (수정 7건 + 준비/적용 분리)
+│  ├─ minisign.py                           업데이트 서명 검증 (표준 라이브러리 Ed25519)
 │  ├─ jsonl.py
+│  ├─ project.py                            project.json 만들기·열기·저장
 │  ├─ store.py
 │  ├─ export.py
-│  ├─ backup.py
+│  ├─ backup.py                             (계획 — 파일 없음, D-13 2)
 │  ├─ session.py
+│  ├─ locking.py                            (C단계, D-12 1)
+│  ├─ relabel.py                            (C단계, D-12 1·2·7 — 계획·색인·취소)
+│  ├─ agreement_report.py                   (C단계, D-12 1)
 │  ├─ chzzk_chat.py
 │  ├─ media.py
 │  ├─ analysis.py                           ffmpeg_tools.py 의 5함수 개작
 │  ├─ workers.py
 │  ├─ core/
 │  │  ├─ __init__.py
-│  │  ├─ schema.py
-│  │  ├─ thresholds.py
+│  │  ├─ thresholds.py                      (계획 — 파일 없음, D-13 2)
 │  │  ├─ validate.py
 │  │  ├─ ids.py
 │  │  ├─ timecode.py
@@ -305,27 +324,36 @@ chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 │  │  ├─ rules.py
 │  │  ├─ sampling.py
 │  │  ├─ resolve.py
-│  │  ├─ relabel_plan.py                    (넷째 묶음, D-12 1)
-│  │  └─ agreement.py                       (넷째 묶음, D-12 1)
+│  │  ├─ relabel_plan.py                    (C단계, D-12 1)
+│  │  ├─ agreement.py                       (C단계, D-12 1)
+│  │  ├─ adjudicate.py                      (C단계, D-12 3·4)
+│  │  ├─ missed.py                          (C단계, D-12 5)
+│  │  └─ origin.py                          (C단계, D-12 6 — 출처 κ 는 여기 하나)
 │  └─ ui/
 │     ├─ __init__.py
 │     ├─ mainwindow.py
 │     ├─ project_view.py
-│     ├─ new_project_wizard.py
-│     ├─ calibration_dialog.py
+│     ├─ session_dialog.py                  (C단계, D-09)
+│     ├─ new_project_wizard.py              (계획 — 파일 없음, D-13 2)
+│     ├─ calibration_dialog.py              (계획 — 파일 없음, D-13 2)
 │     ├─ workbench.py
 │     ├─ queue_view.py
 │     ├─ review_player.py
 │     ├─ timeline.py                        timeline.py 의 좌표·확대·눈금·자석만 유지하고 재작성
 │     ├─ chat_panel.py
-│     ├─ shortcuts.py
+│     ├─ lock_dialog.py · relabel_dialog.py · agreement_dialog.py   (C단계, D-12 1)
+│     ├─ plan_cancel_dialog.py              (C단계, D-12 7)
+│     ├─ adjudication_view.py               (C단계, D-12 3·4)
+│     ├─ origin_view.py                     (C단계, D-12 6)
+│     ├─ shortcuts.py                       (계획 — 파일 없음, D-13 2)
 │     ├─ update_dialog.py                   ⟵* dialogs.UpdateDialog
-│     ├─ settings_dialog.py
+│     ├─ settings_dialog.py                 (계획 — 파일 없음, D-13 2)
 │     └─ forms/
 │        ├─ segment_form.py
 │        ├─ reaction_editor.py
 │        ├─ continuation_editor.py
-│        └─ evidence_widget.py
+│        ├─ evidence_widget.py
+│        └─ missed_form.py                  (C단계, D-12 5)
 ├─ assets/
 │  ├─ ChatCoach.manifest                ⟵* (version 은 sync_version.py 가 VERSION 에서 생성)
 │  ├─ icon.ico · icon.png                   tools/make_icon.py 로 생성
@@ -631,6 +659,8 @@ stateDiagram-v2
 | 재라벨 (v1) | 1차 잠금 뒤 계획 생성. 같은 사람은 잠금 3일 뒤부터(그 전이면 사유를 받고 기록) | 안내서 7-3, [06](06-evaluation-and-agreement.md) 3-3 |
 | comparison 진입 (v1) | 재라벨을 포함해 계획된 세션이 **모두** 잠김 + 표본 재현 검증 통과. 이때 AI 결과 봉인을 해제한다 | 안내서 원칙 3. 1차 잠금 직후 AI 결과를 보면 같은 사람의 재라벨이 AI 쪽으로 쏠린다 ([06](06-evaluation-and-agreement.md) 7-1) |
 
+구현 메모 (D-13 1·3·4, 14 4-1 22번): 위 그림의 ④ 는 **재라벨 세션에서만** 있다. 1차 세션은 ③ 다음에 바로 잠근다(1차는 ④ 를 하지 않는다, D-12 5·D-13 4). ③ 모드의 [표본 완료 표시] 는 1차에서도 보이고 ④ 를 여는 관문(`phase.mark(samples)`)이다. 조정·출처 판정 세션은 단계가 없고 자기 화면 하나다(3-2 `core/phase.py` 행). 놓친 후보 일치도는 같은 블록의 같은 사람 재라벨 ↔ 다른 사람 재라벨 사이에서 낸다([06](06-evaluation-and-agreement.md) 4-6).
+
 AI 결과는 어느 단계에서든 받을 수 있다. 받으면 해시·크기·시각만 기록하고 봉인한다. 내용은 comparison 진입 전까지 보이지 않는다([06](06-evaluation-and-agreement.md) 7-2). 봉인을 앞당겨 열려면 사유를 받고, 그 뒤 만든 재라벨 세션은 `ai_exposed` 로 표시한다.
 
 ### 6-3. 라벨 한 건이 저장되는 길
@@ -692,12 +722,17 @@ sequenceDiagram
 | 화면 | 언제 | 단계 |
 |---|---|---|
 | 프로젝트 화면 | 시작 시. 최근 프로젝트, 새 프로젝트, 열기 | MVP |
-| 새 프로젝트 마법사 | VOD 번호 → 영상 파일 → 채팅 수집 → 시간 정렬 → 라벨러·세션 | MVP |
-| 시간 정렬 대화상자 | 마법사 안, 또는 작업대에서 언제든 | MVP |
-| 작업대 | 1단계(구간)·2단계(반응) | MVP |
-| 큐 모드 | 3단계(표본). v1 에 4단계(후보)도 | MVP |
-| 설정 | 라벨러, 프로젝트 루트, 업데이트, 호환 모드, 시작값 보기 | MVP |
-| 검토·비교 | 재라벨 일치도, 불일치 나란히 보기, AI 비교 | v1 |
+| 새 프로젝트 마법사 | VOD 번호 → 영상 파일 → 채팅 수집 → 시간 정렬 → 라벨러·세션 | MVP (아직 파일 없음 — 3-2, D-13 2) |
+| 시간 정렬 대화상자 | 마법사 안, 또는 작업대에서 언제든 | MVP (아직 파일 없음 — 3-2, D-13 2) |
+| 작업대 | 1단계(구간)·2단계(반응). 재라벨 세션은 ④ 놓친 후보 모드도(D-12 5) | MVP |
+| 큐 모드 | 3단계(표본). 4단계(후보)는 큐 모드가 아니라 작업대 ④ 모드의 폼이다(D-13 1) | MVP |
+| 설정 | 라벨러, 프로젝트 루트, 업데이트, 호환 모드, 시작값 보기 | MVP (아직 파일 없음 — 3-2, D-13 2) |
+| 세션 선택 | 프로젝트를 열 때. 라벨러·세션 종류·재라벨 계획 | C단계 (D-09) |
+| 잠그기 · 계획 만들기 · 일치도 보고서 | 메뉴 '세션'·'보고' | C단계 (D-12 1) |
+| 조정 | 조정 세션을 열면 바로. 불일치 건, 두 판정·근거 나란히 | C단계 (D-12 3·4) |
+| 출처 판정 | 출처 판정 세션을 열면 바로. 대상 파일의 채팅만 | C단계 (D-12 6) |
+| 재라벨 계획 취소 | 메뉴 '세션 → 재라벨 계획 취소…'(조정 세션에서만) 또는 조정 화면 아래 칸 | C단계 (D-12 7, D-13 1) |
+| 검토·비교 | 비교 화면 첫 장([06](06-evaluation-and-agreement.md) 4-9), AI 비교 | v1 |
 
 목표 해상도는 1920×1080. 최소 1366×768 을 지원한다(폼은 세로 스크롤). 1366×768 에서 반응 편집기가 쓸 만한지는 확인 필요.
 

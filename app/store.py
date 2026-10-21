@@ -1032,31 +1032,49 @@ class ProjectStore:
         구간 완료 표시(phase.mark segments)가 붙은 구간이 하나라도 있으면 그 구간들만, 없으면 모든 유효 구간을 쓴다.
         coverage(영상이 덮는 VOD 범위 [(a, z)], D-10 3)를 주면 그 안으로 자른다 — 영상 밖 블록은 재라벨러가 매길 수 없다.
         숫자만 돌려준다. 재라벨 계획 만들기(app.relabel.create_plan)의 done_ranges 로 넘긴다.
+        계산은 relabel.done_ranges_of_view 하나로 한다(조정 세션의 relabel_second 계획 길과 같은 규칙, 14 4-2 의 9).
         """
-        from .core import phase as ph
-        view = self.effective(copy_records=False)
-        segs = view.items("segment", self.session.session_id)
-        marks = ph.PhaseMarks(r for r in view.other_records if r.get("kind") == "phase.mark")
-        done = [s for s in segs if marks.done("segments", s["entity_id"])] or list(segs)
-        spans = sorted((int(s["body"]["start_ms"]), int(s["body"]["end_ms"])) for s in done
-                       if _is_int((s.get("body") or {}).get("start_ms")) and _is_int((s.get("body") or {}).get("end_ms")))
-        merged: list[list[int]] = []
-        for a, z in spans:
-            if z <= a:
-                continue
-            if merged and a <= merged[-1][1]:
-                merged[-1][1] = max(merged[-1][1], z)
-            else:
-                merged.append([a, z])
-        if coverage is None:
-            return merged
-        out: list[list[int]] = []
-        for ca, cz in sorted((int(a), int(z)) for a, z in coverage):
-            for a, z in merged:
-                lo, hi = max(a, ca), min(z, cz)
-                if hi > lo:
-                    out.append([lo, hi])
-        return out
+        from . import relabel as relabel_io
+        return relabel_io.done_ranges_of_view(self.effective(copy_records=False), self.session.session_id, coverage)
+
+    # ------------------------------------------------------------------ 조정 세션이 만드는 파일 (D-13 5, 14 4-2 의 9)
+    def write_origin_targets(self, obj: dict) -> str:
+        """출처 판정 대상 파일 origin/<target_id>.json 을 **없을 때만** 원자적으로 만든다(불변). 쓴 경로.
+
+        조정 세션만 만든다(D-13 5: 1차 매니페스트 표본으로, 사람이 대상을 고르지 않음). 그 밖의 세션 종류는 파일을 열기 전에
+        PermissionError. 닫았거나 읽기 전용이면 ReadOnlyStoreError. 형식은 core.origin.parse_targets 로 먼저 본다(틀리면
+        OriginError = ValueError). 같은 이름이 이미 있으면 FileExistsError(덮어쓰지 않는다).
+        대상 파일에는 order·chat_id·auto 만 있다 — 본문·닉네임·다른 세션 라벨은 없다.
+        """
+        from .core import origin as og
+        if self.session.session_kind != vis.ADJUDICATION:
+            raise PermissionError("출처 판정 대상 파일은 조정 세션에서만 만듭니다 (D-13 5)")
+        self._check_writable()
+        t = og.parse_targets(obj)
+        path = os.path.join(self.root, "origin", t.target_id + ".json")
+        data = (json.dumps(obj, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+        try:
+            locking.write_lock_exclusive(path, data)
+        except locking.AlreadyLockedError:
+            raise FileExistsError(path) from None
+        log.info("출처 판정 대상 %s 를 만들었습니다: 채팅 %d건", t.target_id, len(t.items))
+        return path
+
+    def create_second_plan(self, source_session_id: str, labeler_id: str, *, coverage=None,
+                           app_version: str | None = None, now: datetime | None = None,
+                           rand4: str | None = None) -> dict:
+        """조정 세션에서 잠긴 1차 세션을 골라 relabel_second 계획을 만든다(14 4-2 의 9, relabel.create_second_plan).
+
+        원 세션 뷰는 locked_session_view(블라인드는 locking 이 먼저 본다)로 읽는다. 닫았거나 읽기 전용이면 ReadOnlyStoreError.
+        조정 세션이 아니면 relabel 쪽이 파일을 열기 전에 RelabelBlindError. coverage = 영상이 덮는 VOD 범위."""
+        from . import relabel as relabel_io
+        self._check_writable()
+        view, _msgs = self.locked_session_view(source_session_id)
+        return relabel_io.create_second_plan(
+            self.root, self.project.data, source_view=view, source_session_id=source_session_id,
+            labeler_id=labeler_id, created_by=self.session.labeler_id, created_machine4=self.session.machine4,
+            app_version=app_version or self._app_version, creator_kind=self.session.session_kind,
+            coverage=coverage, now=now, rand4=rand4)
 
     # ------------------------------------------------------------------ 다른 세션의 잠긴 라벨 (분석 세션, D-09 5)
     def readable_locked_sessions(self) -> list[str]:
@@ -1131,7 +1149,8 @@ class ProjectStore:
             load_warnings=bool(self.warnings or self.conflict_files or self.partial_files),
             blockers=self.lock_blockers())
 
-    def lock_session(self, *, sample_verify: list[dict] | None = None) -> dict:
+    def lock_session(self, *, sample_verify: list[dict] | None = None,
+                     current_sample=None) -> dict:
         """세션을 잠근다(06 7-1, 03 6-14). locks/<session_id>.json 을 한 번만 만들고 잠금 내용 사본을 돌려준다.
 
         1. 잠글 수 있는지 본다(lock_blockers). 이미 잠겼으면 locking.AlreadyLockedError, 닫았거나 읽기 전용이면
@@ -1141,6 +1160,7 @@ class ProjectStore:
            연 뒤에 바뀌었으면 StoreError(다시 열어 요약을 보고 잠그게 한다).
         4. 잠금 문서를 스키마로 검사하고 원자적으로 '없을 때만' 만든다. 그 뒤로 store 는 읽기 전용이다(풀지 않음, D-11 7).
         sample_verify: 잠그기 전에 돌린 표본 재현 검증 [{sample_set_id, ok, problems(건수)}] (선택).
+        current_sample: 재라벨 세션의 자기 표본 chat_id 모음(14 4-2 의 5, 작업대가 블록 표본으로 계산). 재라벨에만 받는다.
         실패하면 잠금 파일은 생기지 않고 store 는 쓸 수 있는 채로 남는다(session.close 뒤에 쓰면 그 뒤로 이어진다).
         """
         blockers = self.lock_blockers()
@@ -1179,7 +1199,7 @@ class ProjectStore:
             locked_at=_iso_ms(self._clock()), locked_on_machine4=self.session.machine4,
             app_version=self._app_version, guide=meta, relabel_plan_id=meta.get("relabel_plan_id"),
             files=entries, summary=summary, sample_manifests=[(m["sample_set_id"], h) for m, h in manifests],
-            sample_verify=sample_verify or ())
+            sample_verify=sample_verify or (), current_sample=current_sample)
         problems = locking.check_lock_doc(doc)
         if problems:
             raise LabelValidationError(problems)

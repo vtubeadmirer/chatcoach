@@ -475,3 +475,31 @@ def test_choose_session_function(qapp, proj, data_root, monkeypatch):
     ctx = sd.choose_session(None, proj.root, proj.data, data_root=data_root, default_labeler="L01",
                             machine_id_value=MID)
     assert ctx is not None and ctx.labeler_id == "L01" and ctx.session_kind == "primary"
+
+
+def test_dialog_refuses_reopen_of_locked_primary_while_a_plan_is_unreadable(qapp, proj, data_root):
+    """14 4-2 의 3: 이 라벨러가 볼 계획 가운데 읽지 못한 것이 있으면(같은 사람 재라벨일 수 있음) 잠긴 1차 다시 열기도 막고
+    사유를 보인다. 그 계획을 취소하면 다시 열 수 있다(블라인드 쪽으로 실패)."""
+    from app import relabel
+    session.add_labeler(data_root, "L01", now=NOW)
+    first = session.new_session("L01", "primary", machine_id_value=MID, now=NOW, rand4="ab12")
+    st = open_session(proj, first)
+    st.append_label({"kind": "segment", "body": {"start_ms": 0, "end_ms": 60_000, "category": "just_chatting",
+                                                 "confidence": "certain", "rationale": "합성 근거"}})
+    st.lock_session()
+    st.close()
+    bad = "RP-20261021-zz99"
+    os.makedirs(os.path.join(proj.root, "relabel"), exist_ok=True)
+    with open(relabel.plan_path(proj.root, bad), "wb") as f:
+        f.write(b"{not json")
+    dlg = make_dialog(qapp, proj, data_root, default_labeler="L01")
+    key = "resume:" + first.session_id
+    assert not dlg.choice_buttons()[key].isEnabled() and not dlg.choose(key)
+    hints = [w.text() for w in dlg.findChildren(type(dlg.guide_label)) if w.objectName() == "hint"]
+    assert any("읽지 못한 재라벨 계획" in h and bad in h for h in hints)
+    dlg.deleteLater()
+    relabel.cancel_plan(proj.root, bad, reason="시험: 깨진 계획", cancelled_by="L01", cancelled_machine4="aaaa",
+                        app_version="0.0.1", canceller_kind="adjudication", now=NOW)
+    dlg2 = make_dialog(qapp, proj, data_root, default_labeler="L01")
+    assert dlg2.choice_buttons()[key].isEnabled()
+    dlg2.deleteLater()

@@ -385,7 +385,10 @@ def test_report_labeling_pair_has_new_sections_and_old_keys(proj):
     assert rep["schema_version"] == 1 and rep["format_rev"] == ar.FORMAT_REV == 2
     assert rep["links"]["f1"] == pytest.approx(18 / 22)
     assert rep["continuation"]["n"] == 1 and rep["continuation"]["kappa"] is None   # 한 값뿐 → p_e = 1
-    assert rep["missed"]["candidate"]["kappa"] == pytest.approx(31 / 51)
+    # 08 D-13 3: 1차가 낀 짝은 놓친 후보 일치도를 내지 않는다(반응이 없는 놓친 후보는 06 2-9 로 빠진다)
+    assert rep["missed"]["pair_applicable"] is False and rep["missed"]["pair_note"] == ag.MISSED_PRIMARY_NOTE
+    assert rep["missed"]["dropped_no_reaction"] == {"a": 21, "b": 20}
+    assert "1차는 ④ 없음(D-12 5)" in res.markdown and "후보 여부 n=" not in res.markdown
     assert rep["origin"]["compared"] is False
     h = rep["header"]
     assert h["adjudicator_is_labeler"] is True and h["adjudicator_source"] == "inferred_created_by"

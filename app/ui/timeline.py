@@ -11,6 +11,8 @@ ClipSlicer 의 고정 높이 THUMB_H=64 · 순번 색 seg_color(i) · 썸네일 
 
 성능 규칙 (02 9장): 정적 트랙은 QPixmap 한 장에 그려 두고 데이터나 보이는 범위·크기가 바뀔 때만 다시 만든다.
 재생 위치가 바뀌면 캐시 그림을 그대로 붙이고 재생 위치 선·호버 선만 그린다(옛 선·새 선 둘레만 다시 그림).
+마커 하나 더하기·빼기·바꾸기(add_marker · remove_marker · update_marker)는 캐시 그림의 그 마커 둘레만 다시 칠하고
+update(rect) 한다(14 6-1 의 3번). 트랙 전체를 바꿀 때만 set_markers 를 쓴다.
 
 휠 (08 D-09 7, ClipSlicer 습관): 수정자 없음 · Shift · 가로 휠(터치패드) = 가로 스크롤,
 Ctrl+휠 · Alt+휠 = 마우스 위치 기준 확대·축소.
@@ -22,7 +24,7 @@ import bisect
 import math
 from typing import Iterable, Sequence
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QLineF, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QHBoxLayout, QScrollBar, QSizePolicy, QSlider, QToolButton, QToolTip, QVBoxLayout, QWidget
 
@@ -176,6 +178,8 @@ class Timeline(QWidget):
         self._cache: QPixmap | None = None
         self._cache_key = None
         self.cache_builds = 0            # 테스트·벤치용: 정적 트랙을 다시 그린 횟수
+        self.cache_patches = 0           # 테스트·벤치용: 마커 부분 갱신으로 캐시 그림 일부만 다시 칠한 횟수
+        self.last_dirty_rects: list[QRect] = []   # 마지막 부분 갱신의 사각형 (위젯 좌표)
         self._last_head_x: int | None = None
 
         self.setMouseTracking(True)
@@ -492,6 +496,148 @@ class Timeline(QWidget):
         ts, ks = self._tracks.get(name, ([], []))
         return list(zip(ts, ks))
 
+    # ------------------------------------------------------------------ 마커 부분 갱신 (14 6-1 의 3번)
+    # 라벨 한 줄 저장·지우기·고치기 때 set_markers(전체 정렬 + 정적 트랙 전체 다시 그리기) 대신 쓴다.
+    # 정적 캐시가 지금 보기와 맞으면 그 마커 둘레 사각형만 캐시 그림에 다시 칠하고 update(rect) 한다.
+    # 캐시가 없거나 맞지 않거나, 촘촘함(dense) 판정이 바뀌거나, 새 트랙이면 전체 다시 그리기로 물러난다.
+    def add_marker(self, name: str, t_ms: int, kind: str, label: str | None = None) -> None:
+        """마커 하나 더함. 같은 (시각, 종류) 가 이미 있어도 하나 더 넣는다(set_markers 와 같음)."""
+        t, k = int(t_ms), str(kind)
+        if name not in self._tracks:
+            self.set_markers(name, [(t, k)], label)
+            return
+        if label is not None:
+            self._track_labels[name] = label
+        ts, ks = self._tracks[name]
+        was_dense = self._is_dense(name)
+        i = self._insert_pos(ts, ks, t, k)
+        ts.insert(i, t)
+        ks.insert(i, k)
+        self._snap_add(t)
+        self._marks_changed(name, [t], was_dense)
+
+    def remove_marker(self, name: str, t_ms: int, kind: str | None = None) -> bool:
+        """시각 t 의 마커 하나를 뺀다(kind 를 주면 그 종류만). 없으면 False. 빈 트랙은 남는다(set_markers 와 같음)."""
+        t = int(t_ms)
+        if name not in self._tracks:
+            return False
+        ts, ks = self._tracks[name]
+        i = self._find(ts, ks, t, kind)
+        if i is None:
+            return False
+        was_dense = self._is_dense(name)
+        del ts[i]
+        del ks[i]
+        self._snap_remove(t)
+        self._marks_changed(name, [t], was_dense)
+        return True
+
+    def update_marker(self, name: str, old_t_ms: int, old_kind: str | None, new_t_ms: int, new_kind: str) -> bool:
+        """마커 하나를 옮기거나 종류를 바꾼다(예: 반응 → 재확인). 옛 마커가 없으면 아무것도 하지 않고 False."""
+        ot, nt, nk = int(old_t_ms), int(new_t_ms), str(new_kind)
+        if name not in self._tracks:
+            return False
+        ts, ks = self._tracks[name]
+        i = self._find(ts, ks, ot, old_kind)
+        if i is None:
+            return False
+        was_dense = self._is_dense(name)
+        del ts[i]
+        del ks[i]
+        j = self._insert_pos(ts, ks, nt, nk)
+        ts.insert(j, nt)
+        ks.insert(j, nk)
+        if ot != nt:
+            self._snap_remove(ot)
+            self._snap_add(nt)
+        self._marks_changed(name, [ot, nt], was_dense)
+        return True
+
+    @staticmethod
+    def _insert_pos(ts: list[int], ks: list[str], t: int, k: str) -> int:
+        """(시각, 종류) 정렬 순서를 지키는 자리 (set_markers 의 sorted 와 같은 순서)."""
+        lo, hi = bisect.bisect_left(ts, t), bisect.bisect_right(ts, t)
+        while lo < hi and ks[lo] <= k:
+            lo += 1
+        return lo
+
+    @staticmethod
+    def _find(ts: list[int], ks: list[str], t: int, kind: str | None) -> int | None:
+        lo, hi = bisect.bisect_left(ts, t), bisect.bisect_right(ts, t)
+        for i in range(lo, hi):
+            if kind is None or ks[i] == kind:
+                return i
+        return None
+
+    def _snap_add(self, t: int) -> None:
+        pts = self._snap_points
+        j = bisect.bisect_left(pts, t)
+        if j >= len(pts) or pts[j] != t:
+            pts.insert(j, t)
+
+    def _snap_remove(self, t: int) -> None:
+        """다른 마커·구간 경계가 같은 시각에 남아 있으면 자석 자리를 지우지 않는다."""
+        for ts, _ in self._tracks.values():
+            j = bisect.bisect_left(ts, t)
+            if j < len(ts) and ts[j] == t:
+                return
+        if any(s == t or e == t for s, e, _ in self._segments):
+            return
+        pts = self._snap_points
+        j = bisect.bisect_left(pts, t)
+        if j < len(pts) and pts[j] == t:
+            del pts[j]
+
+    def _marker_dirty_rect(self, name: str, t: int) -> QRect | None:
+        """시각 t 마커가 칠하는 칸(위젯 좌표, 테두리 여유 포함). 보이는 범위 밖이면 None."""
+        r = dict(self.track_rects()).get("marks:" + name)
+        if r is None or self._duration <= 0 or self.view_len <= 0:
+            return None
+        x = self.t_to_x(t)
+        pad = self._mark_rad() + 3
+        if x + pad < 0 or x - pad > self.width():
+            return None
+        return QRect(int(math.floor(x - pad)), int(r.top()), int(math.ceil(2 * pad)) + 2, int(math.ceil(r.height())))
+
+    def _marks_changed(self, name: str, times: Sequence[int], was_dense: bool) -> None:
+        rects = [rc for rc in (self._marker_dirty_rect(name, t) for t in times) if rc is not None]
+        if not rects:
+            return                       # 보이는 범위 밖 — 캐시 그림은 그대로 맞다(촘촘함도 보이는 범위로만 정함)
+        if was_dense != self._is_dense(name) or self._cache is None or self._cache_key != self._cache_key_now():
+            self._data_rev += 1          # 전체 다시 그리기 (자석 자리는 이미 고쳤다)
+            self.update()
+            return
+        self._patch_marks(name, rects)
+        for rc in rects:
+            self.update(rc)
+
+    def _patch_marks(self, name: str, rects: Sequence[QRect]) -> None:
+        """캐시 그림에서 rects 만 그 마커 트랙을 다시 칠한다(clip). 사각형 밖은 건드리지 않는다."""
+        tr_rect = dict(self.track_rects())["marks:" + name]
+        p = QPainter(self._cache)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, False)
+            font = QFont()
+            font.setPointSize(7)
+            p.setFont(font)
+            pad_ms = self.px_tol_ms(self._mark_rad() + 3)
+            for rc in rects:
+                p.save()
+                p.setClipRect(rc)
+                win = (self.x_to_t_f(rc.left()) - pad_ms, self.x_to_t_f(rc.right() + 1) + pad_ms)
+                self._draw_marks(p, tr_rect, name, window=win)
+                p.restore()
+        finally:
+            p.end()
+        self.cache_patches += 1
+        self.last_dirty_rects = [QRect(rc) for rc in rects]
+
+    def x_to_t_f(self, x: float) -> float:
+        """x_to_t 의 반올림·자르기 없는 판 (부분 갱신의 시각 창 계산용)."""
+        if self.view_len <= 0 or self.width() <= 0:
+            return 0.0
+        return self.view_start + x / self.width() * self.view_len
+
     def set_marker_style(self, kind: str, color: QColor, hollow: bool = False):
         self._styles[kind] = (QColor(color), bool(hollow))
         self._data_changed()
@@ -734,26 +880,48 @@ class Timeline(QWidget):
         p.drawPolygon(poly)
         self._track_title(p, r, tr("파형"))
 
-    def _draw_marks(self, p: QPainter, r: QRectF, name: str):
+    def _mark_rad(self) -> float:
+        return max(3.0, MARK_H / 2 - 3)
+
+    def _is_dense(self, name: str) -> bool:
+        """보이는 범위의 마커가 너무 촘촘하면 세로 눈금만 그린다 (모양 없이)."""
+        ts = self._tracks.get(name, ([], []))[0]
+        a, b = self.view_range()
+        return (bisect.bisect_right(ts, b) - bisect.bisect_left(ts, a)) > self.width() / 3
+
+    def _draw_marks(self, p: QPainter, r: QRectF, name: str, window: tuple[float, float] | None = None):
+        """마커 트랙 하나. window = (시작 ms, 끝 ms) 를 주면 그 시각 안의 마커만 그린다(부분 갱신, 칠하기는 clip 이 막는다).
+        촘촘함(dense)은 늘 보이는 범위 전체로 정한다 — 부분 갱신과 전체 그리기의 모양이 같게."""
         p.fillRect(r, TRACK_BG)
         ts, ks = self._tracks.get(name, ([], []))
         a, b = self.view_range()
+        dense = self._is_dense(name)
+        if window is not None:
+            a, b = max(a, int(math.floor(window[0]))), min(b, int(math.ceil(window[1])))
         lo = bisect.bisect_left(ts, a)
         hi = bisect.bisect_right(ts, b)
         cy = r.center().y()
         rad = max(3.0, r.height() / 2 - 3)
-        dense = (hi - lo) > self.width() / 3        # 너무 촘촘하면 세로 눈금만 (모양 없이)
         by_style: dict[tuple, list] = {}
+        key_of: dict[str, tuple] = {}
+        vs = self.view_start
+        scale = self.width() / self.view_len if self.view_len > 0 else 0.0
         for i in range(lo, hi):
-            col, hollow = self._styles.get(ks[i], DEFAULT_MARK)
-            by_style.setdefault((col.rgba(), hollow), []).append(self.t_to_x(ts[i]))
+            k = ks[i]
+            sk = key_of.get(k)
+            if sk is None:
+                col, hollow = self._styles.get(k, DEFAULT_MARK)
+                sk = key_of[k] = (col.rgba(), hollow)
+            by_style.setdefault(sk, []).append((ts[i] - vs) * scale)
         p.setRenderHint(QPainter.Antialiasing, not dense)
-        for (rgba, hollow), xs in by_style.items():
+        # 겹친 마커의 쌓임 순서를 정해 둔다(색·속 빔 순) — 부분 갱신과 전체 그리기가 같은 그림이 되게
+        for (rgba, hollow), xs in sorted(by_style.items(), key=lambda kv: kv[0]):
             col = QColor.fromRgba(rgba)
             if dense:
+                # 촘촘하면 화면 열마다 한 줄만 (20만 마커를 한 줄씩 긋지 않는다). 열 = floor(x), 선은 열 가운데
+                y0, y1 = r.top() + 2, r.bottom() - 2
                 p.setPen(QPen(col, 1))
-                for x in xs:
-                    p.drawLine(QPointF(x, r.top() + 2), QPointF(x, r.bottom() - 2))
+                p.drawLines([QLineF(c + 0.5, y0, c + 0.5, y1) for c in sorted({math.floor(x) for x in xs})])
                 continue
             p.setPen(QPen(col, 1.5))
             p.setBrush(Qt.NoBrush if hollow else QBrush(col))

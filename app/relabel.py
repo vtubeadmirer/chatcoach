@@ -78,6 +78,8 @@ __all__ = [
     "RELABEL_DIR", "RelabelBlindError", "PlanSummary", "plan_path", "new_plan_id", "list_plans", "read_plan",
     "read_plan_for_session", "write_plan", "next_plan_no", "source_lock_info", "source_machine4s",
     "load_source_manifests", "create_plan", "verify_plan_on_disk", "session_args",
+    "done_ranges_of_view", "SECOND_PLAN_KINDS", "active_plan_for", "create_second_plan",
+    "adjudicator_labelers",
     "CANCEL_KINDS", "INDEX_NAME", "STATUS_ACTIVE", "STATUS_CANCELLED", "STATUS_UNREADABLE", "STATUSES",
     "cancel_path", "check_cancel", "read_cancel", "is_cancelled", "cancel_plan",
     "index_path", "check_index", "read_index", "build_index", "rebuild_index", "IndexedPlans", "plans_for_labeler",
@@ -430,6 +432,115 @@ def verify_plan_on_disk(project_root: str, project_data: Mapping, plan_id: str, 
     return rp.verify_plan(plan, sample_seed=project_data.get("sample_seed"), source_lock=lock,
                           manifests=load_source_manifests(project_root, plan["source_session_id"],
                                                           creator_kind=creator_kind))
+
+
+def done_ranges_of_view(view, session_id: str, coverage: Iterable | None = None) -> list[list[int]]:
+    """잠긴 1차 세션 뷰(store.locked_session_view 의 view)에서 '라벨을 마친 범위'(06 3-1)를 계산한다.
+
+    store.done_ranges 와 같은 규칙: 구간 완료 표시(phase.mark segments)가 붙은 구간이 하나라도 있으면 그 구간들만, 없으면
+    모든 유효 구간의 [시작, 끝) 를 합친다. coverage(영상이 덮는 범위)를 주면 그 안으로 자른다. 숫자만 돌려준다.
+    """
+    from .core import phase as ph
+    segs = view.items("segment", session_id)
+    marks = ph.PhaseMarks(r for r in getattr(view, "other_records", ()) or () if r.get("kind") == "phase.mark")
+    done = [s for s in segs if marks.done("segments", s["entity_id"])] or list(segs)
+
+    def _int(v) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool)
+    spans = sorted((int(s["body"]["start_ms"]), int(s["body"]["end_ms"])) for s in done
+                   if _int((s.get("body") or {}).get("start_ms")) and _int((s.get("body") or {}).get("end_ms")))
+    merged: list[list[int]] = []
+    for a, z in spans:
+        if z <= a:
+            continue
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], z)
+        else:
+            merged.append([a, z])
+    if coverage is None:
+        return merged
+    out: list[list[int]] = []
+    for ca, cz in sorted((int(a), int(z)) for a, z in coverage):
+        for a, z in merged:
+            lo, hi = max(a, ca), min(z, cz)
+            if hi > lo:
+                out.append([lo, hi])
+    return out
+
+
+# 조정 세션에서 relabel_second 계획을 만들 수 있는 자리 (13 4-3 의 2, 14 4-2 의 9)
+SECOND_PLAN_KINDS = (vis.ADJUDICATION, None)
+
+
+def active_plan_for(project_root: str, session_kind: str, source_session_id: str, labeler_id: str) -> str | None:
+    """같은 원 세션·같은 라벨러·같은 종류의 쓸 수 있는(취소되지 않은) 계획 plan_id. 없으면 None. 만드는 자리에서만 부른다."""
+    for p in list_plans(project_root):
+        if p.usable and p.session_kind == session_kind and p.source_session_id == source_session_id \
+                and p.labeler_id == labeler_id:
+            return p.plan_id
+    return None
+
+
+def adjudicator_labelers(project_root: str) -> frozenset:
+    """labels/ 의 **파일 이름만** 보고, 조정(AD) 세션을 연 적이 있는 라벨러 ID 집합(내용은 열지 않는다)."""
+    try:
+        names = os.listdir(os.path.join(project_root, "labels"))
+    except OSError:
+        return frozenset()
+    out = set()
+    for n in names:
+        m = SESSION_FILE_RE.match(n)
+        if not m:
+            continue
+        sm = SESSION_ID_RE.match(m.group(1))
+        if sm and vis.session_kind_of_id(m.group(1)) == vis.ADJUDICATION:
+            out.add(sm.group(1))
+    return frozenset(out)
+
+
+def create_second_plan(project_root: str, project_data: Mapping, *, source_view, source_session_id: str,
+                       labeler_id: str, created_by: str, created_machine4: str, app_version: str,
+                       creator_kind: str | None, coverage: Iterable | None = None,
+                       hard_scores: Mapping[int, float] | None = None, now: datetime | None = None,
+                       rand4: str | None = None) -> dict:
+    """조정 세션에서 잠긴 1차 세션을 골라 두 번째 사람 재라벨(relabel_second) 계획을 만든다(14 4-2 의 9).
+
+    같은 사람 재라벨이 남은 동안은 그 1차 세션을 다시 열 수 없으므로(session.reopen_refusal) 1차 자리에서 계획을 못 만든다.
+    조정 세션은 잠긴 세션을 모두 읽으므로(03 12-1) 여기서 만든다. 고르기·쓰기는 create_plan 과 같다.
+    - creator_kind: 조정 세션 또는 None(세션 밖 도구)만. 그 밖이면 파일을 열기 전에 RelabelBlindError.
+    - source_view: store.locked_session_view(원 세션) 의 view. done_ranges 를 여기서 계산한다(done_ranges_of_view).
+    - coverage: 영상이 덮는 VOD 범위 [(a, z)]. 주면 done_ranges 를 자르고 블록 범위(extent)로도 쓴다(작업대의 1차 길과 같음).
+    - 원 세션이 1차가 아니면·라벨러가 원 세션과 같으면·라벨러가 계획을 만드는 사람(created_by, 조정자)이면·
+      라벨러가 이 프로젝트에서 조정 세션을 연 적이 있으면(adjudicator_labelers, 블라인드)·같은 원 세션·라벨러의 쓸 수 있는 relabel_second 계획이 이미 있으면
+      ValueError. 원 세션이 잠기지 않았으면 create_plan 이 ValueError.
+    """
+    if creator_kind not in SECOND_PLAN_KINDS:
+        raise RelabelBlindError("조정 세션에서만 두 번째 사람 재라벨 계획을 만듭니다")
+    sid = _check_sid(source_session_id)
+    if vis.session_kind_of_id(sid) != vis.PRIMARY:
+        raise ValueError("재라벨 계획의 원 세션은 1차(primary) 세션이어야 합니다")
+    if not isinstance(labeler_id, str) or not _LABELER_RE.match(labeler_id):
+        raise ValueError(f"labeler_id 형식이 아닙니다: {labeler_id!r}")
+    if SESSION_ID_RE.match(sid).group(1) == labeler_id:
+        raise ValueError("두 번째 사람은 원 세션과 다른 라벨러여야 합니다")
+    # 블라인드(03 12-1): 조정 세션은 잠긴 세션을 모두 읽으므로, 계획을 만드는 조정자 자신과
+    # 이 프로젝트에서 조정 세션을 연 적이 있는 라벨러는 '독립 두 번째 사람' 이 될 수 없다.
+    if isinstance(created_by, str) and created_by.strip().upper() == labeler_id:
+        raise ValueError("계획을 만드는 사람(조정자)은 두 번째 사람 재라벨을 맡을 수 없습니다 — 원 세션 라벨을 이미 봤습니다")
+    if labeler_id in adjudicator_labelers(project_root):
+        raise ValueError(f"라벨러 {labeler_id} 는 이 프로젝트에서 조정 세션을 열어 다른 세션 라벨을 봤습니다 — "
+                         "두 번째 사람 재라벨을 맡을 수 없습니다")
+    have = active_plan_for(project_root, rp.RELABEL_SECOND, sid, labeler_id)
+    if have is not None:
+        raise ValueError(f"같은 원 세션·라벨러의 두 번째 사람 재라벨 계획 {have} 가 이미 있습니다")
+    cov = [tuple(r) for r in coverage] if coverage else None
+    ranges = done_ranges_of_view(source_view, sid, cov)
+    if not ranges:
+        raise ValueError("원 세션에 라벨을 마친 범위가 없습니다" + (" (영상이 덮는 구간 안)" if cov else ""))
+    return create_plan(project_root, project_data, session_kind=rp.RELABEL_SECOND, labeler_id=labeler_id,
+                       source_session_id=sid, done_ranges=ranges, created_by=created_by,
+                       created_machine4=created_machine4, app_version=app_version, creator_kind=creator_kind,
+                       hard_scores=hard_scores, now=now, rand4=rand4, extent=cov)
 
 
 def session_args(plan: Mapping) -> dict:

@@ -96,6 +96,12 @@ ENGINE_MARK_KIND = {"direct": "engine", "likely": "engine", "related_only": "eng
 LINK_MAX_BYTES = 64 * 1024 * 1024
 ENGINE_ITEM = "engine_results"    # app.core.visibility.ENGINE_RESULTS (엔진 판정, 분석 모드). 봉인 AI 결과(ai_results)와 다르다
 # 작업대가 들고 있는 현재 유효 라벨 종류(타임라인·폼에 넘긴다). retract 는 대상을 지운다.
+# 저장·되돌리기 한 번에 바뀐 마커가 이보다 많으면 타임라인을 부분 갱신하지 않고 전체로 다시 보낸다(14 6-1 의 3)
+PATCH_MAX_MARKERS = 64
+# 조정 모드의 hsplit 오른쪽 몫(14 4-2 의 1). 1366 창에서 오른쪽 약 790px — 영상·타임라인 칸은 약 570px 남는다
+ADJ_RIGHT_SHARE = 0.58
+ADJ_RIGHT_MIN_PX = 760
+ADJ_SIDE_MIN_PX = 1200            # 조정 화면을 나란히 배치로 둘 만큼 넓은 오른쪽 칸(그보다 좁으면 위아래 배치 폭으로)
 # missed_candidate(④)·origin(출처 판정)·adjudication(조정)은 타임라인에 그리지 않고 그 화면에만 넘긴다.
 HEAD_KINDS = ("segment", "utterance", "reaction", "continuation", "video_check", "missed_candidate", "origin",
               "adjudication")
@@ -588,6 +594,55 @@ def sample_messages(messages_path: str, chat_ids) -> dict[str, dict]:
     return {m["chat_id"]: m for m in msgs if m.get("chat_id") in wanted}
 
 
+def verify_sample_manifest(manifest: Mapping, messages, sha: str, *, previous: Mapping | None, buffer_ms: int,
+                           duration_ms: int):
+    """표본 매니페스트 재현 검증(03 15-5) — 파일·위젯 없음(워커에서 부른다). 규칙은 Workbench._verify_sample 설명.
+
+    - sha256-tau-v1: 완충을 매니페스트 source_segment 경계만으로 v1 규칙으로 다시 만든다.
+    - sha256-tau-v2: 매니페스트의 boundary_buffers·media 로 다시 계산한다."""
+    from ..core import sampling as sp
+    if manifest.get("algorithm") == sp.ALGORITHM_V1:
+        src = manifest.get("source_segment") or {}
+        bounds = [{"start_ms": src.get("start_ms"), "end_ms": src.get("end_ms")}]
+        return sp.verify_manifest(manifest, messages, lambda rule: segment_buffers(bounds, duration_ms, buffer_ms, rule),
+                                  messages_sha256=sha, previous=previous)
+    return sp.verify_manifest(manifest, messages, messages_sha256=sha, previous=previous)
+
+
+def chat_index_for(project, data_root: str | None):
+    """채팅 색인(app.chat_index, 14 6-1 의 2)을 캐시에서 읽거나 만든다(워커에서 부른다). (ChatIndex, 상태) 또는 None.
+
+    data_root(앱 data 폴더)가 있으면 <data_root>\\cache\\<project_id>\\chat_index.bin 을 쓰고, 없으면(시험) 캐시 없이 만든다.
+    색인에는 chat_id·시각·종류·type_code 와 원본 지문만 있다(본문·닉네임·라벨 없음)."""
+    from .. import chat_index as ci
+    path = project.paths.messages_jsonl
+    if not os.path.isfile(path):
+        return None
+    if data_root:
+        return ci.for_project(project, data_root=data_root)
+    return ci.build_index(path), ci.BUILT
+
+
+def index_records(idx, messages_path: str) -> tuple[list[dict], str] | None:
+    """색인 → (채팅 줄 모양 [{chat_id, t_ms, kind}] (파일 순서), messages_sha256). 표본 모집단·④ 대상 고르기는 이 세 칸만 쓴다.
+
+    색인이 원본과 맞지 않거나(빠른 지문) 같은 chat_id 가 있었으면 None — 부르는 쪽이 read_messages 로 물러난다
+    (build_population 은 겹친 chat_id 를 SamplingError 로 막는데 색인은 첫 줄만 남기기 때문이다)."""
+    from .. import chat_index as ci
+    if idx is None or idx.duplicates or idx.skipped or not idx.messages_sha256:
+        return None
+    try:
+        if not ci.is_fresh(idx, messages_path):
+            return None
+    except OSError:
+        return None
+    out = []
+    for i, cid in enumerate(idx.chat_ids):
+        t, kind, _code = idx.row(i)
+        out.append({"chat_id": cid, "t_ms": t, "kind": kind})
+    return out, idx.messages_sha256
+
+
 MISSED_MSG_MARGIN_MS = 120_000    # ④ 보조값(직전 10초 채팅 수·노출 추정)에 쓰는 범위 밖 여유
 
 
@@ -602,13 +657,16 @@ class MissedLoad:
 
 def prepare_missed_selection(messages_path: str, segments, plan: Mapping | None, targets, *, values: Mapping,
                              project_data: Mapping, meta: Mapping, drawn_by: str, app_version: str, coverage,
-                             reactions, missed_records, session_kind: str | None) -> MissedLoad:
+                             reactions, missed_records, session_kind: str | None,
+                             messages: tuple[list[dict], str] | None = None) -> MissedLoad:
     """④ 놓친 채팅 후보 대상(06 2-9, 03 12-3, D-12 5)을 계산한다(파일에 쓰지 않음, 워커에서 부른다).
 
     - 재라벨 세션: 대상 구간(③ 완료 구간, phase.missed_targets)마다 계획의 블록 표본을 메모리에서 다시 만든다
       (prepare_relabel_sample — samples/ 를 열지 않음). 그 표본 가운데 자기 판정이 반응 미확인·관련성만·불명확인 채팅.
     - 범위는 session.open.scope(블록) 안만(core.missed.scope_ranges_of). 경계 완충은 블록마다(relabel_buffers).
     - 1차 세션은 ④ 를 열지 않는다(D-12 5). plan 이 없으면 빈 결과와 까닭.
+    - messages: 채팅 색인으로 만든 (줄 [{chat_id, t_ms, kind}], sha256)(index_records). 주면 messages.jsonl 을 다시 읽지
+      않는다. 그때 texts 는 비고, 작업대가 채팅 표에서 대상 본문만 채운다.
     """
     from ..core import missed as mc
     out = MissedLoad(scope_ranges=mc.scope_ranges_of(meta.get("scope"), session_kind))
@@ -616,7 +674,7 @@ def prepare_missed_selection(messages_path: str, segments, plan: Mapping | None,
         out.problems.append(tr("④ 놓친 후보는 재라벨 계획이 있는 재라벨 세션에서만 매깁니다 (08 D-12 5)"))
         out.selection = mc.Selection(())
         return out
-    msgs, sha = read_messages(messages_path)
+    msgs, sha = messages if messages is not None else read_messages(messages_path)
     mans = []
     for seg in targets:
         try:
@@ -945,6 +1003,14 @@ class Workbench(QWidget):
         self._primary_segments: list[dict] = []
         self._primary_marks: list[tuple[int, str]] = []
         self._primary_chats: dict[str, str] = {}
+        # 채팅 색인 캐시(app.chat_index, 14 6-1 의 2): 프로젝트를 열 때 워커로 만든다. 시각·종류만(본문·라벨 없음).
+        # data_root 는 메인 창이 준다(캐시 자리 <data_root>\cache\<project_id>). None 이면 캐시 없이 만든다(시험).
+        self.data_root: str | None = None
+        self.chat_index = None
+        self.chat_index_state: str | None = None
+        self._label_marks_now: list[tuple[int, str]] | None = None   # 타임라인 'labels' 트랙에 지금 그린 것(부분 갱신용)
+        self.timeline_patches = 0                                    # 부분 갱신으로 처리한 저장 수(시험·점검용)
+        self._split_before: list[int] | None = None                  # 조정 모드에서 넓히기 전 hsplit 크기
 
         # 바탕을 늘 칠한다: 작업대를 바꿀 때(다른 프로젝트·사본 열기) 닫힌 플레이어의 네이티브 창 자리에 옛 영상 그림이
         # 남아 보이던 것(실제 창 스모크 화면)을 막는다
@@ -1064,6 +1130,8 @@ class Workbench(QWidget):
         self.player.playingChanged.connect(self._on_playing)
         self.player.errorOccurred.connect(self._on_player_error)
         self.chat.chatActivated.connect(self._on_chat_activated)
+        if hasattr(self.chat, "context_actions"):
+            self.chat.context_actions = self.chat_context_actions     # 오른쪽 메뉴 (14 4-2 의 11)
         self.timeline.seekRequested.connect(self.seek_vod)
 
         # ---- 분석 보기
@@ -1230,6 +1298,9 @@ class Workbench(QWidget):
         dur = self._vod_duration
         pre = self._chat_prebuild()
         self._run_job("chat", lambda cancelled: load_chat(mpath, dur, pre), self._on_chat_loaded, sync)
+        self.chat_index, self.chat_index_state = None, None
+        droot = self.data_root
+        self._run_job("chat_index", lambda cancelled: chat_index_for(proj, droot), self._on_chat_index, sync)
         if cur:
             root = proj.root
             self.media_info.setText(tr("영상 확인 중…"))
@@ -1431,13 +1502,38 @@ class Workbench(QWidget):
         return sorted(self._label_heads["segment"].values(),
                       key=lambda r: ((r.get("body") or {}).get("start_ms") or 0, r.get("entity_id")))
 
-    def _push_labels(self, kinds) -> None:
+    def _push_labels(self, kinds, *, incremental: bool = False) -> None:
+        """타임라인에 라벨을 그린다. incremental(한 건 저장·되돌리기, _apply_saved)이면 'labels' 트랙은 바뀐 마커만
+        add_marker·remove_marker 로 고친다(타임라인 부분 갱신, 14 6-1 의 3). 많이 바뀌었거나 부분 갱신 API 가 없으면 전체."""
         if "segment" in kinds:
             self._push_segments_track()
         if "reaction" in kinds or "video_check" in kinds:
-            self.timeline.set_markers(LABEL_TRACK, reaction_marks(
+            marks = list(reaction_marks(
                 self._label_heads["reaction"].values(), self._label_heads["video_check"].values(),
                 min_views=self._min_views(), min_coverage=rules.heard_min_coverage(self.guide_values())))
+            old = self._label_marks_now
+            if incremental and old is not None and self._patch_label_marks(old, marks):
+                self.timeline_patches += 1
+            else:
+                self.timeline.set_markers(LABEL_TRACK, marks)
+            self._label_marks_now = marks
+
+    def _patch_label_marks(self, old: list[tuple[int, str]], new: list[tuple[int, str]]) -> bool:
+        """old → new 의 차이(같은 (시각, 종류) 는 개수로 셈)만 타임라인에 반영한다. 못 하면 False(부르는 쪽이 전체)."""
+        add_m, rem_m = getattr(self.timeline, "add_marker", None), getattr(self.timeline, "remove_marker", None)
+        if add_m is None or rem_m is None:
+            return False
+        from collections import Counter
+        co, cn = Counter(old), Counter(new)
+        gone, came = list((co - cn).elements()), list((cn - co).elements())
+        if len(gone) + len(came) > PATCH_MAX_MARKERS:
+            return False
+        for t, k in gone:
+            if not rem_m(LABEL_TRACK, t, k):
+                return False
+        for t, k in came:
+            add_m(LABEL_TRACK, t, k)
+        return True
 
     def _push_segments_track(self) -> None:
         """활동 구간 트랙: ① 구간 모드면 폼의 모델(저장 전 상태 포함), 아니면 store 의 현재 유효 판."""
@@ -1473,7 +1569,7 @@ class Workbench(QWidget):
             self._label_heads[kind][eid] = rec
             changed.add(kind)
         if changed:
-            self._push_labels(changed)
+            self._push_labels(changed, incremental=True)
             if "segment" in changed:
                 self._update_modes()
         self.labelsChanged.emit()
@@ -1586,6 +1682,33 @@ class Workbench(QWidget):
                 st.close(reason)
             except Exception:  # noqa: BLE001
                 LOG.exception("라벨 기록 닫기 실패")
+
+    def _on_chat_index(self, res, err: str) -> None:
+        """채팅 색인 워커 결과. 실패해도 작업대는 그대로 쓴다(색인을 쓰는 곳은 파일 읽기로 물러난다)."""
+        if res is None:
+            if err:
+                LOG.warning("채팅 색인을 만들지 못했습니다: %s", err.split(":", 1)[0])
+            return
+        self.chat_index, self.chat_index_state = res
+        LOG.info("채팅 색인: %s, %d건", self.chat_index_state, len(self.chat_index))
+
+    def chat_times_provider(self):
+        """보고서용: 워커에서 부를 함수 provider() → 채팅 시각 조회 함수(ChatIndex.chat_times) 또는 None.
+
+        provider 는 그때 원본 전체 sha256 까지 맞는지 본다(verify_full, 보고서 입력은 정확해야 함). 맞지 않거나 색인이 아직
+        없으면 None — 보고서가 messages.jsonl 을 훑는다(header.chat_times.source = messages_scan). 시각만 오간다."""
+        idx, proj = self.chat_index, self.project
+        path = proj.paths.messages_jsonl if proj is not None else None
+
+        def provider():
+            if idx is None or path is None:
+                return None
+            from .. import chat_index as ci
+            try:
+                return idx.chat_times if ci.is_fresh(idx, path, verify_full=True) else None
+            except OSError:
+                return None
+        return provider
 
     def _on_chat_loaded(self, data: ChatLoad | None, err: str) -> None:
         if data is None:
@@ -2123,10 +2246,36 @@ class Workbench(QWidget):
             self.right.setCurrentWidget(self.page_chat)
         self._push_segments_track()
         self._apply_mode_shortcuts()
+        self._apply_split_for_mode()
         self._update_modes()
         LOG.info("작업대 모드: %s", mode)
         self.modeChanged.emit(mode)
         return True
+
+    def _apply_split_for_mode(self) -> None:
+        """조정 모드에서는 hsplit 오른쪽(조정 화면)을 넓히고(14 4-2 의 1), 다른 모드로 가면 앞 크기로 되돌린다.
+        아직 창에 보이지 않아 폭이 0 이면 이벤트 루프 한 번 뒤에 다시 본다."""
+        wide = self.mode == ph.ADJUDICATE
+        total = sum(self.hsplit.sizes()) or self.hsplit.width()
+        if total <= 0:
+            self._split_retry = getattr(self, "_split_retry", 0) + 1
+            if wide and self._split_retry <= 20 and not self._closed:
+                QTimer.singleShot(50, self, self._apply_split_for_mode)
+            return
+        self._split_retry = 0
+        if wide:
+            if self._split_before is None:
+                self._split_before = list(self.hsplit.sizes())
+            right = max(int(total * ADJ_RIGHT_SHARE), min(total - 320, ADJ_RIGHT_MIN_PX))
+            # 조정 화면은 NARROW_PX 이상이면 목록·고른 건을 나란히 둔다. 그 배치는 넓은 화면(ADJ_SIDE_MIN_PX 이상)에서만
+            # 들어가므로, 그보다 좁으면 위아래 배치가 되게 NARROW_PX 아래로 둔다(실제 창 1366: 900px 에서 오른쪽 밖 48개)
+            from .adjudication_view import NARROW_PX
+            if right < ADJ_SIDE_MIN_PX:
+                right = min(right, NARROW_PX - 30)
+            self.hsplit.setSizes([max(1, total - right), right])
+        elif self._split_before is not None:
+            self.hsplit.setSizes(self._split_before)
+            self._split_before = None
 
     def _sync_mode_buttons(self) -> None:
         for m, b in self.mode_buttons.items():
@@ -2197,9 +2346,13 @@ class Workbench(QWidget):
         mpath = self.project.paths.messages_jsonl
         segs = [copy.deepcopy(s) for s in self.segment_heads()]
         plan = copy.deepcopy(self.relabel_plan) if self.relabel_plan is not None else None
+        idx = self.chat_index
         self._say(tr("④ 대상을 계산하는 중…"))
-        self._run_job("missed", lambda cancelled: prepare_missed_selection(mpath, segs, plan, targets, **args),
-                      self._on_missed_loaded, sync)
+
+        def job(cancelled):
+            # 채팅 색인이 맞으면 messages.jsonl 을 다시 읽지 않는다(시각·종류만 쓴다, 14 6-1 의 2). 아니면 파일을 읽는다
+            return prepare_missed_selection(mpath, segs, plan, targets, messages=index_records(idx, mpath), **args)
+        self._run_job("missed", job, self._on_missed_loaded, sync)
 
     def _on_missed_loaded(self, res: MissedLoad | None, err: str) -> None:
         if res is None:
@@ -2210,8 +2363,13 @@ class Workbench(QWidget):
             self._note(p)
         pre, post = recheck_rolls(self.guide_values())
         from ..core import missed as mc
+        texts = dict(res.texts)
+        for t in res.selection.targets:                # 색인으로 계산했으면 본문은 채팅 표에서(대상만)
+            if not texts.get(t.chat_id):
+                texts[t.chat_id] = self.chat_text(t.chat_id) or ""
+        texts.update(self._load_saved_extras())
         self._ensure_missed_form().load_context(
-            selection=res.selection, chat_texts=res.texts, scope_ranges=res.scope_ranges,
+            selection=res.selection, chat_texts=texts, scope_ranges=res.scope_ranges,
             media_coverage=self._media_cov, thresholds=mc.thresholds_from_guide(self.guide_values()),
             pre_roll_ms=pre, post_roll_ms=post, read_only=bool(self.store is None or self.store.read_only),
             position_fn=self.vod_position)
@@ -2230,9 +2388,120 @@ class Workbench(QWidget):
         """지금 ④ 대상(core.missed.Selection). 계산 전이면 None."""
         return self.missed_load.selection if self.missed_load is not None else None
 
+    # ---- 표본 밖 후보 (scope = extra, 14 4-2 의 11): 채팅 표 오른쪽 메뉴 '표본 밖 후보로 적기'
+    def extra_block_reason(self, chat_id: str | None = None) -> str | None:
+        """표본 밖 후보를 지금 적을 수 없는 까닭. 재라벨 세션의 ④ 단계(③ 완료 표시 뒤 ④ 문이 열림)에서만 된다."""
+        if self.session is None or self.store is None:
+            return tr("세션 없이 연 보기 전용입니다")
+        if self.session_kind not in RELABEL_KINDS:
+            return tr("표본 밖 후보는 재라벨 세션의 ④ 단계에서만 적습니다 (08 D-12 5)")
+        if self.store.read_only:
+            return tr("라벨 기록이 읽기 전용입니다")
+        g = self.gates().get(ph.MISSED)
+        if g is None or not g.allowed:
+            return tr("④ 단계가 아직 열리지 않았습니다 (③ 완료 표시 뒤)")
+        if chat_id is not None:
+            t = self._chat_t(chat_id)
+            if t is None:
+                return tr("이 채팅의 시각을 모릅니다")
+            from ..core import missed as mc
+            scope = mc.scope_ranges_of((self.store.session_meta or {}).get("scope"), self.session_kind)
+            if not mc.in_ranges(t, scope):
+                return tr("재라벨 블록 밖 채팅입니다 (08 D-12 5)")
+        return None
+
+    def _chat_t(self, chat_id: str) -> int | None:
+        return self.chat_info(chat_id)[0]
+
+    def _chat_kind(self, chat_id: str) -> str | None:
+        if self.chat_index is not None:
+            k = self.chat_index.kind_of(chat_id)
+            if k is not None:
+                return k
+        try:
+            d = self._editor_chats()
+            i = d.index_of(chat_id)
+            kinds = getattr(d, "kinds", None)
+            if i is not None and kinds is not None:
+                from .chat_panel import KIND_CODES
+                names = {v: k for k, v in KIND_CODES.items()}
+                return names.get(kinds[i])
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def extra_target_for(self, chat_id: str, existing: Mapping | None = None):
+        """chat_id → 표본 밖 후보 대상(core.missed.extra_target). ① 은 지금 구간표·블록 완충으로, ② 보조값은 색인으로."""
+        from ..core import missed as mc
+        t = self._chat_t(chat_id)
+        if t is None:
+            raise ValueError(tr("이 채팅의 시각을 모릅니다"))
+        values = self.guide_values()
+        thr = mc.thresholds_from_guide(values)
+        buf = _sec_ms(values, "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
+        scope = mc.scope_ranges_of((self.store.session_meta or {}).get("scope"), self.session_kind) or ()
+        segs = self.segment_heads()
+        buffers = relabel_buffers(segs, [tuple(r) for r in scope], buf)
+        ordered: list[tuple[int, str]] = []
+        if self.chat_index is not None:
+            lo, hi = t - mc.RATE_WINDOW_MS, t + MISSED_MSG_MARGIN_MS
+            idx = self.chat_index
+            ordered = sorted((int(idx.t_ms[i]), idx.chat_ids[i]) for i in idx.range_positions(lo, hi))
+        return mc.extra_target(chat_id, t, self._chat_kind(chat_id), segs, buffers=buffers, ordered=ordered,
+                               thresholds=thr, existing=existing)
+
+    def _load_saved_extras(self) -> dict[str, str]:
+        """이미 저장한 표본 밖 후보(scope = extra)를 ④ 폼 목록에 다시 싣는다. {chat_id: 본문}."""
+        f = self._ensure_missed_form()
+        texts: dict[str, str] = {}
+        for r in self._label_heads["missed_candidate"].values():
+            b = r.get("body") or {}
+            cid = b.get("chat_id")
+            if b.get("scope") != "extra" or not isinstance(cid, str):
+                continue
+            try:
+                f.add_extra_target(self.extra_target_for(cid, existing=r), select=False)
+            except ValueError:
+                continue
+            texts[cid] = self.chat_text(cid) or ""
+        for t in f.extra_targets():
+            texts.setdefault(t.chat_id, self.chat_text(t.chat_id) or "")
+        return texts
+
+    def add_extra_candidate(self, chat_id: str) -> bool:
+        """'표본 밖 후보로 적기': ④ 모드로 바꾸고 그 채팅을 표본 밖 대상으로 폼에 더해 고른다. 막히면 False(까닭은 상태 줄)."""
+        why = self.extra_block_reason(chat_id)
+        if why:
+            self._say(why)
+            return False
+        if self.mode != ph.MISSED and not self.set_mode(ph.MISSED):
+            return False
+        try:
+            t = self.extra_target_for(chat_id)
+        except ValueError as e:
+            self._say(str(e))
+            return False
+        ok = self._ensure_missed_form().add_extra_target(t, text=self.chat_text(chat_id) or "")
+        if ok:
+            LOG.info("④ 표본 밖 후보 1건을 목록에 더함")
+            self._say(tr("표본 밖 후보를 목록에 더했습니다 — 네 조건을 매기고 저장하세요 (비율 계산에는 들지 않음)"))
+        return ok
+
+    def chat_context_actions(self, chat_id: str) -> list[tuple]:
+        """채팅 표 오른쪽 메뉴 항목(ChatPanel.context_actions). 재라벨 세션에서만 '표본 밖 후보로 적기' 를 보인다."""
+        if self.session_kind not in RELABEL_KINDS:
+            return []
+        why = self.extra_block_reason(chat_id)
+        return [(tr("표본 밖 후보로 적기"), self.add_extra_candidate, why is None, why or
+                 tr("표본 밖에서 찾은 놓친 후보로 ④ 에 적습니다 (scope = extra, 비율 계산에서 빠짐)"))]
+
     # ---- 조정 (adjudication 세션, 03 6-12·12-1, 06 5장·7-1, D-12 3·4·7)
     def chat_info(self, chat_id: str) -> tuple[int | None, str | None]:
         """조정 화면용: 채팅 → (VOD 시각, 화면에 보일 본문 한 줄). 조정 세션은 채팅을 읽는다(03 12-1). 로그에는 쓰지 않는다."""
+        t_idx = self.chat_index.t_of(chat_id) if self.chat_index is not None else None   # 색인(14 6-1 의 2)이 먼저
+        text = self.chat_text(chat_id)
+        if t_idx is not None:
+            return int(t_idx), (text[:200] if text else None)
         try:
             d = self._editor_chats()
             i = d.index_of(chat_id)
@@ -2241,15 +2510,31 @@ class Workbench(QWidget):
         if i is None:
             return None, None
         t = d.times[i]
-        text = d.texts[i] if i < len(d.texts) else None
-        return (int(t) if t >= 0 else None), (str(text)[:200] if text else None)
+        return (int(t) if t >= 0 else None), (text[:200] if text else None)
+
+    def chat_text(self, chat_id: str) -> str | None:
+        """채팅 표에 실린 본문 한 줄(닉네임 없음). 없으면 None. 로그에는 쓰지 않는다."""
+        try:
+            d = self._editor_chats()
+            i = d.index_of(chat_id)
+        except Exception:  # noqa: BLE001
+            return None
+        if i is None or i >= len(d.texts):
+            return None
+        text = d.texts[i]
+        return str(text) if text else None
 
     def _enter_adjudication(self) -> None:
         if self.adjudication_view is None:
             from .. import __version__
             from .adjudication_view import AdjudicationView
-            self.adjudication_view = AdjudicationView(store=self.store, app_version=__version__,
-                                                      chat_info=self.chat_info)
+            st = self.store
+            # 대상 파일 쓰기·relabel_second 계획 만들기는 store 를 거친다(블라인드·읽기 전용 검사를 store 가 한 번 더, D-13 5)
+            self.adjudication_view = AdjudicationView(
+                store=st, app_version=__version__, chat_info=self.chat_info,
+                write_origin_targets=st.write_origin_targets if st is not None else None,
+                create_second_plan=st.create_second_plan if st is not None else None,
+                coverage=self.media_coverage)
             self.right.addWidget(self.adjudication_view)
         else:
             self.adjudication_view.refresh_sessions()
@@ -2843,21 +3128,82 @@ class Workbench(QWidget):
           media(영상 범위·확인 범위)로 다시 계산한다(매니페스트 하나로 재현). 지금 구간표·영상 범위와 다른지는 재현과 따로
           '표본 갱신' 단추(sample_stale)가 알린다.
         """
-        from ..core import sampling as sp
         msgs, sha = read_messages(self.project.paths.messages_jsonl)
         prev = None
         rev = manifest.get("sample_rev", 1)
         if rev and rev > 1:
             prev = next((m for m in self._manifests_for(manifest["source_segment"]["entity_id"])
                          if m.get("sample_rev") == rev - 1), None)
-        if manifest.get("algorithm") == sp.ALGORITHM_V1:
-            buf = _sec_ms(self.guide_values(), "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
-            src = manifest.get("source_segment") or {}
-            bounds = [{"start_ms": src.get("start_ms"), "end_ms": src.get("end_ms")}]
-            dur = self._vod_duration
-            return sp.verify_manifest(manifest, msgs, lambda rule: segment_buffers(bounds, dur, buf, rule),
-                                      messages_sha256=sha, previous=prev)
-        return sp.verify_manifest(manifest, msgs, messages_sha256=sha, previous=prev)
+        buf = _sec_ms(self.guide_values(), "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
+        return verify_sample_manifest(manifest, msgs, sha, previous=prev, buffer_ms=buf, duration_ms=self._vod_duration)
+
+    def sample_verify_plan(self) -> tuple[list[dict], Callable[[Mapping], object]]:
+        """잠그기 전 재현 검증을 워커로 돌릴 입력(14 6-1 의 1): (검증할 매니페스트 — 계열마다 가장 큰 rev, verify_one).
+
+        verify_one(manifest) → sampling.Verification 은 **UI 상태를 지금 값으로 잡아 둔** 함수라 워커 스레드에서 불러도 된다
+        (위젯·self 를 읽지 않음). 채팅 파일은 처음 부를 때 한 번만 읽는다. samples/ 를 열 수 없는 세션은 ([], …)."""
+        if self.store is None or self.project is None or self.session is None or not self._can_read_samples():
+            return [], lambda m: None
+        from .. import locking
+        from ..core import sampling as sp
+        from .queue_view import list_manifests
+        sdir = self.project.paths.samples_dir
+        mans = [m for m, _ in locking.session_manifests(sdir, self.session.session_id)]
+        latest = sorted(sp.latest_of(mans).values(), key=lambda x: x["sample_set_id"])
+        everything = [m for m in list_manifests(sdir) if m.get("draw_no") == 1]
+        prev_of: dict[str, dict] = {}
+        for m in latest:
+            rev = m.get("sample_rev", 1)
+            if rev and rev > 1:
+                eid = (m.get("source_segment") or {}).get("entity_id")
+                p = next((x for x in everything if (x.get("source_segment") or {}).get("entity_id") == eid
+                          and x.get("sample_rev") == rev - 1), None)
+                if p is not None:
+                    prev_of[m["sample_set_id"]] = p
+        buf = _sec_ms(self.guide_values(), "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
+        dur, mpath = self._vod_duration, self.project.paths.messages_jsonl
+        cache: dict = {}
+        guard = threading.Lock()
+
+        def verify_one(m):
+            with guard:
+                if "msgs" not in cache:
+                    cache["msgs"] = read_messages(mpath)
+            msgs, sha = cache["msgs"]
+            return verify_sample_manifest(m, msgs, sha, previous=prev_of.get(m["sample_set_id"]), buffer_ms=buf,
+                                          duration_ms=dur)
+        return latest, verify_one
+
+    def current_sample_job(self) -> Callable | None:
+        """재라벨 세션: 잠금 파일 current_sample(14 4-2 의 5)을 계산할 일 fn(ctx) → 정렬한 chat_id 목록. 아니면 None.
+
+        자기 구간표의 ③ 대상 구간마다 계획의 블록 표본(prepare_relabel_sample, samples/ 를 열지 않음)을 다시 만들어 items 의
+        chat_id 합집합을 낸다. 블록 표본이 없는 구간은 건너뛴다. UI 상태는 지금 값으로 잡아 둔다(워커에서 돈다)."""
+        if self.session_kind not in RELABEL_KINDS or self.relabel_plan is None or self.store is None \
+                or self.project is None:
+            return None
+        from .. import __version__
+        args = dict(values=self.guide_values(), project_data=dict(self.project.data),
+                    meta=copy.deepcopy(self.store.session_meta or {}), drawn_by=self.labeler_id or "L01",
+                    app_version=__version__, coverage=self.media_coverage())
+        mpath = self.project.paths.messages_jsonl
+        segs = [copy.deepcopy(s) for s in self.segment_heads()]
+        targets = [copy.deepcopy(s) for s in ph.sample_targets(self.segment_heads(), self._marks)]
+        plan = copy.deepcopy(self.relabel_plan)
+        idx = self.chat_index
+
+        def job(ctx):
+            msgs = index_records(idx, mpath) or read_messages(mpath)
+            ids: set[str] = set()
+            for seg in targets:
+                ctx.check()
+                try:
+                    man, _m = prepare_relabel_sample(mpath, seg, segs, plan, messages=msgs, **args)
+                except ValueError:
+                    continue
+                ids.update(it["chat_id"] for it in man["items"])
+            return sorted(ids)
+        return job
 
     # ------------------------------------------------------------ 세션 잠그기 (06 7-1, D-11 7)
     def can_lock(self) -> str | None:
@@ -2888,15 +3234,11 @@ class Workbench(QWidget):
     def sample_verify_results(self) -> list[dict]:
         """잠그기 전에 이 세션 표본 매니페스트(계열마다 가장 큰 rev)의 재현 검증을 돌린다 → 잠금 파일 sample_verify 칸.
         samples/ 를 열 수 없는 세션(재라벨)은 빈 목록. 결과는 {sample_set_id, ok, problems(건수)} 뿐이다."""
-        if self.store is None or self.project is None or self.session is None or not self._can_read_samples():
-            return []
-        from .. import locking
-        from ..core import sampling as sp
-        mans = [m for m, _ in locking.session_manifests(self.project.paths.samples_dir, self.session.session_id)]
+        mans, verify_one = self.sample_verify_plan()
         out = []
-        for m in sorted(sp.latest_of(mans).values(), key=lambda x: x["sample_set_id"]):
+        for m in mans:
             try:
-                v = self._verify_sample(m)
+                v = verify_one(m)
                 out.append({"sample_set_id": m["sample_set_id"], "ok": bool(v.ok), "problems": len(v.problems)})
             except Exception as e:  # noqa: BLE001 — 검증이 깨져도 잠금 기록에 실패로 남긴다
                 LOG.warning("잠그기 전 재현 검증 실패: %s", type(e).__name__)

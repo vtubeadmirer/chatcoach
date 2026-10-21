@@ -16,8 +16,9 @@ import logging
 import os
 import re
 
-from PySide6.QtWidgets import (QComboBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QVBoxLayout)
+from PySide6.QtCore import QEventLoop, Qt
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QProgressBar, QPushButton, QVBoxLayout)
 
 from .. import agreement_report as ar
 from ..core import visibility as vis
@@ -66,9 +67,13 @@ class AgreementDialog(QDialog):
     """잠긴 두 세션의 일치도 보고서를 만든다. project_root: 연 프로젝트 폴더."""
 
     def __init__(self, parent=None, *, project_root: str, created_by: str | None = None,
-                 reader_kind: str | None = None):
+                 reader_kind: str | None = None, chat_times_provider=None):
+        """chat_times_provider() → 채팅 시각 조회 함수 또는 None. 워커에서 부른다(작업대의 채팅 색인, 14 6-1 의 2).
+        None 이면 보고서가 messages.jsonl 을 훑는다."""
         super().__init__(parent)
         self.reader_kind = reader_kind          # 지금 열린 세션 종류(None = 보기 전용). build_report 가 다시 본다
+        self.chat_times_provider = chat_times_provider
+        self._worker = None                     # 보고서를 만드는 JobWorker (도는 동안만)
         self.setWindowTitle(tr("일치도 보고서"))
         self.setModal(True)
         self.project_root = project_root
@@ -97,12 +102,23 @@ class AgreementDialog(QDialog):
         self.msg = QLabel("")
         self.msg.setWordWrap(True)
         lay.addWidget(self.msg, 1)
+        # 바쁨 표시(14 6-1 의 1): 계획 재현 검증·라벨 읽기가 워커에서 도는 동안 막대가 움직이고 [취소] 가 켜진다
+        self.busy = QProgressBar()
+        self.busy.setRange(0, 0)
+        self.busy.setTextVisible(False)
+        self.busy.setVisible(False)
+        lay.addWidget(self.busy)
         row = QHBoxLayout()
         row.addStretch(1)
+        self.btn_cancel_run = QPushButton(tr("취소"))
+        self.btn_cancel_run.setToolTip(tr("보고서 만들기를 멈춥니다 (지금 하던 계산이 끝나면 멈추고 아무것도 쓰지 않음)"))
+        self.btn_cancel_run.clicked.connect(self.cancel_run)
+        self.btn_cancel_run.setVisible(False)
         self.btn_close = QPushButton(tr("닫기"))
         self.btn_close.clicked.connect(self.reject)
         self.btn_make = QPushButton(tr("보고서 만들기"))
         self.btn_make.clicked.connect(self._on_make)
+        row.addWidget(self.btn_cancel_run)
         row.addWidget(self.btn_close)
         row.addWidget(self.btn_make)
         lay.addLayout(row)
@@ -120,24 +136,98 @@ class AgreementDialog(QDialog):
         if a and b and a != b and ar.pair_family(a, b) is None:
             self.msg.setText(tr("라벨링 세션끼리 또는 출처 판정 세션끼리만 비교합니다 (06 4-7)."))
 
-    def run(self, session_a: str, session_b: str, out_root: str | None = None) -> ar.ReportResult | None:
-        """보고서를 만든다(시험·통합용 직접 호출). 성공하면 ReportResult, 실패하면 None 과 화면 문장."""
-        out = out_root or self.out_edit.text().strip() or None
-        try:
-            res = ar.make_report(self.project_root, session_a, session_b, out_root=out, created_by=self.created_by,
-                                 reader_kind=self.reader_kind)
-        except ar.ReportError as e:
-            LOG.warning("일치도 보고서 실패: %s", type(e).__name__)
-            self.msg.setText(tr("보고서를 만들지 못했습니다: {0}").format(str(e)[:300]))
+    def is_running(self) -> bool:
+        return self._worker is not None
+
+    def cancel_run(self) -> None:
+        """도는 보고서 만들기를 멈춘다. 계획 재현 검증 사이·쓰기 전에 먹힌다(쓰기 전이면 아무 파일도 남지 않음)."""
+        w = self._worker
+        if w is not None:
+            w.cancel()
+            self.msg.setText(tr("취소하는 중… (지금 하던 계산이 끝나면 멈춥니다)"))
+
+    def reject(self) -> None:  # noqa: D102 — 도는 중에 닫으면 먼저 멈춘다
+        if self._worker is not None:
+            self.cancel_run()
+            return
+        super().reject()
+
+    def run(self, session_a: str, session_b: str, out_root: str | None = None, *,
+            sync: bool = False) -> ar.ReportResult | None:
+        """보고서를 만든다(메뉴 단추·시험·통합). 성공하면 ReportResult, 실패·취소면 None 과 화면 문장.
+
+        계산(06 7-1 계획 재현 검증 포함)은 JobWorker 로 UI 스레드 밖에서 돌리고(14 6-1 의 1), 그동안 바쁨 막대와 [취소] 를
+        보인다. 끝날 때까지 이 자리에서 기다리되 이벤트 루프는 돈다. sync=True 면 부른 스레드에서 바로 돈다(도구용)."""
+        from ..workers import JobWorker
+        if self._worker is not None:
             return None
-        except (OSError, ValueError) as e:
-            LOG.warning("일치도 보고서 실패: %s", type(e).__name__)
-            self.msg.setText(tr("보고서를 만들지 못했습니다 ({0})").format(type(e).__name__))
+        out = out_root or self.out_edit.text().strip() or None
+        root, by, kind, prov = self.project_root, self.created_by, self.reader_kind, self.chat_times_provider
+
+        def job(ctx):
+            lookup = prov() if prov is not None else None
+            try:
+                return ar.make_report(root, session_a, session_b, out_root=out, created_by=by, reader_kind=kind,
+                                      chat_times=lookup, cancel_check=ctx.check)
+            except (ar.ReportError, OSError, ValueError) as e:
+                return e                         # 화면 문장으로 바꾼다(아래)
+        w = JobWorker.single("report", job, name="일치도 보고서")
+        self._worker = w
+        if sync:
+            w.run()
+        else:
+            loop = QEventLoop(self)
+            ended = {"v": False}
+
+            def end(*_a):
+                ended["v"] = True
+                loop.quit()
+            for sig in (w.done, w.failed, w.cancelled):
+                sig.connect(end)
+            self._set_busy(True)
+            try:
+                w.start()
+                if not ended["v"]:
+                    loop.exec()
+                w.wait()
+            finally:
+                self._set_busy(False)
+        self._worker = None
+        outcome, res = w.outcome, w.results.get("report")
+        w.deleteLater()
+        if outcome == "cancelled":
+            LOG.info("일치도 보고서: 취소")
+            self.msg.setText(tr("보고서 만들기를 취소했습니다. 아무 파일도 쓰지 않았습니다."))
+            return None
+        if outcome != "done":
+            LOG.warning("일치도 보고서 실패: 워커 오류")
+            self.msg.setText(tr("보고서를 만들지 못했습니다 (계산 중 오류)"))
+            return None
+        if isinstance(res, ar.ReportError):
+            LOG.warning("일치도 보고서 실패: %s", type(res).__name__)
+            self.msg.setText(tr("보고서를 만들지 못했습니다: {0}").format(str(res)[:300]))
+            return None
+        if isinstance(res, (OSError, ValueError)):
+            LOG.warning("일치도 보고서 실패: %s", type(res).__name__)
+            self.msg.setText(tr("보고서를 만들지 못했습니다 ({0})").format(type(res).__name__))
             return None
         self.result = res
         self.msg.setText("\n".join(summary_lines(res.report) + [tr("쓴 폴더: {0}").format(res.out_dir)]))
         LOG.info("일치도 보고서 %s 를 썼습니다", res.report.get("report_id"))
         return res
+
+    def _set_busy(self, on: bool) -> None:
+        self.busy.setVisible(on)
+        self.btn_cancel_run.setVisible(on)
+        self.btn_make.setEnabled(not on)
+        for w in (self.box_a, self.box_b, self.out_edit):
+            w.setEnabled(not on)
+        if on:
+            self.msg.setText(tr("보고서를 만드는 중… (재현 검증·라벨 읽기)"))
+            QApplication.setOverrideCursor(Qt.BusyCursor)
+        else:
+            QApplication.restoreOverrideCursor()
+            self._refresh()
 
     def _on_make(self) -> None:
         a, b = self.box_a.currentData(), self.box_b.currentData()

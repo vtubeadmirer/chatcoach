@@ -106,6 +106,17 @@
         }
       }
     },
+    "current_sample": {
+      "type": "object",
+      "description": "재라벨 세션(relabel_same·relabel_second)만, 선택 칸. 잠글 때 자기 블록 표본(판정 대상이었던 chat_id 전부, samples/ 에 쓰지 않은 메모리 표본)을 남겨 보고서가 08 D-12 2 의 '현재 표본' 으로 쓴다(14 4-2 의 5번). 없으면(앞 판 잠금·1차) 보고서는 구간표로 근사하고 경고한다. chat_ids 는 정렬·중복 없음, count 는 그 길이, chat_ids_sha256 은 정렬한 chat_id 를 '\\n' 으로 이은 UTF-8 의 SHA-256(06 2-7 과 같은 식) — 이 셋의 맞음은 app/locking.py check_lock_doc 이 본다. chat_id 만 넣고 본문·라벨 내용은 넣지 않는다.",
+      "required": ["chat_ids_sha256", "count", "chat_ids"],
+      "additionalProperties": false,
+      "properties": {
+        "chat_ids_sha256": {"$ref": "#/$defs/sha256"},
+        "count": {"$ref": "#/$defs/count"},
+        "chat_ids": {"type": "array", "maxItems": 50000, "items": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$"}}
+      }
+    },
     "summary": {
       "type": "object",
       "description": "잠그기 화면이 보인 요약 숫자와 경고 코드. 미완료 상태로 잠갔는지를 나중에 알 수 있게 남긴다.",

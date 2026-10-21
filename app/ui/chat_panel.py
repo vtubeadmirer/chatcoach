@@ -25,7 +25,7 @@ from typing import Iterable, Sequence
 
 from PySide6.QtCore import QAbstractTableModel, QItemSelectionModel, QModelIndex, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeyEvent
-from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QTableView,
+from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QTableView,
                                QVBoxLayout, QWidget)
 
 from ..core.timecode import fmt_time
@@ -421,6 +421,10 @@ class ChatPanel(QWidget):
 
         v.doubleClicked.connect(self._on_activated)
         v.enterPressed.connect(self._on_activated)
+        # 오른쪽 메뉴: 작업대가 context_actions(chat_id) → [(글자, fn(chat_id), 켜짐, 풍선 도움말)] 를 준다(14 4-2 의 11)
+        self.context_actions = None
+        v.setContextMenuPolicy(Qt.CustomContextMenu)
+        v.customContextMenuRequested.connect(self._on_context_menu)
         v.verticalScrollBar().actionTriggered.connect(lambda _a: self._pause_follow())
         v.selectionModel().currentRowChanged.connect(lambda cur, _prev: self._emit_selected(cur))
 
@@ -617,6 +621,31 @@ class ChatPanel(QWidget):
         self._update_count()
 
     # ── 선택·스크롤 ───────────────────────────────────────────────────────
+    def context_menu_for(self, chat_id: str) -> QMenu | None:
+        """chat_id 의 오른쪽 메뉴(보이지 않은 채). 줄 것이 없으면 None. 시험은 이것으로 메뉴 항목을 본다."""
+        acts = list(self.context_actions(chat_id) or ()) if self.context_actions is not None else []
+        if not acts:
+            return None
+        menu = QMenu(self)
+        for text, fn, enabled, tip in acts:
+            a = menu.addAction(text)
+            a.setEnabled(bool(enabled))
+            a.setToolTip(tip or "")
+            a.triggered.connect(lambda _c=False, fn=fn, cid=chat_id: fn(cid))
+        menu.setToolTipsVisible(True)
+        return menu
+
+    def _on_context_menu(self, pos) -> None:
+        idx = self.view.indexAt(pos)
+        r = idx.row() if idx.isValid() else -1
+        if not (0 <= r < len(self.model.rows)):
+            return
+        self._select_row(r)
+        menu = self.context_menu_for(self._data.chat_ids[self.model.rows[r]])
+        if menu is not None:
+            menu.exec(self.view.viewport().mapToGlobal(pos))
+            menu.deleteLater()
+
     def _select_row(self, row: int) -> None:
         idx = self.model.index(row, 0)
         self.view.selectionModel().setCurrentIndex(

@@ -51,6 +51,9 @@ STATE_RELATED_ONLY = "related_only"
 STATE_UNCLEAR = "unclear"
 TARGET_STATES = (STATE_UNCONFIRMED, STATE_RELATED_ONLY, STATE_UNCLEAR)
 STATE_NAMES = {STATE_UNCONFIRMED: "반응 미확인", STATE_RELATED_ONLY: "관련성만 있음", STATE_UNCLEAR: "불명확"}
+# 표본 밖에서 라벨러가 따로 고른 후보(scope = extra, 14 4-2 의 11). 대상 고르기(select_targets)에는 들지 않는다.
+STATE_EXTRA = "extra"
+STATE_NAMES[STATE_EXTRA] = "표본 밖"
 
 # 사유 코드 (안내서 6장, 03 5-5)
 REASON_CODES = ("A", "B", "C", "D", "E", "F", "G")
@@ -290,7 +293,7 @@ class Target:
     chat_id: str
     t_ms: int
     chat_kind: str | None
-    sample_ref: dict                    # {"sample_set_id", "order"}
+    sample_ref: dict | None             # {"sample_set_id", "order"}. None = 표본 밖 후보(scope = extra)
     source_segment_id: str | None       # 표본을 뽑은 원 구간 entity_id
     reaction_entity_id: str | None
     state: str                          # unconfirmed · related_only · unclear
@@ -307,6 +310,29 @@ class Target:
     @property
     def done(self) -> bool:
         return self.existing is not None
+
+    @property
+    def scope(self) -> str:
+        return SCOPE_EXTRA if self.sample_ref is None else SCOPE_SAMPLE
+
+
+def extra_target(chat_id: str, t_ms: int, chat_kind: str | None, segments: Iterable[Mapping], *,
+                 buffers: Iterable = (), ordered: Sequence[tuple[int, str]] = (),
+                 thresholds: MissedThresholds = MissedThresholds(), existing: Mapping | None = None) -> Target:
+    """표본 밖에서 라벨러가 고른 채팅 하나를 4단계 대상 모양으로 (scope = extra, 14 4-2 의 11).
+
+    ① 은 표본 대상과 같이 지금 구간표로 계산하고(바꿀 수 없음), ② 보조값은 ordered(chat_times 모양, 그 채팅 앞뒤만 있어도
+    됨)로 센다. sample_ref·원 구간·반응 entity_id 는 없다. 범위(블록)·영상 검사는 저장할 때 validate_draft 가 한다.
+    비율 계산(놓친 후보 일치도)에는 들지 않는다 — core.agreement 가 extra 를 따로 센다.
+    """
+    if not isinstance(chat_id, str) or not CHAT_ID_RE.match(chat_id):
+        raise MissedError("chat_id 형식이 아닙니다")
+    if not _is_int(t_ms):
+        raise MissedError("대상 채팅의 시각을 모릅니다")
+    c1 = cond1_for(t_ms, segments, buffers)
+    aux = cond2_aux(chat_id, t_ms, ordered, thresholds)
+    code, source = suggest_reason(c1, chat_kind, aux, thresholds)
+    return Target(chat_id, int(t_ms), chat_kind, None, None, None, STATE_EXTRA, c1, aux, code, source, existing)
 
 
 @dataclass(frozen=True)
@@ -452,8 +478,8 @@ def build_draft(target: Target, answers: Answers) -> dict:
     body = {
         "chat_id": target.chat_id,
         "segment_id": target.segment_id,
-        "scope": SCOPE_SAMPLE,
-        "sample_ref": dict(target.sample_ref),
+        "scope": target.scope,
+        "sample_ref": dict(target.sample_ref) if target.sample_ref is not None else None,
         "cond1": target.cond1.as_body(),
         "cond2": target.aux.as_body(answers.cond2),
         "cond3": answers.cond3,
@@ -602,6 +628,7 @@ __all__ = [
     "MANUAL_REASON_CODES", "AUTO_REASON_CODES", "REASON_COND", "SKIP_KEYS", "MissedError", "MissedThresholds",
     "thresholds_from_guide", "normalize_ranges", "scope_ranges_of", "in_ranges", "in_media", "prior_window",
     "target_state", "Cond1", "cond1_for", "Cond2Aux", "chat_times", "cond2_aux", "suggest_reason", "Target",
+    "STATE_EXTRA", "extra_target",
     "Selection", "current_by_chat", "select_targets", "Answers", "is_candidate", "reason_source",
     "answers_from_body", "build_draft", "Check", "validate_draft",
 ]

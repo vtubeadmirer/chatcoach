@@ -431,8 +431,10 @@ def test_view_refuses_in_read_only_and_labeling_session_cannot_write_adjudicatio
         st.close()
 
 
-def test_view_cancels_plan_with_reason(qapp, proj):
+def test_plan_cancel_only_from_menu_dialog_with_reason(qapp, proj):
+    """계획 취소는 메뉴 대화상자 하나(14 4-2 의 1 — 조정 화면 아래 칸은 1366 에서 잘려 지움). 사유·확인 필수."""
     from app.ui import adjudication_view as av
+    from app.ui.plan_cancel_dialog import PlanCancelDialog
     st = _open(proj, _ctx(AD, "adjudication", "L01"))
     try:
         data = st.project.data
@@ -440,14 +442,16 @@ def test_view_cancels_plan_with_reason(qapp, proj):
                                    done_ranges=[(0, 600 * SEC)], created_by="L01", created_machine4="aaaa",
                                    app_version="0.0.1", creator_kind="adjudication", now=NOW, rand4="ab12")
         v = av.AdjudicationView(store=st, app_version="0.0.1")
-        assert v.plan_box.count() == 1 and v.plan_box.currentData() == plan["plan_id"]
-        assert v.cancel_selected_plan() is None and "되돌릴 수 없음" in v.plan_msg.text()
-        v.plan_confirm.setChecked(True)
-        assert v.cancel_selected_plan() is None and "사유" in v.plan_msg.text()     # 사유 필수
-        v.plan_reason.setText("시험용 계획이라 쓰지 않음")
-        doc = v.cancel_selected_plan()
+        assert not hasattr(v, "plan_box") and not hasattr(v, "cancel_selected_plan")
+        v.refresh_plans()                                       # 통합이 취소 뒤 부르는 이름은 남는다
+        d = PlanCancelDialog(store=st, app_version="0.0.1")
+        assert d.plan_box.count() == 1 and d.plan_box.currentData() == plan["plan_id"]
+        assert d.cancel_plan() is None and "되돌릴 수 없음" in d.msg.text()
+        d.confirm.setChecked(True)
+        assert d.cancel_plan(reason="") is None and relabel.is_cancelled(proj, plan["plan_id"]) is False   # 사유 필수
+        doc = d.cancel_plan(reason="시험용 계획이라 쓰지 않음")
         assert doc["plan_id"] == plan["plan_id"] and doc["canceller_is_labeler"] is True
-        assert relabel.is_cancelled(proj, plan["plan_id"]) and v.plan_box.count() == 0
+        assert relabel.is_cancelled(proj, plan["plan_id"])
         assert os.path.exists(relabel.plan_path(proj, plan["plan_id"]))           # 계획 파일은 그대로
     finally:
         st.close()

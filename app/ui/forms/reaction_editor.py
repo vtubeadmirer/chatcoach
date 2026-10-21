@@ -390,15 +390,18 @@ class ReactionEditor(QWidget):
         # 등급
         gbox = QGroupBox(tr("등급 (Ctrl+1~5)"))
         gl = QVBoxLayout(gbox)
-        ghint = QLabel(tr("반응 미확인 Ctrl+5 · 조건과 다르게 고르면 사유 필수"))
+        ghint = QLabel(tr("Ctrl+1~5 = 왼쪽 위부터 차례로 (반응 미확인 Ctrl+5) · 조건과 다르게 고르면 사유 필수"))
         ghint.setWordWrap(True)
         gl.addWidget(ghint)
-        grow = QGridLayout()                     # 2칸씩(좁은 화면에서 잘리지 않게, 11 4-2 의 2)
+        # 2칸씩(좁은 화면에서 잘리지 않게, 11 4-2 의 2). 단축키는 단추 글자에서 빼고 풍선 도움말·위 안내에 둔다 —
+        # 1366×768 편집기 칸(약 470px)에서 단추가 오른쪽 밖으로 나가지 않게(14 4-2 의 1)
+        grow = QGridLayout()
         self.grade_group = QButtonGroup(self)
         self.grade_buttons: dict[str, QPushButton] = {}
         for i, g in enumerate(GRADES + (UNCONFIRMED,), start=1):
             name = GRADE_LABELS.get(g, tr("반응 미확인"))
-            b = QPushButton(f"{tr(name)} ({'Ctrl+' + str(i)})")
+            b = QPushButton(tr(name))
+            b.setToolTip(f"Ctrl+{i}")
             b.setCheckable(True)
             b.setObjectName(f"grade_{g}")
             self.grade_group.addButton(b)
@@ -425,6 +428,7 @@ class ReactionEditor(QWidget):
         # 확신도
         crow = QHBoxLayout()
         crow.addWidget(QLabel(tr("확신도")))
+        cgrid = QGridLayout()                    # 3개를 한 줄에 두면 470px 칸에서 넘친다(14 4-2 의 1) → 2칸씩
         self.conf_group = QButtonGroup(self)
         self.conf_buttons: dict[str, QPushButton] = {}
         for i, c in enumerate(CONFIDENCES, start=1):
@@ -433,8 +437,9 @@ class ReactionEditor(QWidget):
             b.setObjectName(f"conf_{c}")
             self.conf_group.addButton(b)
             self.conf_buttons[c] = b
-            crow.addWidget(b)
+            cgrid.addWidget(b, (i - 1) // 2, (i - 1) % 2)
             b.clicked.connect(lambda _c=False, cc=c: self.set_confidence(cc))
+        crow.addLayout(cgrid)
         crow.addStretch(1)
         lay.addLayout(crow)
 
@@ -464,6 +469,8 @@ class ReactionEditor(QWidget):
         vrow = QHBoxLayout()
         self.recheck_label = QLabel("")
         self.recheck_label.setObjectName("recheck")
+        # 들은 뒤 문장(범위·배속·횟수)이 길어 한 줄이면 1366 창의 편집기 칸(약 460px)을 넘는다 → 줄바꿈 (c6 실제 창 측정)
+        self.recheck_label.setWordWrap(True)
         self.recheck_btn = QPushButton(tr("7-2 범위 다시 듣기 (R)"))
         self.recheck_btn.clicked.connect(self.listen_again)
         vrow.addWidget(self.recheck_label, 1)

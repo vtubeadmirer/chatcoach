@@ -105,6 +105,7 @@ class MissedForm(QWidget):
         self._ops_cb = ops
         self._selection: mc.Selection | None = None
         self._targets: list[mc.Target] = []
+        self._extras: list[mc.Target] = []           # 표본 밖 후보(scope = extra). 표본 대상 뒤에 붙는다(14 4-2 의 11)
         self._saved: dict[str, Mapping] = {}         # chat_id → 이번 화면에서 저장한(또는 받은) 현재 판
         self._texts: Mapping[str, str] = {}
         self._scope: tuple[tuple[int, int], ...] | None = None
@@ -234,6 +235,8 @@ class MissedForm(QWidget):
         if selection is not _KEEP:
             self._selection = selection
             self._targets = list(selection.targets) if selection is not None else []
+            have = {t.chat_id for t in self._targets}
+            self._targets += [t for t in self._extras if t.chat_id not in have]
             self._saved = {t.chat_id: t.existing for t in self._targets if t.existing is not None}
             self._fill_list()
             ids = [t.chat_id for t in self._targets]
@@ -301,6 +304,33 @@ class MissedForm(QWidget):
     def _update_item(self, i: int) -> None:
         if 0 <= i < self.list.count():
             self.list.item(i).setText(self._item_text(self._targets[i]))
+
+    def add_extra_target(self, target: mc.Target, *, text: str | None = None, select: bool = True) -> bool:
+        """표본 밖 후보(scope = extra, sample_ref 없음)를 목록 끝에 더한다(14 4-2 의 11). 이미 목록에 있으면 고르기만.
+        target 은 core.missed.extra_target 으로 만든다. 표본 대상(sample_ref 있음)은 받지 않는다(False).
+        text: 화면에 보일 채팅 본문(닉네임 없음)."""
+        if target.sample_ref is not None:
+            return False
+        if text is not None:
+            self._texts = {**self._texts, target.chat_id: text}
+        for i, t in enumerate(self._targets):
+            if t.chat_id == target.chat_id:
+                if select:
+                    self._select_row(i)
+                return True
+        self._extras = [x for x in self._extras if x.chat_id != target.chat_id] + [target]
+        self._targets.append(target)
+        if target.existing is not None:
+            self._saved[target.chat_id] = target.existing
+        self.list.addItem(QListWidgetItem(self._item_text(target)))
+        if select:
+            self._select_row(len(self._targets) - 1)
+        else:
+            self._refresh()
+        return True
+
+    def extra_targets(self) -> list[mc.Target]:
+        return list(self._extras)
 
     def select_chat(self, chat_id: str) -> bool:
         for i, t in enumerate(self._targets):
@@ -444,6 +474,8 @@ class MissedForm(QWidget):
         rec = dict(rec)
         rec.setdefault("body", d["body"])
         self._saved[t.chat_id] = rec
+        if t.sample_ref is None:                      # 표본 밖 후보: 다시 실을 때도 저장한 판을 잇게
+            self._extras = [self._target_now(x) if x.chat_id == t.chat_id else x for x in self._extras]
         for code, text in c.warnings:
             self._write_warning(code, rec.get("entity_id"), text)
         self._update_item(self._cur)

@@ -10,6 +10,7 @@ write_lock_exclusive 를 부른다). 이 모듈의 쓰기 함수를 UI 가 직�
 - 풀기 기능은 없다(08 D-11 7). 고치려면 새 세션을 연다. 잘못 잠갔으면 다음 세션의 사유 칸에 적는다.
 - 내용: session_id·labeler_id·session_kind·잠근 시각·잠근 PC·앱 버전·기준서 버전과 해시·기록 파일별 sha256·크기·줄 수·
   last_seq·라벨 종류별 유효 수·표본 매니페스트 id 와 해시·요약 숫자와 경고 코드(schemas/session-lock.schema.json).
+  재라벨 세션은 자기 표본 chat_id 목록과 그 sha256(current_sample, 선택 칸)도 넣는다(14 4-2 의 5번, 08 D-13 2).
 
 검증 (check_files · verify_lock)
 - 잠금에 적힌 파일마다 지금 바이트의 sha256 을 비교한다. 다르면 앞 size 바이트의 sha256 을 다시 본다.
@@ -317,12 +318,81 @@ def lock_summary(view, *, session_id: str, session_kind: str, marks: Iterable[Ma
 
 
 # ---------------------------------------------------------------------------- 잠금 문서
+# ---------------------------------------------------------------------------- 현재 표본 (재라벨 세션, 14 4-2 의 5번)
+# 재라벨 세션은 samples/ 에 매니페스트를 쓰지 않고 블록 표본을 메모리에서 만든다(workbench.prepare_relabel_sample).
+# 잠글 때 그 표본(판정 대상이었던 chat_id 전부)을 잠금 파일에 남겨, 보고서가 D-12 2 의 '현재 표본' 을 구간표 근사
+# 대신 이것으로 본다. chat_id 만 — 본문·라벨 내용은 없다.
+CURRENT_SAMPLE_KINDS = (vis.RELABEL_SAME, vis.RELABEL_SECOND)
+CURRENT_SAMPLE_MAX = 50_000
+
+
+def current_sample_doc(chat_ids: Iterable[str]) -> dict:
+    """chat_id 모음 → 잠금 파일 current_sample 칸 {chat_ids_sha256, count, chat_ids(정렬·중복 없음)}.
+    해시는 sampling.ids_sha256(정렬해 '\\n' 으로 이은 UTF-8, 06 2-7 과 같은 식). chat_id 형식이 아니면 ValueError."""
+    from .core.ids import CHAT_ID_RE
+    ids = sorted(set(chat_ids))
+    for c in ids:
+        if not isinstance(c, str) or not CHAT_ID_RE.match(c):
+            raise ValueError("chat_id 형식이 아닌 값이 있습니다")
+    if len(ids) > CURRENT_SAMPLE_MAX:
+        raise ValueError(f"현재 표본이 {CURRENT_SAMPLE_MAX}건을 넘습니다")
+    return {"chat_ids_sha256": sp.ids_sha256(ids), "count": len(ids), "chat_ids": ids}
+
+
+def _current_sample_problems(cs) -> list[str]:
+    """current_sample 칸의 규칙(스키마 밖): 정렬·중복 없음, count = 길이, 해시 = 목록."""
+    if not isinstance(cs, Mapping):
+        return ["$.current_sample: object 가 아닙니다"]
+    ids = cs.get("chat_ids")
+    if not isinstance(ids, list) or not all(isinstance(c, str) for c in ids):
+        return ["$.current_sample.chat_ids: 문자열 목록이 아닙니다"]
+    p = []
+    if any(ids[i] >= ids[i + 1] for i in range(len(ids) - 1)):
+        p.append("$.current_sample.chat_ids: 정렬되어 있지 않거나 겹칩니다")
+    if cs.get("count") != len(ids):
+        p.append("$.current_sample.count: 목록 길이와 다릅니다")
+    if cs.get("chat_ids_sha256") != sp.ids_sha256(ids):
+        p.append("$.current_sample.chat_ids_sha256: 목록과 맞지 않습니다")
+    return p
+
+
+def lock_current_sample(doc: Mapping) -> list[str] | None:
+    """잠금 문서의 current_sample → chat_id 목록. 칸이 없으면(1차·앞 판 잠금) None. 맞지 않으면 ValueError(사유)."""
+    if not isinstance(doc, Mapping) or doc.get("current_sample") is None:
+        return None
+    p = _current_sample_problems(doc["current_sample"])
+    if p:
+        raise ValueError("; ".join(p))
+    return list(doc["current_sample"]["chat_ids"])
+
+
 def build_lock_doc(*, session_id: str, project_id: str, labeler_id: str, session_kind: str, locked_at: str,
                    locked_on_machine4: str, app_version: str, guide: Mapping, relabel_plan_id: str | None,
                    files: Sequence[Mapping], summary: LockSummary,
                    sample_manifests: Sequence[tuple[str, str]] = (),
-                   sample_verify: Sequence[Mapping] = ()) -> dict:
-    """잠금 파일 내용(순수). sample_manifests = [(sample_set_id, sha256)]. 키 순서는 사람이 읽기 쉬운 순서."""
+                   sample_verify: Sequence[Mapping] = (),
+                   current_sample: Iterable[str] | None = None) -> dict:
+    """잠금 파일 내용(순수). sample_manifests = [(sample_set_id, sha256)]. 키 순서는 사람이 읽기 쉬운 순서.
+
+    current_sample: 재라벨 세션의 자기 표본 chat_id 모음(14 4-2 의 5번). 주면 current_sample 칸(current_sample_doc)을
+    더한다. 재라벨이 아닌 세션 종류에 주면 ValueError(1차의 표본은 samples/ 매니페스트가 맡는다). None 이면 칸이 없다.
+    """
+    doc = _lock_doc_base(session_id=session_id, project_id=project_id, labeler_id=labeler_id,
+                         session_kind=session_kind, locked_at=locked_at, locked_on_machine4=locked_on_machine4,
+                         app_version=app_version, guide=guide, relabel_plan_id=relabel_plan_id, files=files,
+                         summary=summary, sample_manifests=sample_manifests, sample_verify=sample_verify)
+    if current_sample is not None:
+        if session_kind not in CURRENT_SAMPLE_KINDS:
+            raise ValueError("현재 표본 목록은 재라벨 세션 잠금에만 넣습니다")
+        doc["current_sample"] = current_sample_doc(current_sample)
+    return doc
+
+
+def _lock_doc_base(*, session_id: str, project_id: str, labeler_id: str, session_kind: str, locked_at: str,
+                   locked_on_machine4: str, app_version: str, guide: Mapping, relabel_plan_id: str | None,
+                   files: Sequence[Mapping], summary: LockSummary,
+                   sample_manifests: Sequence[tuple[str, str]],
+                   sample_verify: Sequence[Mapping]) -> dict:
     return {
         "schema": LOCK_SCHEMA,
         "schema_version": LOCK_SCHEMA_VERSION,
@@ -381,6 +451,10 @@ def check_lock_doc(doc, schema=None) -> list[str]:
         fm = SESSION_FILE_RE.match(f["name"])
         if fm.group(1) != sid or fm.group(2) != f["machine4"]:
             problems.append(f"$.files[{i}]: 이 세션의 기록 파일 이름이 아닙니다")
+    if "current_sample" in doc:
+        if doc["session_kind"] not in CURRENT_SAMPLE_KINDS:
+            problems.append("$.current_sample: 재라벨 세션 잠금에만 있습니다")
+        problems += _current_sample_problems(doc["current_sample"])
     return problems
 
 

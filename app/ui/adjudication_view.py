@@ -1,13 +1,24 @@
-"""조정 화면 (docs/design/03-data-model.md 6-12·12-1, 06 5장·7-1, 08 D-12 3·4·7).
+"""조정 화면 (docs/design/03-data-model.md 6-11·6-12·12-1, 06 3장·5장·7-1, 08 D-12 3·4·7, D-13 5).
 
 조정(adjudication) 세션에서만 연다. 그 세션은 잠긴 세션을 모두 읽을 수 있다(03 12-1 '잠긴 세션만 읽기').
 - 위: 조정자 = 라벨러 표시(D-12 3), 비교할 잠긴 세션 목록(체크, 둘 이상), [불일치 불러오기].
-- 가운데 왼쪽: 불일치 목록(구간·표본, 시각 순). 목록 줄에는 갈래·시각·두 값과 조정 여부만 보인다.
-- 가운데 오른쪽: 고른 건의 두(이상) 판정을 **나란히** — 판정·확신도·근거 한 줄(D-12 4). 근거는 이 화면에만 보이고
-  보고서·로그에 쓰지 않는다. 아래에서 결정(한쪽을 최종값 / 새 값(구간만) / 평가에서 제외 / 진짜 모호함으로 남김),
-  원인(cause, 필수), pattern_tag, 메모를 적고 [조정 저장] → store.append_label(kind=adjudication).
-  이미 조정한 건을 다시 저장하면 그 조정 기록의 새 판이 된다(supersedes).
-- 아래: 기준서 개정 후보(같은 pattern_tag 3건 이상, 06 5장)와 재라벨 계획 취소(사유 필수, D-12 7).
+- 가운데: 불일치 목록(구간·표본, 시각 순)과 고른 건. 목록 줄에는 갈래·시각·두 값과 조정 여부만 보인다.
+  고른 건의 두(이상) 판정을 **나란히** — 판정·확신도·근거 한 줄(D-12 4). 근거는 이 화면에만 보이고 보고서·로그에 쓰지
+  않는다. 아래에서 결정(한쪽을 최종값 / 새 값(구간만) / 평가에서 제외 / 진짜 모호함으로 남김), 원인(cause, 필수),
+  pattern_tag, 메모를 적고 [조정 저장] → store.append_label(kind=adjudication). 이미 조정한 건을 다시 저장하면 그 조정
+  기록의 새 판이 된다(supersedes).
+- 아래: 기준서 개정 후보(같은 pattern_tag 3건 이상, 06 5장)와 조정 세션 도구 두 개.
+  · [출처 판정 대상 만들기] (D-13 5): 잠긴 1차 세션들의 표본 매니페스트 chat_id 로 origin/OT-*.json(basis =
+    sample_items)을 만든다. 대상 dict 는 app.core.origin.build_sample_targets 가 만들고, 파일 쓰기는 생성자에 받은
+    write_origin_targets 콜백(통합이 store 경유로 연결)이 한다. 같은 chat_id 목록의 대상 파일이 이미 있으면 만들지 않는다.
+  · 두 번째 사람 재라벨 계획 (14 4-2 의 9): 잠긴 1차 세션과 라벨러 ID 를 골라 relabel_second 계획을 만든다
+    (app.relabel.create_second_plan). 같은 사람 재라벨이 남은 동안 1차를 다시 열 수 없어도 여기서 만들 수 있다.
+  재라벨 계획 취소는 메뉴 '세션 → 재라벨 계획 취소…'(app/ui/plan_cancel_dialog.py) 하나로 한다 — 1366x768 에서
+  이 화면 아래 칸이 오른쪽 밖으로 나가던 문제(14 4-2 의 1).
+
+좁은 칸(1366x768 의 오른쪽 칸 471px·731px)에서 가로로 잘리지 않게: 목록과 고른 건은 폭이 좁으면 위아래로 놓고
+(NARROW_PX 미만), 고른 건은 세로 스크롤 칸에 넣는다. '새 값' 은 두 줄(바탕·분류 / 시작·끝), 원인·유형 태그·메모는 한 줄에
+하나씩. 고르기 칸은 글자 길이로 넓어지지 않게 한다(_shrinkable).
 
 계산은 app.core.adjudicate(불일치 목록·본문·집계)와 app.core.agreement(짝짓기)가 한다. 이 파일은 화면만 맡는다.
 로그에는 숫자·ID 만 남긴다(채팅 본문·근거·닉네임 없음).
@@ -16,16 +27,19 @@ from __future__ import annotations
 
 import itertools
 import logging
-from typing import Callable, Mapping
+import os
+from datetime import datetime
+from typing import Callable, Iterable, Mapping
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QDialog, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QSplitter,
+from PySide6.QtWidgets import (QComboBox, QCompleter, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QPushButton, QScrollArea, QSpinBox, QSplitter,
                                QVBoxLayout, QWidget)
 
 from .. import relabel as relabel_io
 from ..core import adjudicate as adj
 from ..core import agreement as ag
+from ..core import origin as og
 from ..core import visibility as vis
 from ..core.timecode import fmt_display
 from ..i18n import tr
@@ -39,6 +53,8 @@ _CONF_KO = {"certain": "확실함", "probably": "아마도", "undeterminable": "
 # 결정 고르기 칸의 값(문자열): 'pick:<session_id>' · 'new' · 'exclude_from_eval' · 'keep_as_ambiguous'
 _NEW = "new"
 _PICK = "pick"
+# 이 폭보다 좁으면 목록과 고른 건을 위아래로 놓는다(1366x768 의 오른쪽 칸 471·731px 는 위아래)
+NARROW_PX = 900
 
 
 def _split_key(data) -> tuple[str | None, str | None]:
@@ -47,12 +63,21 @@ def _split_key(data) -> tuple[str | None, str | None]:
     if data.startswith(_PICK + ":"):
         return _PICK, data[len(_PICK) + 1:]
     return data, None
+
+
 # 비교 계산에서 신뢰구간은 쓰지 않는다(불일치 목록만 필요) — 부트스트랩을 끈다
 _FAST_SETTINGS = {"agreement": {"bootstrap_n": 0}}
 
 
 def _t(ms) -> str:
     return fmt_display(ms) if isinstance(ms, int) and not isinstance(ms, bool) else "—"
+
+
+def _shrinkable(box: QComboBox, chars: int = 10) -> QComboBox:
+    """고르기 칸이 가장 긴 항목 글자 길이로 넓어지지 않게 한다(좁은 칸에서 오른쪽 밖으로 나가지 않게)."""
+    box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    box.setMinimumContentsLength(chars)
+    return box
 
 
 def value_ko(case: adj.Case, v: str | None) -> str:
@@ -110,14 +135,32 @@ class AdjudicationView(QWidget):
     """조정 화면. store: 조정 세션의 ProjectStore(또는 같은 메서드를 가진 것).
 
     chat_info(chat_id) → (t_ms 또는 None, 화면에 보일 채팅 한 줄 또는 None). 없으면 chat_id 만 보인다.
+    write_origin_targets(대상 dict) → 쓴 경로. 출처 판정 대상 파일을 쓰는 콜백(통합이 store 경유로 연결, 불변 — 이미 있으면
+      FileExistsError). 없으면 [출처 판정 대상 만들기] 가 꺼진다.
+    list_origin_targets() → 이미 있는 대상(app.core.origin.OriginTargets 목록). 없으면 origin/ 을 origin_view.list_targets
+      로 읽는다(조정 세션은 origin/ 을 읽을 수 있다, 03 12-1).
+    coverage() → 영상이 덮는 VOD 범위 [(a, z)] 또는 None. relabel_second 계획의 done_ranges·블록 범위를 자른다.
+    create_second_plan(원 세션 ID, 라벨러 ID, *, coverage, app_version, now, rand4) → 계획 dict. relabel_second 계획을
+      만드는 콜백(통합이 store.create_second_plan 으로 연결). 없으면 이 화면이 relabel.create_second_plan 을 바로 부른다.
+    now() → 지금(시간대 있는 datetime). 시험이 주입한다. 없으면 PC 시각.
     """
 
     def __init__(self, parent=None, *, store, app_version: str = "",
-                 chat_info: Callable[[str], tuple] | None = None):
+                 chat_info: Callable[[str], tuple] | None = None,
+                 write_origin_targets: Callable[[dict], str] | None = None,
+                 list_origin_targets: Callable[[], Iterable[og.OriginTargets]] | None = None,
+                 coverage: Callable[[], list | None] | None = None,
+                 create_second_plan: Callable[..., dict] | None = None,
+                 now: Callable[[], datetime] | None = None):
         super().__init__(parent)
         self.store = store
         self.app_version = app_version
         self.chat_info = chat_info
+        self.create_second_plan_cb = create_second_plan
+        self.write_origin_targets = write_origin_targets
+        self.list_origin_targets = list_origin_targets
+        self.coverage = coverage
+        self._now = now
         self.me = store.session.labeler_id
         self.cases: list[adj.Case] = []
         self.states: dict[str, adj.CaseState] = {}
@@ -147,58 +190,66 @@ class AdjudicationView(QWidget):
         self.summary_label.setWordWrap(True)
         lay.addWidget(self.summary_label)
 
-        split = QSplitter(Qt.Horizontal)
+        self.split = QSplitter(Qt.Vertical)
+        self.split.setChildrenCollapsible(False)
         self.case_list = QListWidget()
+        self.case_list.setWordWrap(True)
+        self.case_list.setMinimumHeight(80)
         self.case_list.currentRowChanged.connect(self._on_row)
-        split.addWidget(self.case_list)
+        self.split.addWidget(self.case_list)
         right = QWidget()
         rl = QVBoxLayout(right)
+        rl.setContentsMargins(4, 4, 4, 4)
         self.case_title = QLabel("")
         self.case_title.setWordWrap(True)
         rl.addWidget(self.case_title)
         self.side_grid = QGridLayout()
         rl.addLayout(self.side_grid)
         form = QGridLayout()
+        form.setColumnStretch(1, 1)
         form.addWidget(QLabel(tr("결정")), 0, 0)
-        self.decision_box = QComboBox()
+        self.decision_box = _shrinkable(QComboBox(), 14)
         self.decision_box.currentIndexChanged.connect(lambda _i: self._refresh_new_value())
-        form.addWidget(self.decision_box, 0, 1, 1, 3)
+        form.addWidget(self.decision_box, 0, 1)
+        # 새 값(구간만): 두 줄 — 바탕·분류 / 시작·끝 (14 4-2 의 1)
         self.new_row = QWidget()
-        nl = QHBoxLayout(self.new_row)
-        nl.setContentsMargins(0, 0, 0, 0)
-        nl.addWidget(QLabel(tr("새 값 바탕")))
-        self.new_base = QComboBox()
-        nl.addWidget(self.new_base)
-        nl.addWidget(QLabel(tr("분류")))
-        self.new_cat = QComboBox()
+        ng = QGridLayout(self.new_row)
+        ng.setContentsMargins(0, 0, 0, 0)
+        ng.addWidget(QLabel(tr("새 값 바탕")), 0, 0)
+        self.new_base = _shrinkable(QComboBox(), 6)
+        ng.addWidget(self.new_base, 0, 1)
+        ng.addWidget(QLabel(tr("분류")), 0, 2)
+        self.new_cat = _shrinkable(QComboBox(), 4)
         for c in ag.CATEGORIES:
             self.new_cat.addItem(tr(_CAT_KO[c]), c)
-        nl.addWidget(self.new_cat)
-        nl.addWidget(QLabel(tr("시작(초)")))
+        ng.addWidget(self.new_cat, 0, 3)
+        ng.addWidget(QLabel(tr("시작(초)")), 1, 0)
         self.new_start = QSpinBox()
         self.new_start.setRange(0, 24 * 3600)
-        nl.addWidget(self.new_start)
-        nl.addWidget(QLabel(tr("끝(초)")))
+        ng.addWidget(self.new_start, 1, 1)
+        ng.addWidget(QLabel(tr("끝(초)")), 1, 2)
         self.new_end = QSpinBox()
         self.new_end.setRange(0, 24 * 3600)
-        nl.addWidget(self.new_end)
-        form.addWidget(self.new_row, 1, 0, 1, 4)
+        ng.addWidget(self.new_end, 1, 3)
+        ng.setColumnStretch(1, 1)
+        ng.setColumnStretch(3, 1)
+        form.addWidget(self.new_row, 1, 0, 1, 2)
         form.addWidget(QLabel(tr("원인")), 2, 0)
-        self.cause_box = QComboBox()
+        self.cause_box = _shrinkable(QComboBox(), 10)
         self.cause_box.addItem(tr("(고르세요)"), None)
         for c in adj.CAUSES:
             self.cause_box.addItem(tr(adj.CAUSE_KO[c]), c)
         form.addWidget(self.cause_box, 2, 1)
-        form.addWidget(QLabel(tr("유형 태그")), 2, 2)
+        form.addWidget(QLabel(tr("유형 태그")), 3, 0)
         self.tag_edit = QLineEdit()
         self.tag_edit.setMaxLength(adj.PATTERN_TAG_MAX)
         self.tag_edit.setPlaceholderText(tr("같은 유형끼리 같은 태그 (선택)"))
-        form.addWidget(self.tag_edit, 2, 3)
-        form.addWidget(QLabel(tr("메모")), 3, 0)
+        form.addWidget(self.tag_edit, 3, 1)
+        form.addWidget(QLabel(tr("메모")), 4, 0)
         self.note_edit = QLineEdit()
         self.note_edit.setMaxLength(adj.NOTE_MAX)
         self.note_edit.setPlaceholderText(tr("조정 이유 (선택, 채팅 내용·닉네임은 적지 않기)"))
-        form.addWidget(self.note_edit, 3, 1, 1, 3)
+        form.addWidget(self.note_edit, 4, 1)
         rl.addLayout(form)
         row = QHBoxLayout()
         self.msg = QLabel("")
@@ -209,44 +260,69 @@ class AdjudicationView(QWidget):
         row.addWidget(self.btn_save)
         rl.addLayout(row)
         rl.addStretch(1)
-        split.addWidget(right)
-        split.setStretchFactor(0, 2)
-        split.setStretchFactor(1, 3)
-        lay.addWidget(split, 1)
+        self.detail = QScrollArea()
+        self.detail.setWidgetResizable(True)
+        self.detail.setFrameShape(QFrame.NoFrame)
+        self.detail.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.detail.setWidget(right)
+        self.split.addWidget(self.detail)
+        self.split.setStretchFactor(0, 2)
+        self.split.setStretchFactor(1, 3)
+        lay.addWidget(self.split, 1)
 
         self.revision_label = QLabel("")
         self.revision_label.setWordWrap(True)
         lay.addWidget(self.revision_label)
-        plan = QHBoxLayout()
-        plan.addWidget(QLabel(tr("재라벨 계획 취소")))
-        self.plan_box = QComboBox()
-        plan.addWidget(self.plan_box, 1)
-        self.plan_reason = QLineEdit()
-        self.plan_reason.setMaxLength(relabel_io.REASON_MAX)
-        self.plan_reason.setPlaceholderText(tr("취소 사유 (필수)"))
-        plan.addWidget(self.plan_reason, 2)
-        self.plan_confirm = QCheckBox(tr("되돌릴 수 없음"))
-        plan.addWidget(self.plan_confirm)
-        self.btn_cancel_plan = QPushButton(tr("계획 취소"))
-        self.btn_cancel_plan.clicked.connect(lambda: self.cancel_selected_plan())
-        plan.addWidget(self.btn_cancel_plan)
-        lay.addLayout(plan)
-        self.plan_msg = QLabel("")
-        self.plan_msg.setWordWrap(True)
-        lay.addWidget(self.plan_msg)
+
+        # 조정 세션 도구: 출처 판정 대상 만들기(D-13 5) · 두 번째 사람 재라벨 계획(14 4-2 의 9)
+        tools = QGridLayout()
+        tools.setColumnStretch(0, 1)
+        self.btn_origin_targets = QPushButton(tr("출처 판정 대상 만들기"))
+        self.btn_origin_targets.setToolTip(tr("잠긴 1차 세션들의 표본 채팅으로 출처 판정 대상 파일(origin\\OT-…)을 만듭니다"))
+        self.btn_origin_targets.clicked.connect(lambda: self.make_origin_targets())
+        tools.addWidget(self.btn_origin_targets, 0, 0, 1, 3, Qt.AlignLeft)
+        self.second_title = QLabel(tr("두 번째 사람 재라벨 계획 (잠긴 1차 · 라벨러 ID)"))
+        self.second_title.setWordWrap(True)
+        tools.addWidget(self.second_title, 1, 0, 1, 3)
+        self.second_src = _shrinkable(QComboBox(), 12)
+        tools.addWidget(self.second_src, 2, 0)
+        self.second_labeler = QLineEdit()
+        self.second_labeler.setMaxLength(8)
+        self.second_labeler.setPlaceholderText(tr("예: L02"))
+        self.second_labeler.setMaximumWidth(90)
+        tools.addWidget(self.second_labeler, 2, 1)
+        self.btn_second_plan = QPushButton(tr("계획 만들기"))
+        self.btn_second_plan.clicked.connect(lambda: self.make_second_plan())
+        tools.addWidget(self.btn_second_plan, 2, 2)
+        lay.addLayout(tools)
+        self.tool_msg = QLabel("")
+        self.tool_msg.setWordWrap(True)
+        lay.addWidget(self.tool_msg)
         self._set_editable(False)
+
+    def resizeEvent(self, ev) -> None:          # noqa: N802 — Qt 이름
+        super().resizeEvent(ev)
+        self._apply_orientation(self.width())
+
+    def _apply_orientation(self, width: int) -> None:
+        want = Qt.Horizontal if width >= NARROW_PX else Qt.Vertical
+        if self.split.orientation() != want:
+            self.split.setOrientation(want)
 
     # ------------------------------------------------------------------ 세션 고르기·불러오기
     def _writable(self) -> bool:
         return not getattr(self.store, "read_only", False)
 
-    def refresh_sessions(self) -> None:
-        self.session_list.clear()
+    def _locked_sessions(self) -> list[str]:
         try:
-            sids = [s for s in self.store.readable_locked_sessions()
+            return [s for s in self.store.readable_locked_sessions()
                     if vis.session_kind_of_id(s) in (vis.PRIMARY, vis.RELABEL_SAME, vis.RELABEL_SECOND)]
         except OSError:
-            sids = []
+            return []
+
+    def refresh_sessions(self) -> None:
+        self.session_list.clear()
+        sids = self._locked_sessions()
         for s in sids:
             it = QListWidgetItem(s)
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
@@ -344,7 +420,8 @@ class AdjudicationView(QWidget):
         """나란히 보일 칸(세션마다): 세션·판정·확신도·근거 한 줄·범위. 화면 전용(파일에 쓰지 않는다)."""
         out = []
         for s in case.sides:
-            rng = f"{_t(s.start_ms)}~{_t(s.end_ms)}" if case.target_kind == adj.TARGET_SEGMENT else ""
+            # ' ~ ' 앞뒤 빈칸: 좁은 칸에서 줄을 바꿀 수 있게(한 낱말이면 칸 폭이 그만큼 넓어진다)
+            rng = f"{_t(s.start_ms)} ~ {_t(s.end_ms)}" if case.target_kind == adj.TARGET_SEGMENT else ""
             out.append({"session_id": s.session_id, "value": value_ko(case, s.value),
                         "confidence": tr(_CONF_KO.get(s.confidence, s.confidence or "—")),
                         "rationale": s.rationale or "—", "range": rng})
@@ -355,7 +432,7 @@ class AdjudicationView(QWidget):
         self.msg.setText("")
         if row is None:
             self.current = None
-            self.case_title.setText(tr("왼쪽에서 불일치를 고르세요."))
+            self.case_title.setText(tr("불일치 목록에서 한 건을 고르세요."))
             self._set_editable(False)
             return
         c = self.current = self.cases[row]
@@ -365,7 +442,7 @@ class AdjudicationView(QWidget):
             if text:
                 title += "\n" + text
         else:
-            spans = ", ".join(f"{_t(a)}~{_t(b)}" for a, b in c.spans)
+            spans = ", ".join(f"{_t(a)} ~ {_t(b)}" for a, b in c.spans)
             title = tr("활동 구간 · {0}").format(spans)
             if c.delta_ms is not None:
                 title += tr(" · 경계 차이 {0:.1f}초").format(c.delta_ms / 1000)
@@ -377,10 +454,12 @@ class AdjudicationView(QWidget):
             vals = (st["session_id"], st["value"] + (f"  ({st['range']})" if st["range"] else ""),
                     st["confidence"], st["rationale"])
             for j, v in enumerate(vals):
-                lab = QLabel(v)
+                # 세션 ID 는 '-' 뒤에서 줄을 바꿀 수 있게(보이는 글자에만 폭 없는 빈칸) — 세 세션이 471px 칸에 들어가게
+                lab = QLabel(v.replace("-", "-​") if j == 0 else v)
                 lab.setWordWrap(True)
                 lab.setTextFormat(Qt.PlainText)          # 근거 글이 HTML 로 해석되지 않게
                 self.side_grid.addWidget(lab, j, i)
+            self.side_grid.setColumnStretch(i, 1)
         self._fill_decisions(c)
         self._load_existing(c)
         self._set_editable(self._writable())
@@ -499,7 +578,7 @@ class AdjudicationView(QWidget):
         self.msg.setText(tr("저장했습니다."))
         return rec
 
-    # ------------------------------------------------------------------ 아래: 개정 후보·계획 취소
+    # ------------------------------------------------------------------ 아래: 개정 후보·도구
     def _refresh_bottom(self, own: list[dict] | None = None) -> None:
         try:
             own = own if own is not None else self._own_adjudications()
@@ -515,57 +594,129 @@ class AdjudicationView(QWidget):
         comp.setCaseSensitivity(Qt.CaseInsensitive)
         self.tag_edit.setCompleter(comp)
 
-    def refresh_plans(self) -> None:
-        self.plan_box.clear()
-        try:
-            plans = relabel_io.list_plans(self.store.root, include_cancelled=True)
-        except OSError:
-            plans = []
-        for p in plans:
-            if p.status == relabel_io.STATUS_CANCELLED:
-                continue
-            who = f"{p.session_kind or '?'} · {p.labeler_id or '?'} · {p.source_session_id or '?'}"
-            if p.problem:
-                who = tr("읽지 못함")
-            self.plan_box.addItem(f"{p.plan_id} ({who})", p.plan_id)
-        on = self.plan_box.count() > 0 and self._writable()
-        for w in (self.plan_box, self.plan_reason, self.plan_confirm, self.btn_cancel_plan):
-            w.setEnabled(on)
+    def _locked_primaries(self) -> list[str]:
+        return [s for s in self._locked_sessions() if vis.session_kind_of_id(s) == vis.PRIMARY]
 
-    def cancel_selected_plan(self) -> dict | None:
-        pid = self.plan_box.currentData()
-        if pid is None:
+    def refresh_plans(self) -> None:
+        """도구 칸을 지금 상태로 다시 채운다(계획을 만들거나 취소한 뒤 통합이 부른다, 옛 이름 그대로).
+
+        재라벨 계획 취소는 이 화면에서 하지 않는다(메뉴 대화상자만, 14 4-2 의 1)."""
+        prims = self._locked_primaries()
+        cur = self.second_src.currentData()
+        self.second_src.clear()
+        for s in prims:
+            self.second_src.addItem(s, s)
+        if cur is not None:
+            self.second_src.setCurrentIndex(max(self.second_src.findData(cur), 0))
+        w = self._writable()
+        for x in (self.second_src, self.second_labeler, self.btn_second_plan):
+            x.setEnabled(w and bool(prims))
+        self.btn_origin_targets.setEnabled(w and bool(prims) and self.write_origin_targets is not None)
+        if not w:
+            self.btn_origin_targets.setToolTip(tr("읽기 전용 세션입니다"))
+        elif self.write_origin_targets is None:
+            self.btn_origin_targets.setToolTip(tr("대상 파일을 쓸 곳이 연결되지 않았습니다"))
+        elif not prims:
+            self.btn_origin_targets.setToolTip(tr("잠긴 1차 세션이 없습니다"))
+
+    def _now_iso(self) -> str:
+        t = self._now() if self._now else datetime.now().astimezone()
+        if t.tzinfo is None:
+            t = t.astimezone()
+        return t.isoformat(timespec="seconds")
+
+    def _existing_targets(self) -> list[og.OriginTargets]:
+        if self.list_origin_targets is not None:
+            return list(self.list_origin_targets())
+        from .origin_view import list_targets
+        return list_targets(os.path.join(self.store.root, "origin"))
+
+    def make_origin_targets(self) -> dict | None:
+        """잠긴 1차 세션들의 표본 매니페스트로 출처 판정 대상 파일을 만든다(D-13 5). 쓴 대상 dict, 막히면 None(tool_msg)."""
+        if not self._writable():
+            self.tool_msg.setText(tr("읽기 전용이라 만들지 않았습니다."))
             return None
-        if not self.plan_confirm.isChecked():
-            self.plan_msg.setText(tr("'되돌릴 수 없음' 을 확인하세요. 취소는 되돌리지 않습니다."))
+        if self.write_origin_targets is None:
+            self.tool_msg.setText(tr("대상 파일을 쓸 곳이 연결되지 않았습니다."))
             return None
+        prims = self._locked_primaries()
+        if not prims:
+            self.tool_msg.setText(tr("잠긴 1차 세션이 없어 대상을 만들 수 없습니다."))
+            return None
+        kind = self.store.session.session_kind
         try:
-            doc = relabel_io.cancel_plan(self.store.root, pid, reason=self.plan_reason.text(),
-                                         cancelled_by=self.me, cancelled_machine4=self.store.session.machine4,
-                                         app_version=self.app_version,
-                                         canceller_kind=self.store.session.session_kind)
-        except (OSError, ValueError, PermissionError) as e:
-            self.plan_msg.setText(str(e))
-            LOG.info("계획 취소 거부: %s", type(e).__name__)
+            manifests: list[dict] = []
+            for sid in prims:
+                manifests += [m for m, _sha in relabel_io.load_source_manifests(self.store.root, sid,
+                                                                                 creator_kind=kind)]
+            obj, pick = og.build_sample_targets(manifests, created_at=self._now_iso(), created_by=self.me,
+                                                session_ids=prims)
+            same = og.same_target_exists(self._existing_targets(), obj)
+            if same is not None:
+                self.tool_msg.setText(tr("같은 채팅 목록의 대상 파일 {0} 이 이미 있습니다. 새로 만들지 않았습니다.").format(same))
+                return None
+            self.write_origin_targets(obj)
+        except FileExistsError:
+            self.tool_msg.setText(tr("같은 ID 의 대상 파일이 이미 있습니다(대상 파일은 고치지 않습니다)."))
             return None
-        LOG.info("재라벨 계획 취소: %s", pid)
-        self.plan_reason.setText("")
-        self.plan_confirm.setChecked(False)
-        self.plan_msg.setText(tr("계획 {0} 를 취소했습니다. 계획 파일은 그대로 두고 취소 기록을 남겼습니다.").format(pid)
-                              + (tr(" (취소한 사람 = 라벨러)") if doc.get("canceller_is_labeler") else ""))
+        except (OSError, ValueError, RuntimeError) as e:   # OriginError·RelabelBlindError·store 의 읽기 전용 거부 포함
+            self.tool_msg.setText(tr("대상을 만들지 못했습니다: {0}").format(str(e)[:300]))
+            LOG.info("출처 판정 대상 만들기 거부: %s", type(e).__name__)
+            return None
+        LOG.info("출처 판정 대상 %s: 채팅 %d건, 매니페스트 %d개, 세션 %d개", obj["target_id"], len(pick.chat_ids),
+                 len(pick.manifests), len(pick.sessions))
+        self.tool_msg.setText(tr("출처 판정 대상 {0} 를 만들었습니다 (채팅 {1}건 · 1차 표본 {2}개 · 세션 {3}개).").format(
+            obj["target_id"], len(pick.chat_ids), len(pick.manifests), len(pick.sessions)))
+        return obj
+
+    def make_second_plan(self, source_session_id: str | None = None, labeler_id: str | None = None, *,
+                         now: datetime | None = None, rand4: str | None = None) -> dict | None:
+        """고른 잠긴 1차 세션과 라벨러 ID 로 relabel_second 계획을 만든다(14 4-2 의 9). 쓴 계획, 막히면 None(tool_msg)."""
+        sid = source_session_id or self.second_src.currentData()
+        lab = (labeler_id if labeler_id is not None else self.second_labeler.text()).strip().upper()
+        if not self._writable():
+            self.tool_msg.setText(tr("읽기 전용이라 만들지 않았습니다."))
+            return None
+        if not sid:
+            self.tool_msg.setText(tr("잠긴 1차 세션을 고르세요."))
+            return None
+        if not lab:
+            self.tool_msg.setText(tr("두 번째 사람의 라벨러 ID 를 적으세요."))
+            return None
+        s = self.store.session
+        try:
+            cov = self.coverage() if self.coverage else None
+            when = now or (self._now() if self._now else None)
+            if self.create_second_plan_cb is not None:
+                plan = self.create_second_plan_cb(sid, lab, coverage=cov, app_version=self.app_version or None,
+                                                  now=when, rand4=rand4)
+            else:
+                view, _msgs = self.store.locked_session_view(sid)
+                plan = relabel_io.create_second_plan(
+                    self.store.root, self.store.project.data, source_view=view, source_session_id=sid,
+                    labeler_id=lab, created_by=s.labeler_id, created_machine4=s.machine4,
+                    app_version=self.app_version, creator_kind=s.session_kind, coverage=cov, now=when, rand4=rand4)
+        except (OSError, ValueError, RuntimeError) as e:   # RelabelBlindError(PermissionError)·RelabelPlanError·store 거부
+            self.tool_msg.setText(tr("계획을 만들지 못했습니다: {0}").format(str(e)[:300]))
+            LOG.info("두 번째 사람 재라벨 계획 거부: %s", type(e).__name__)
+            return None
+        LOG.info("재라벨 계획 %s: relabel_second 블록 %d개", plan["plan_id"], len(plan["selected"]))
+        self.tool_msg.setText(tr("두 번째 사람 재라벨 계획 {0} 를 만들었습니다 (블록 {1}개, 라벨러 {2}).").format(
+            plan["plan_id"], len(plan["selected"]), lab))
+        self.second_labeler.setText("")
         self.refresh_plans()
-        return doc
+        return plan
 
 
 class AdjudicationDialog(QDialog):
     """메뉴에서 여는 창 하나짜리 껍데기."""
 
-    def __init__(self, parent=None, *, store, app_version: str = "", chat_info=None):
+    def __init__(self, parent=None, *, store, app_version: str = "", chat_info=None, **kw):
         super().__init__(parent)
         self.setWindowTitle(tr("조정"))
         self.resize(1100, 700)
         lay = QVBoxLayout(self)
-        self.view = AdjudicationView(self, store=store, app_version=app_version, chat_info=chat_info)
+        self.view = AdjudicationView(self, store=store, app_version=app_version, chat_info=chat_info, **kw)
         lay.addWidget(self.view)
         row = QHBoxLayout()
         row.addStretch(1)

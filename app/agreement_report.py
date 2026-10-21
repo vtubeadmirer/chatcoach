@@ -29,6 +29,15 @@
 - 구간을 고쳐 표본에서 빠진 판정은 일치도에서 빼고 수를 경고·보고서에 1줄 적는다(D-12 2).
 - 보고서 머리에 '조정자 = 라벨러' (D-12 3): adjudicator_is_labeler 플래그. 주지 않으면 created_by 가 두 세션의 라벨러
   가운데 하나일 때 참으로 본다(그 근거를 header.adjudicator_source 에 적는다).
+
+여섯째 묶음(08 D-13 3·5, 14 4-2 의 4·5·6)
+- 놓친 후보 일치도는 재라벨 둘 사이에서만 낸다. 1차가 낀 보고서의 놓친 후보 절은 '1차는 ④ 없음(D-12 5)' 1줄.
+- 재라벨 세션 잠금의 `current_sample`(자기 표본 chat_id 목록·chat_ids_sha256, locking.current_sample_doc)을 읽어
+  D-12 2 의 '현재 표본' 으로 쓴다. 해시가 목록과 다르면 LockMismatchError. 없으면(앞 판 잠금) 구간표 근사 + 경고 1줄.
+- 채팅 시각(chat_times)은 늘 넘긴다: build_report(chat_times=조회 함수) — 함수는 chat_id 모음을 받아 {chat_id: t_ms} 를
+  돌려준다(채팅 색인 캐시 app/chat_index.py 가 맡는다). 주지 않으면 messages.jsonl 을 한 번 훑는다(scan_chat_times).
+  보고서 시각은 채팅 시각·종류만 보며 라벨 내용과 섞지 않는다(블라인드).
+- 출처 판정 세션끼리의 보고서 머리에 origin/ 대상 파일의 target_id · chat_ids_sha256 · 건수 · basis (D-13 5).
 """
 from __future__ import annotations
 
@@ -40,10 +49,11 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Collection, Iterable, Mapping
 
 from . import paths
 from .core import agreement as ag
+from .core import origin as og
 from .core import resolve as rs
 from .core import sampling as smp
 from .core import visibility as vis
@@ -68,6 +78,7 @@ __all__ = [
     "LockedSession", "ReportResult", "load_locked_session", "build_report", "write_report", "make_report",
     "render_markdown", "check_out_root", "default_out_root", "reader_block_reason", "pending_relabel_plans",
     "comparison_gate", "COMPARABLE_KINDS", "ORIGIN_KINDS", "FORMAT_REV",
+    "scan_chat_times", "origin_target_summaries", "ChatTimesLookup",
 ]
 
 
@@ -367,6 +378,117 @@ def _sample_scope(project_root: str) -> tuple[list[str], dict[str, int], list[di
     return sorted(ids), times, used
 
 
+_CHAT_ID_BYTES_RE = re.compile(rb'"chat_id"\s*:\s*"([^"\\]{1,64})"')
+ChatTimesLookup = Callable[[Collection[str]], Mapping[str, int]]
+
+
+def scan_chat_times(messages_path: str, chat_ids: Collection[str]) -> dict[str, int]:
+    """messages.jsonl 을 한 번 훑어 chat_ids 의 t_ms 를 찾는다(채팅 색인 캐시가 없을 때의 대체 길, 14 4-2 의 6번).
+
+    줄마다 chat_id 를 바이트 정규식으로 먼저 보고, 찾는 채팅인 줄만 JSON 으로 읽는다(20만 줄에서도 전체 파싱을 피한다).
+    다 찾으면 멈춘다. 읽지 못한 줄·시각이 정수가 아닌 줄은 건너뛴다. 파일이 없으면 빈 dict. 본문은 돌려주지 않는다.
+    """
+    want = {c for c in chat_ids if isinstance(c, str)}
+    out: dict[str, int] = {}
+    if not want:
+        return out
+    try:
+        f = builtins.open(messages_path, "rb")
+    except OSError:
+        return out
+    with f:
+        for raw in f:
+            m = _CHAT_ID_BYTES_RE.search(raw)
+            if not m:
+                continue
+            try:
+                cid = m.group(1).decode("ascii")
+            except UnicodeDecodeError:
+                continue
+            if cid not in want or cid in out:
+                continue
+            try:
+                obj = json.loads(raw.decode("utf-8-sig"), parse_constant=_reject_constant)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            t = obj.get("t_ms") if isinstance(obj, dict) else None
+            if isinstance(obj, dict) and obj.get("chat_id") == cid and ag._is_int(t) and t >= 0:
+                out[cid] = t
+                if len(out) == len(want):
+                    break
+    return out
+
+
+def _needed_chat_ids(*sides: Mapping) -> set[str]:
+    """보고서가 시각을 알아야 하는 채팅: 두 세션의 반응·놓친 후보·출처 라벨의 chat_id (본문은 보지 않는다)."""
+    out: set[str] = set()
+    for s in sides:
+        for key in ("reactions", "missed", "origins"):
+            for r in s.get(key) or ():
+                c = ag._body(r).get("chat_id")
+                if isinstance(c, str):
+                    out.add(c)
+        for c in s.get("current_sample") or ():
+            out.add(c)
+    return out
+
+
+def _chat_times_for(lookup: ChatTimesLookup | None, messages_path: str, ids: set[str],
+                    fallback: Mapping[str, int] | None) -> tuple[dict[str, int], str, int]:
+    """(chat_id → t_ms, 출처 'lookup'·'messages_scan', 찾지 못한 수). 표본 매니페스트의 t_ms 는 빈자리만 메운다."""
+    if lookup is not None:
+        got = lookup(frozenset(ids)) or {}
+        src = "lookup"
+    else:
+        got = scan_chat_times(messages_path, ids)
+        src = "messages_scan"
+    times = {c: int(t) for c, t in got.items() if isinstance(c, str) and ag._is_int(t) and c in ids}
+    for c, t in (fallback or {}).items():
+        times.setdefault(c, t)
+    return times, src, len(ids - set(times))
+
+
+def _lock_current_sample(ls: LockedSession) -> list[str] | None:
+    """재라벨 잠금의 current_sample → chat_id 목록(검증). 없으면 None. 해시·목록이 맞지 않으면 LockMismatchError."""
+    from . import locking
+    try:
+        return locking.lock_current_sample(ls.lock)
+    except ValueError as e:
+        raise LockMismatchError(f"{ls.session_id}: 잠금의 현재 표본 목록이 맞지 않습니다 ({e})") from None
+
+
+ORIGIN_DIR = "origin"
+ORIGIN_TARGET_MAX_BYTES = 16 << 20
+
+
+def origin_target_summaries(project_root: str) -> tuple[list[dict], int]:
+    """origin/ 의 대상 파일 → ([{target_id, chat_ids_sha256, count, basis}] target_id 순, 읽지 못한 파일 수) (D-13 5).
+    출처 판정 화면처럼 파일 전부를 합쳐 쓰므로 전부 적는다. 채팅 본문은 대상 파일에 없다(chat_id 만)."""
+    d = os.path.join(project_root, ORIGIN_DIR)
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return [], 0
+    out: list[dict] = []
+    bad = 0
+    for n in names:
+        if n.startswith(".") or not n.endswith(".json"):
+            continue
+        try:
+            with builtins.open(os.path.join(d, n), "rb") as f:
+                raw = f.read(ORIGIN_TARGET_MAX_BYTES + 1)
+            t = og.parse_targets(load_json_strict(raw, ORIGIN_TARGET_MAX_BYTES))
+            if n != f"{t.target_id}.json":
+                raise ValueError("이름")
+        except (OSError, ValueError, StrictJsonError, TypeError, KeyError):
+            bad += 1
+            continue
+        out.append({"target_id": t.target_id, "chat_ids_sha256": t.chat_ids_sha256, "count": len(t.items),
+                    "basis": t.basis})
+    out.sort(key=lambda x: x["target_id"])
+    return out, bad
+
+
 def _side(ls: LockedSession, view: rs.EffectiveView, project_data: Mapping, exposure: vis.AnalysisExposure) -> dict:
     exposed = [r for r in view.other_records if r.get("kind") == "view.exposed" and r.get("session_id") == ls.session_id]
     whats = sorted({(r.get("body") or {}).get("what") for r in exposed if isinstance((r.get("body") or {}).get("what"), str)})
@@ -484,8 +606,8 @@ def comparison_gate(project_root: str, project_data: Mapping, session_ids: Itera
     return _comparison_gate(project_root, project_data, session_ids)[0]
 
 
-def _comparison_gate(project_root: str, project_data: Mapping,
-                     session_ids: Iterable[str]) -> tuple[list[str], list[str]]:
+def _comparison_gate(project_root: str, project_data: Mapping, session_ids: Iterable[str],
+                     cancel_check=None) -> tuple[list[str], list[str]]:
     """comparison_gate 본체. (경고 문장 목록, 계획이 취소된 비교 세션 ID 목록)."""
     from . import relabel as relabel_io
     root = os.path.abspath(project_root)
@@ -524,6 +646,8 @@ def _comparison_gate(project_root: str, project_data: Mapping,
         if p.plan_id not in compared_plans and (not p.usable or p.source_session_id not in primaries):
             continue                      # 비교하지 않는 취소·읽지 못한 계획은 보지 않는다 (취소로 막힘을 푼다, D-12 7)
         related.update(locked.get(p.plan_id, ()))
+        if cancel_check is not None:
+            cancel_check()                # 계획 재현 검증 사이에서 멈출 수 있다(보고서 워커, 14 6-1 의 1)
         v = relabel_io.verify_plan_on_disk(root, project_data, p.plan_id, creator_kind=None)
         if not v.ok:
             bad.append(f"계획 {p.plan_id} 재현 검증 실패 {len(v.problems)}건")
@@ -542,12 +666,15 @@ def _comparison_gate(project_root: str, project_data: Mapping,
 def build_report(project_root: str, session_a: str, session_b: str, *, eval_settings: Mapping | None = None,
                  samples_only: bool = False, now: datetime | None = None, app_version: str | None = None,
                  created_by: str | None = None, reader_kind: str | None = None,
-                 adjudicator_is_labeler: bool | None = None) -> ReportResult:
+                 adjudicator_is_labeler: bool | None = None,
+                 chat_times: ChatTimesLookup | None = None, cancel_check=None) -> ReportResult:
     """잠긴 두 세션 → 보고서 dict · Markdown (아직 쓰지 않음). 잠기지 않았으면 NotLockedError(라벨 파일을 열기 전에).
 
     reader_kind: 보고서를 여는 자리의 세션 종류(None = 세션 밖). reader_block_reason 이 막으면 ReportBlindError.
     06 7-1 조건(comparison_gate)이 안 되면 RelabelPendingError·SampleVerifyError — 모두 라벨 파일을 열기 전에.
     adjudicator_is_labeler: '조정자 = 라벨러' 표시(D-12 3). None 이면 created_by 가 두 세션 라벨러 가운데 하나인지로 정한다.
+    chat_times: 채팅 시각 조회 함수 — chat_id 모음(frozenset)을 받아 {chat_id: t_ms}(모르는 것은 빼고)를 돌려준다.
+      채팅 색인 캐시(app/chat_index.py)가 넘긴다. None 이면 messages.jsonl 을 한 번 훑는다(scan_chat_times).
     """
     sa, sb = _check_sid(session_a), _check_sid(session_b)
     if sa == sb:
@@ -567,7 +694,9 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
     if proj.data is None:
         raise ReportError("project.json 을 읽지 못했습니다")
     # 1-2) 06 7-1 비교 조건 — 잠금·계획·표본 매니페스트만 본다(라벨 파일은 아직 열지 않음)
-    gate_warnings, plan_cancelled = _comparison_gate(root, proj.data, (sa, sb))
+    gate_warnings, plan_cancelled = _comparison_gate(root, proj.data, (sa, sb), cancel_check)
+    if cancel_check is not None:
+        cancel_check()
     la = load_locked_session(root, sa)
     lb = load_locked_session(root, sb)
     for ls in (la, lb):
@@ -581,7 +710,7 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
     settings = ag.merge_settings(eval_settings)
     settings_sha = hashlib.sha256(canonical_json(settings)).hexdigest()
     buffer_ms = _buffer_ms(proj.data, ga[0])
-    sample_ids, chat_times, used_manifests = _sample_scope(root) if samples_only else (None, None, [])
+    sample_ids, manifest_times, used_manifests = _sample_scope(root) if samples_only else (None, None, [])
     messages_sha = _file_sha256(proj.paths.messages_jsonl)
     exposure = vis.analysis_exposure(_session_ids_from_names(root))
 
@@ -589,22 +718,37 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
     view_b = rs.resolve(lb.records)
     side_a = _side(la, view_a, proj.data, exposure)
     side_b = _side(lb, view_b, proj.data, exposure)
-    for s in (side_a, side_b):
+    cur_missing: list[str] = []
+    for s, ls in ((side_a, la), (side_b, lb)):
         s["plan_cancelled"] = s["session_id"] in plan_cancelled      # 취소된 계획으로 만든 세션 → 대표값에서 뺌
+        cur = _lock_current_sample(ls)                                # 14 4-2 의 5번: 잠금의 자기 표본 목록
+        if cur is not None:
+            s["current_sample"] = cur
+        elif ls.session_kind in (vis.RELABEL_SAME, vis.RELABEL_SECOND):
+            cur_missing.append(ls.session_id)
+    # 14 4-2 의 6번: 채팅 시각을 늘 넘긴다 (색인 조회 함수, 없으면 messages.jsonl 을 훑음). 시각만 — 라벨 내용 없음
+    need = _needed_chat_ids(side_a, side_b) | set(sample_ids or ())
+    times, times_src, times_missing = _chat_times_for(chat_times, proj.paths.messages_jsonl, need, manifest_times)
+    origin_targets, origin_bad = origin_target_summaries(root) if family == "origin" else ([], 0)
 
     def sess_input(ls: LockedSession, side: Mapping) -> dict:
+        cs = ls.lock.get("current_sample") if isinstance(ls.lock.get("current_sample"), Mapping) else None
         return {"session_id": ls.session_id, "labeler_id": ls.labeler_id, "session_kind": ls.session_kind,
                 "machine4": ls.machine4s, "files": ls.files, "lock_sha256": ls.lock_sha256,
                 "locked_at": ls.lock.get("locked_at"), "relabel_plan_id": ls.meta.get("relabel_plan_id"),
-                "scope": [list(r) for r in side["scope"]] if side["scope"] is not None else "whole"}
+                "scope": [list(r) for r in side["scope"]] if side["scope"] is not None else "whole",
+                "current_sample_sha256": cs.get("chat_ids_sha256") if cs else None}
 
+    data_in = {"project_id": proj.project_id, "messages_sha256": messages_sha,
+               "sample_manifests": used_manifests, "dataset_split": proj.data.get("dataset_split"),
+               "sample_scope": "sample_manifests" if samples_only else "all_effective_reactions"}
+    if family == "origin":
+        data_in["origin_targets"] = origin_targets
     inputs = {
         "sessions": [sess_input(la, side_a), sess_input(lb, side_b)],
         "guide": {"guide_version": ga[0], "thresholds_sha256": ga[1], "boundary_buffer_ms": buffer_ms},
         "eval_settings": {"values": settings, "sha256": settings_sha},
-        "data": {"project_id": proj.project_id, "messages_sha256": messages_sha,
-                 "sample_manifests": used_manifests, "dataset_split": proj.data.get("dataset_split"),
-                 "sample_scope": "sample_manifests" if samples_only else "all_effective_reactions"},
+        "data": data_in,
     }
     inputs_sha = hashlib.sha256(canonical_json(inputs)).hexdigest()
     inputs["bootstrap_seed"] = inputs_sha[:16]
@@ -615,11 +759,21 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
     else:
         adj, adj_src = bool(adjudicator_is_labeler), "flag"
     res = ag.build_agreement(side_a, side_b, settings=settings, buffer_ms=buffer_ms, seed_material=inputs_sha,
-                             sample_chat_ids=sample_ids, chat_times=chat_times,
+                             sample_chat_ids=sample_ids, chat_times=times,
                              adjudicator_is_labeler=None if adj_src == "unknown" else adj)
     when = now or datetime.now().astimezone()
     report_id = f"R-{when.strftime('%Y%m%d')}-{inputs_sha[:4]}"
     warnings = list(gate_warnings)
+    for sid in cur_missing:
+        warnings.append(f"{sid}: 잠금에 현재 표본 목록(current_sample)이 없어 구간표로 다시 봤습니다 — 영상 밖·τ 변화는 "
+                        "보지 않는 근사입니다 (08 D-12 2)")
+    if times_missing:
+        warnings.append(f"채팅 기록에서 시각을 찾지 못한 채팅 {times_missing}건은 라벨의 첫 표시 시각으로 봤습니다")
+    if family == "origin":
+        if not origin_targets:
+            warnings.append("출처 판정 대상 파일(origin/)이 없어 대상 파일 ID 를 적지 못했습니다 (08 D-13 5)")
+        if origin_bad:
+            warnings.append(f"읽지 못한 출처 판정 대상 파일 {origin_bad}개는 머리에 적지 않았습니다")
     for ls in (la, lb):
         if ls.after_lock_lines:
             warnings.append(f"{ls.session_id}: 잠금 뒤 붙은 줄 {ls.after_lock_lines}개를 계산에서 뺐습니다")
@@ -641,6 +795,10 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
     if nt.get("a") or nt.get("b"):
         warnings.append(f"③ 판정을 고쳐 4단계 대상이 아니게 된 놓친 후보: A {nt.get('a', 0)} · B {nt.get('b', 0)}"
                         " — 남겨 두고 일치도에서 뺐습니다 (06 2-9)")
+    nr = res["missed"].get("dropped_no_reaction") or {}
+    if nr.get("a") or nr.get("b"):
+        warnings.append(f"③ 반응을 물러 근거가 없어진 놓친 후보: A {nr.get('a', 0)} · B {nr.get('b', 0)}"
+                        " — 남겨 두고 일치도에서 뺐습니다 (06 2-9)")
     for key, label in (("a", "A"), ("b", "B")):
         p = res["links"]["problems"][key]
         if p["broken"]:
@@ -661,6 +819,10 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
         "header": {**res["header"],
                    "pair_family": family,
                    "adjudicator_source": adj_src,
+                   "chat_times": {"source": times_src, "requested": len(need), "missing": times_missing},
+                   "current_sample_method": {"a": res["samples"]["dropped_from_sample"]["method_a"],
+                                             "b": res["samples"]["dropped_from_sample"]["method_b"]},
+                   **({"origin_targets": origin_targets} if family == "origin" else {}),
                    "sessions": [{"session_id": s["session_id"], "labeler_id": s["labeler_id"],
                                  "session_kind": s["session_kind"], "machine4": ls.machine4s,
                                  "view_exposed": s["view_exposed"], "analysis_exposed": s["analysis_exposed"],
@@ -742,14 +904,21 @@ def write_report(result: ReportResult, out_root: str, project_root: str) -> str:
 def make_report(project_root: str, session_a: str, session_b: str, *, out_root: str | None = None,
                 eval_settings: Mapping | None = None, samples_only: bool = False, now: datetime | None = None,
                 created_by: str | None = None, reader_kind: str | None = None,
-                adjudicator_is_labeler: bool | None = None) -> ReportResult:
-    """build_report + write_report. out_root 가 없으면 default_out_root. 출력 위치는 읽기 전에 먼저 검사한다."""
+                adjudicator_is_labeler: bool | None = None,
+                chat_times: ChatTimesLookup | None = None, cancel_check=None) -> ReportResult:
+    """build_report + write_report. out_root 가 없으면 default_out_root. 출력 위치는 읽기 전에 먼저 검사한다.
+
+    cancel_check(): 워커가 넘기는 취소 확인(취소면 예외). 계획 재현 검증 사이·쓰기 직전에 부른다 — 쓰기 전에 멈추면
+    아무 파일도 남지 않는다."""
     root = os.path.abspath(project_root)
     out = out_root or default_out_root(root)
     check_out_root(out, root)
     res = build_report(root, session_a, session_b, eval_settings=eval_settings, samples_only=samples_only,
                        now=now, created_by=created_by, reader_kind=reader_kind,
-                       adjudicator_is_labeler=adjudicator_is_labeler)
+                       adjudicator_is_labeler=adjudicator_is_labeler, chat_times=chat_times,
+                       cancel_check=cancel_check)
+    if cancel_check is not None:
+        cancel_check()
     write_report(res, out, root)
     return res
 
@@ -820,6 +989,13 @@ def render_markdown(rep: Mapping) -> str:
     if h.get("adjudicator_is_labeler"):
         src = {"flag": "입력 플래그", "inferred_created_by": "만든 사람 = 라벨러"}.get(h.get("adjudicator_source"), "")
         L.append(f"- **조정자 = 라벨러** — 1인 작업이라 라벨러가 조정을 겸한다 (08 D-12 3{', ' + src if src else ''})")
+    if h.get("pair_family") == "origin":
+        ots = h.get("origin_targets") or []
+        if ots:
+            L.append("- 출처 판정 대상 (08 D-13 5): " + " · ".join(
+                f"{t['target_id']} (chat_ids_sha256 {t['chat_ids_sha256']}, {t['count']}건, {t['basis']})" for t in ots))
+        else:
+            L.append("- 출처 판정 대상 (08 D-13 5): 대상 파일 없음")
     L.append("")
     L.append("| 세션 | labeler_id | 종류 | machine4 | 노출 |")
     L.append("|---|---|---|---|---|")
@@ -956,7 +1132,13 @@ def _render_ext(rep: Mapping, L: list[str]) -> None:
         L.append("")
         _table(L, ct["confusion"], _CONT_KO)
     ms = rep.get("missed")
-    if ms:
+    if ms and ms.get("pair_applicable") is False:
+        L.append("## 놓친 채팅 후보 (06 4-6 · 2-9)")
+        L.append("")
+        L.append(f"- {ms.get('pair_note') or ag.MISSED_PRIMARY_NOTE} — 놓친 후보 일치도는 같은 블록의 같은 사람 재라벨 ↔ "
+                 "다른 사람 재라벨 보고서에서 낸다 (08 D-13 3)")
+        L.append("")
+    elif ms:
         j, c, rc = ms["judged"], ms["candidate"], ms["reason_code"]
         L.append("## 놓친 채팅 후보 (06 4-6 · 2-9, 재라벨 블록 안 — 08 D-12 5)")
         L.append("")

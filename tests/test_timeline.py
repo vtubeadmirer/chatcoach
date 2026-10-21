@@ -335,3 +335,167 @@ def test_wheel_zoom_at_mouse_and_scroll(qapp):
     _wheel(w, 500, 0, dx=120)                             # 가로 휠(터치패드) = 스크롤
     assert w.view_range() == (100_000, 200_000)
     assert math.isclose(w.zoom_factor(), 6.0, rel_tol=1e-6)   # 스크롤은 확대 배율을 바꾸지 않는다
+
+
+# ---------------------------------------------------------------------------- 마커 부분 갱신 (14 6-1 의 3번)
+def _cache_image(w):
+    return w._cache.toImage()
+
+
+def _full_rebuild_image(w):
+    """같은 데이터로 정적 트랙을 처음부터 다시 그린 그림 (부분 갱신 결과와 견줄 기준)."""
+    w._data_rev += 1
+    w._ensure_cache()
+    return w._cache.toImage()
+
+
+def test_marker_ops_keep_same_data_as_set_markers(qapp):
+    w = make(qapp)
+    w.set_markers("labels", [(10_000, "reaction"), (20_000, "recheck")])
+    w.add_marker("labels", 15_000, "reaction")
+    w.add_marker("labels", 10_000, "anchor")              # 같은 시각: (시각, 종류) 정렬 순서
+    w.add_marker("labels", 10_000, "unconfirmed")
+    assert w.markers("labels") == sorted([(10_000, "reaction"), (20_000, "recheck"), (15_000, "reaction"),
+                                          (10_000, "anchor"), (10_000, "unconfirmed")])
+    assert w.update_marker("labels", 20_000, "recheck", 25_000, "reaction")
+    assert w.remove_marker("labels", 10_000, "anchor")
+    assert not w.remove_marker("labels", 10_000, "anchor")     # 이미 없음
+    assert not w.remove_marker("없는 트랙", 1, None)
+    assert not w.update_marker("labels", 99_000, None, 1, "reaction")
+    assert w.markers("labels") == [(10_000, "reaction"), (10_000, "unconfirmed"), (15_000, "reaction"),
+                                   (25_000, "reaction")]
+    snap = list(w._snap_points)
+    w._rebuild_snap()                                     # 증분으로 고친 자석 자리 = 처음부터 만든 자리
+    assert w._snap_points == snap and 20_000 not in snap and 25_000 in snap
+    w.remove_marker("labels", 10_000, "reaction")         # 같은 시각에 하나가 남음 → 자석 자리 유지
+    assert 10_000 in w._snap_points
+    w.remove_marker("labels", 10_000)                     # kind=None: 그 시각 아무거나
+    assert 10_000 not in w._snap_points
+
+
+def test_marker_on_segment_boundary_keeps_snap(qapp):
+    w = make(qapp)
+    w.set_segments([seg(0, 20_000), seg(20_000, 600_000, "game")])
+    w.set_markers("labels", [])
+    w.add_marker("labels", 20_000, "reaction")
+    w.remove_marker("labels", 20_000, "reaction")
+    assert 20_000 in w._snap_points                       # 구간 경계라 남는다
+
+
+def test_add_marker_patches_only_its_rect(qapp):
+    w = make(qapp, width=1000)
+    _full_data(w, 600_000)
+    w.grab()
+    builds, patches = w.cache_builds, w.cache_patches
+    w.add_marker("labels", 300_500, "reaction")
+    assert w.cache_patches == patches + 1
+    (rc,) = w.last_dirty_rects
+    tr_rect = dict(w.track_rects())["marks:labels"]
+    assert rc.width() <= 20 and rc.top() == int(tr_rect.top()) and rc.height() <= tr_rect.height() + 1
+    assert abs(rc.center().x() - w.t_to_x(300_500)) <= 2
+    w.grab()
+    assert w.cache_builds == builds                       # 정적 트랙을 다시 만들지 않았다
+    patched = _cache_image(w)
+    assert patched == _full_rebuild_image(w)              # 부분 갱신 그림 = 전체 다시 그림
+
+
+@pytest.mark.parametrize("op", ["remove", "update_kind", "update_move", "overlap"])
+def test_marker_patch_matches_full_redraw(qapp, op):
+    w = make(qapp, width=1000)
+    _full_data(w, 600_000)
+    w.set_view(0, 120_000)                                # 확대: 마커 모양(마름모)이 그려지는 보기
+    w.grab()
+    builds = w.cache_builds
+    if op == "remove":
+        assert w.remove_marker("labels", 37_000, "reaction")
+    elif op == "update_kind":
+        assert w.update_marker("labels", 74_000, None, 74_000, "recheck")
+    elif op == "update_move":
+        assert w.update_marker("labels", 37_000, "reaction", 90_000, "unconfirmed")
+        assert len(w.last_dirty_rects) == 2               # 옛 자리·새 자리 두 사각형
+    else:                                                 # 겹친 마커 (다른 종류가 거의 같은 자리)
+        w.add_marker("labels", 37_050, "recheck")
+        w.add_marker("labels", 36_950, "unconfirmed")
+    w.grab()
+    assert w.cache_builds == builds
+    assert _cache_image(w) == _full_rebuild_image(w)
+
+
+def test_dense_marker_patch_matches_full_redraw(qapp):
+    """촘촘한 트랙(세로 눈금, 화면 열마다 한 줄)에서도 부분 갱신 그림 = 전체 다시 그림."""
+    w = make(qapp, width=1000)
+    w.set_markers("labels", [(i * 1_500, "reaction" if i % 4 else "recheck") for i in range(400)])
+    w.set_markers("engine", [(i * 700 + 3, "engine") for i in range(800)])
+    w.grab()
+    assert w._is_dense("labels") and w._is_dense("engine")
+    builds = w.cache_builds
+    w.add_marker("labels", 300_250, "unconfirmed")
+    w.remove_marker("engine", 7_003, "engine")
+    w.update_marker("labels", 1_500, None, 2_100, "primary")
+    w.grab()
+    assert w.cache_builds == builds and w.cache_patches >= 3
+    assert _cache_image(w) == _full_rebuild_image(w)
+
+
+def test_marker_outside_view_does_not_repaint(qapp):
+    w = make(qapp)
+    _full_data(w, 600_000)
+    w.set_view(0, 60_000)
+    w.grab()
+    builds, patches = w.cache_builds, w.cache_patches
+    w.add_marker("labels", 500_000, "reaction")
+    w.grab()
+    assert (w.cache_builds, w.cache_patches) == (builds, patches)
+    assert (500_000, "reaction") in w.markers("labels")
+    w.set_view(450_000, 550_000)                          # 나중에 보면 그려져 있다
+    w.grab()
+    assert _cache_image(w) == _full_rebuild_image(w)
+
+
+def test_marker_fallbacks_to_full_redraw(qapp):
+    w = make(qapp, width=600)
+    w.grab()                                              # 너비 확정 (아래 막대 최소 너비)
+    n = w.width() // 3                                    # n 개 = 너비/3 → 촘촘하지 않음
+    w.set_markers("labels", [(i * (590_000 // n), "reaction") for i in range(n)])
+    assert not w._is_dense("labels")
+    w.grab()
+    builds = w.cache_builds
+    w.add_marker("labels", 1_000, "reaction")             # n+1 개 > 너비/3 → 촘촘함이 바뀜 → 전체
+    assert w._is_dense("labels")
+    w.grab()
+    assert w.cache_builds == builds + 1
+    h = w.height()
+    w.add_marker("새 트랙", 1_000, "reaction", label="합성")   # 새 트랙 → set_markers 길(높이 바뀜)
+    assert w.height() > h and w.markers("새 트랙") == [(1_000, "reaction")]
+    w.grab()
+    b2 = w.cache_builds
+    w.resize(320, w.height())                             # 캐시가 지금 보기와 맞지 않으면 → 다음 그리기에 전체
+    w.add_marker("labels", 2_000, "reaction")
+    w.grab()
+    assert w.cache_builds == b2 + 1
+
+
+def test_add_marker_200k_is_fast(qapp):
+    """20만 마커에서 하나 더하기: 부분 갱신(캐시 일부만) vs set_markers 전체. 목표를 넘으면 경고만."""
+    import warnings
+    dur = 8 * 3_600_000
+    w = make(qapp, duration_ms=dur, width=1600)
+    items = [(i * (dur // 200_000), "reaction" if i % 5 else "recheck") for i in range(200_000)]
+    w.set_markers("labels", items)
+    w.set_view(3_600_000, 3_600_000 + 600_000)
+    w.grab()
+    builds = w.cache_builds
+    t0 = time.perf_counter()
+    n = 50
+    for i in range(n):
+        w.add_marker("labels", 3_600_000 + 1_000 + i * 11_000, "reaction")
+    add_ms = (time.perf_counter() - t0) / n * 1000
+    w.grab()
+    assert w.cache_builds == builds and len(w.markers("labels")) == 200_000 + n
+    t1 = time.perf_counter()
+    w.set_markers("labels", w.markers("labels") + [(3_700_000, "reaction")])
+    w.grab()
+    full_ms = (time.perf_counter() - t1) * 1000
+    print(f"20만 마커: add_marker 평균 {add_ms:.3f}ms, set_markers+다시 그림 {full_ms:.1f}ms")
+    if add_ms > 8.0:
+        warnings.warn(f"add_marker 평균 {add_ms:.2f}ms > 8ms")
