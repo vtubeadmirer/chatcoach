@@ -215,6 +215,7 @@ class QueueView(QWidget):
         self._autoplay = True
         self._loop_on = False
         self._can_read = False
+        self._from_plan = False
         self._can_write = False
         self._session_id: str | None = None
         self._last_verify: sp.Verification | None = None
@@ -365,7 +366,7 @@ class QueueView(QWidget):
                      to_file: Callable[[int], int] | None = None, to_vod: Callable[[int], int] | None = None,
                      pre_roll_ms: int = DEFAULT_PRE_ROLL_MS, post_roll_ms: int = DEFAULT_POST_ROLL_MS,
                      autoplay: bool = True, start_at: str | None = None,
-                     media_coverage: Iterable | None = None) -> None:
+                     media_coverage: Iterable | None = None, from_plan: bool = False) -> None:
         """작업대 상태를 받는다.
 
         manifest: 이 계열의 가장 큰 sample_rev 매니페스트(sp.latest_of). None 이면 '표본 없음'.
@@ -376,10 +377,14 @@ class QueueView(QWidget):
         start_at: 이 chat_id 에서 시작. 없으면 첫 '대기' 표본.
         media_coverage: 영상이 덮는 VOD 범위(timecode.media_coverage). 표본 채팅의 7-2 범위가 그 밖이면 빠른 저장
             ('반응 미확인'·'판단 불가')을 막는다(D-10 3, 편집기 M 과 같은 규칙). None = 검사 안 함, [] = 영상 없음.
+        from_plan: 재라벨 세션의 블록 표본(06 3-5). 작업대가 재라벨러 자기 구간표와 계획의 τ_block 으로 메모리에서 만든
+            매니페스트 모양이다(samples/ 를 열지 않음). 재라벨 세션(relabel_plans = 자기 계획만)일 때만 받는다.
+            τ·시드는 화면에 보이지 않는다(06 3-4).
         """
         self._coverage = self._norm_cov(media_coverage)
         scope = vis.files_to_open(session_kind or "", phase) if session_kind else vis.BLOCKED
-        self._can_read = scope.can_read("samples")
+        self._from_plan = bool(from_plan) and scope.relabel_plans == vis.OWN
+        self._can_read = scope.can_read("samples") or self._from_plan
         self._can_write = scope.can_write_label("reaction")
         self._session_id = session_id
         self._manifest = dict(manifest) if (manifest is not None and self._can_read) else None
@@ -697,8 +702,9 @@ class QueueView(QWidget):
 
     # ------------------------------------------------------------------ 재현 검증
     def run_verify(self) -> sp.Verification | None:
-        if self._verify is None or self._manifest is None:
-            self.verify_msg.setText(tr("재현 검증을 할 수 없습니다 (검증 입력 없음)"))
+        if self._verify is None or self._manifest is None or self._from_plan:
+            self.verify_msg.setText(tr("재현 검증을 할 수 없습니다 (검증 입력 없음)") if not self._from_plan
+                                    else tr("재라벨 블록 표본은 파일로 남기지 않아 재현 검증이 없습니다 (계획 검증은 조정 쪽)"))
             return None
         try:
             v = self._verify(self._manifest)
@@ -736,14 +742,19 @@ class QueueView(QWidget):
                 tc.fmt_time(s["start_ms"], ms_digits=False, always_hours=True),
                 tc.fmt_time(s["end_ms"], ms_digits=False, always_hours=True),
                 pr.done, pr.denominator_text(), int(m["eligible"]["size"])))
-            seed, draw_no = sp.parse_seed_material(m["seed_material"])
             ex = m["excluded"]
-            census = tr(" · 전수") if m.get("census") else ""
             oom = tr("·영상 밖 {0}").format(ex["out_of_media"]) if "out_of_media" in ex else ""
-            self.meta.setText(tr("{8} · 시드 {0}  draw {1}  rev {2}  τ {3}{4}  완충 {5}·후원 등 {6}·시각 이상 {7}{9} 은 적격 밖")
-                              .format(_short(seed), draw_no, m["sample_rev"], _short(m.get("tau_key")), census,
-                                      ex["buffer"], ex["non_text"], ex["invalid_time"], m.get("algorithm") or "-", oom))
-        self.verify_btn.setEnabled(self._verify is not None and m is not None)
+            if self._from_plan:
+                # 재라벨 블록 표본: τ_block·시드는 보이지 않는다(06 3-4 — 1차 표본 크기를 짐작하지 않게)
+                self.meta.setText(tr("재라벨 계획의 블록 표본 (06 3-5) · 완충 {0}·후원 등 {1}·시각 이상 {2}{3} 은 적격 밖")
+                                  .format(ex["buffer"], ex["non_text"], ex["invalid_time"], oom))
+            else:
+                seed, draw_no = sp.parse_seed_material(m["seed_material"])
+                census = tr(" · 전수") if m.get("census") else ""
+                self.meta.setText(tr("{8} · 시드 {0}  draw {1}  rev {2}  τ {3}{4}  완충 {5}·후원 등 {6}·시각 이상 {7}{9} 은 적격 밖")
+                                  .format(_short(seed), draw_no, m["sample_rev"], _short(m.get("tau_key")), census,
+                                          ex["buffer"], ex["non_text"], ex["invalid_time"], m.get("algorithm") or "-", oom))
+        self.verify_btn.setEnabled(self._verify is not None and m is not None and not self._from_plan)
         it = self.current_item()
         if it is None:
             self.item_line.setText(tr("표본이 없습니다") if m is not None else "")

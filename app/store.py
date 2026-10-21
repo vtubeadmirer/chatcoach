@@ -14,6 +14,14 @@
 5. 자기 파일이 없으면 첫 줄 session.open 을 쓴다. 같은 세션의 다른 PC 파일이 있으면 그 메타를 그대로 되풀이한다.
    run_info 를 주면 run.start 줄을 이어 쓴다.
 
+세션 잠금 (lock_session, 06 7-1·7-2, 03 6-14·10-4, 08 D-11 7)
+  locks/<session_id>.json 을 한 번만 만든다(app.locking.write_lock_exclusive, 있으면 AlreadyLockedError). 먼저 session.close
+  줄을 쓰고, 이 세션 기록 파일들의 디스크 바이트로 sha256·크기·줄 수·last_seq 를 계산해 적는다. 그 뒤 store 는 읽기 전용이다.
+  풀기 기능은 없다. 잠긴 세션을 다시 열면 open.lock 을 잡지 않고 읽기 전용(사유 locking.LOCKED_REASON)으로 열며,
+  잠금과 파일을 비교해 '잠금 후 추가' 줄(seq > last_seq)과 잠금 뒤 생긴 파일은 뷰에서 빼고, 해시가 다르면 '변조/손상' 으로
+  경고·사유에 남긴다(lock_check). 쓰기마다 잠금 파일이 생겼는지도 본다(다른 PC 가 같은 세션을 잠갔을 때).
+  잠그기 전 요약은 lock_summary() (잠그기 화면 app/ui/lock_dialog.py 가 쓴다).
+
 닫기 (close, 08 D-09 6)
   쓸 수 있게 연 store 면 session.close 줄(reason·run_ms·lines_written)을 쓰고 잠금을 푼다. 줄 쓰기가 실패해도
   잠금은 푼다(로그만). 같은 세션을 다시 열면 그 뒤에 run.start 등이 이어진다.
@@ -42,7 +50,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
-from . import jsonl, paths
+from . import jsonl, locking, paths
 from . import project as projmod
 from .core import visibility as vis
 from .core.validate import StrictJsonError, load_json_strict
@@ -69,6 +77,7 @@ AUTO_FIELDS = frozenset({"v", "id", "seq", "session_id", "labeler_id", "created_
 DRAFT_FIELDS = frozenset({"kind", "body", "entity_id", "supersedes", "x"})
 RETRACT_REASONS = ("undo", "merged", "split_cleanup", "wrong_target", "other")
 UUID4_RE = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
+ALREADY_LOCKED = "이미 잠긴 세션입니다"
 
 
 class StoreError(RuntimeError):
@@ -353,6 +362,9 @@ class ProjectStore:
         self._rev = 0                                 # 색인이 바뀔 때마다 +1 (effective 캐시 무효화)
         self._eff_cache: tuple[int, Any] | None = None
         self._pj_stamp: tuple[int, int] | None = None  # project.json (mtime_ns, size) — 라벨 메타를 새로 읽을지 판단
+        self.locked = False                          # locks/<session_id>.json 이 있음 → 읽기 전용, 풀지 않음(D-11 7)
+        self.lock_doc: dict | None = None            # 읽은(또는 방금 만든) 잠금 파일 내용
+        self.lock_check: locking.LockCheck | None = None   # 다시 열 때 잠금과 기록 파일을 비교한 결과
 
     # ------------------------------------------------------------------ 열기
     @classmethod
@@ -384,6 +396,7 @@ class ProjectStore:
             st._schema = schema or load_label_schema()
         except (OSError, StrictJsonError, ValueError) as e:
             st._set_ro(f"기록 스키마(schemas/label-event.schema.json)를 읽지 못했습니다: {type(e).__name__}")
+        st._detect_session_lock()
         mid = session.machine_id
         if mid is None:
             mid = machine_id(data_root or paths.data_root())
@@ -426,6 +439,49 @@ class ProjectStore:
         for r in reasons:
             if r not in self.read_only_reasons:
                 self.read_only_reasons.append(r)
+
+    def _detect_session_lock(self) -> None:
+        """locks/<session_id>.json 이 있으면 읽기 전용으로 바꾸고 잠금 내용을 읽는다(자기 세션 것이라 블라인드와 무관).
+
+        open.lock 을 잡기 전에 부른다 — 잠긴 세션은 쓰지 않으므로 프로젝트 쓰기 잠금도 잡지 않는다.
+        """
+        sid = self.session.session_id
+        if not locking.is_locked(self.root, sid):
+            return
+        self.locked = True
+        self._set_ro(locking.LOCKED_REASON)
+        try:
+            self.lock_doc = locking.read_lock(self.root, sid, reader_kind=self.session.session_kind,
+                                              reader_session_id=sid)
+        except FileNotFoundError:
+            pass
+        except (locking.LockFormatError, OSError) as e:
+            self._set_ro("잠금 파일이 깨졌거나 형식에 맞지 않습니다 — 변조/손상")
+            log.warning("세션 잠금 파일을 읽지 못했습니다: %s", type(e).__name__)
+
+    def _apply_session_lock(self, labels_dir: str) -> None:
+        """잠금과 지금 파일을 비교해 '잠금 후 추가' 줄·'잠금 후 생긴 파일' 을 뷰에서 빼고, 변조/손상을 알린다."""
+        doc = self.lock_doc
+        if doc is None:
+            return
+        chk = locking.check_files(labels_dir, doc, [sf.name for sf in self._files])
+        self.lock_check = chk
+        by = {f.name: f for f in chk.files}
+        kept: list[SessionFile] = []
+        for sf in self._files:
+            fc = by.get(sf.name)
+            if fc is None or fc.status == locking.ST_EXTRA:
+                continue
+            if fc.last_seq is not None:
+                sf.records = [r for r in sf.records if _is_int(r.get("seq")) and r["seq"] <= fc.last_seq]
+            kept.append(sf)
+        self._files = kept
+        self._own = next((sf for sf in kept if sf.own), None)
+        self.warnings += chk.messages()
+        if chk.tampered:
+            self._set_ro("잠금 때 기록한 해시와 기록 파일이 다릅니다 — 변조/손상")
+            log.warning("잠긴 세션 %s 의 기록 파일이 잠금과 다릅니다(변조/손상 %d개)", self.session.session_id,
+                        len(chk.by_status(locking.ST_TAMPERED)))
 
     def _acquire_lock(self, lock_factory) -> None:
         """locks/open.lock. 못 잡으면 읽기 전용(13-5).
@@ -488,6 +544,8 @@ class ProjectStore:
                 self._own = sf
         if self.conflict_files:
             self.warnings.append(f"이름 규칙에 맞지 않는 이 세션의 기록 파일 {len(self.conflict_files)}개를 읽지 않았습니다(충돌 사본).")
+        if self.locked:
+            self._apply_session_lock(labels)
         # 판 색인. 같은 id 가 두 파일에 있으면 내용이 같아야 한다(13-3 의 5).
         for sf in self._files:
             for rec in sf.records:
@@ -718,6 +776,11 @@ class ProjectStore:
     def _append_record(self, rec: dict) -> dict:
         """검사 → 한 줄 쓰기 → 되읽기 확인 → 색인. 저장된 레코드(내부 객체)를 돌려준다."""
         self._check_writable()
+        if locking.is_locked(self.root, self.session.session_id):
+            # 다른 PC 가 같은 세션을 잠갔다(이 store 의 lock_session 뒤에는 read_only 라 여기까지 오지 않는다)
+            self.locked = True
+            self._set_ro(locking.LOCKED_REASON)
+            raise ReadOnlyStoreError("잠긴 세션입니다: " + locking.LOCKED_REASON)
         if self._schema is None:
             raise StoreError("기록 스키마가 없습니다")
         problems = self._schema.check(rec)
@@ -959,6 +1022,174 @@ class ProjectStore:
         view = resolve(recs)
         self._eff_cache = (self._rev, view)
         return view
+
+    # ------------------------------------------------------------------ 재라벨 계획용 (06 3-1)
+    def done_ranges(self, coverage=None) -> list[list[int]]:
+        """이 세션이 라벨을 마친 범위(06 3-1 '1차 세션이 라벨을 마친 범위') = 현재 유효 구간들의 [시작, 끝) 를 합친 것.
+
+        구간 완료 표시(phase.mark segments)가 붙은 구간이 하나라도 있으면 그 구간들만, 없으면 모든 유효 구간을 쓴다.
+        coverage(영상이 덮는 VOD 범위 [(a, z)], D-10 3)를 주면 그 안으로 자른다 — 영상 밖 블록은 재라벨러가 매길 수 없다.
+        숫자만 돌려준다. 재라벨 계획 만들기(app.relabel.create_plan)의 done_ranges 로 넘긴다.
+        """
+        from .core import phase as ph
+        view = self.effective(copy_records=False)
+        segs = view.items("segment", self.session.session_id)
+        marks = ph.PhaseMarks(r for r in view.other_records if r.get("kind") == "phase.mark")
+        done = [s for s in segs if marks.done("segments", s["entity_id"])] or list(segs)
+        spans = sorted((int(s["body"]["start_ms"]), int(s["body"]["end_ms"])) for s in done
+                       if _is_int((s.get("body") or {}).get("start_ms")) and _is_int((s.get("body") or {}).get("end_ms")))
+        merged: list[list[int]] = []
+        for a, z in spans:
+            if z <= a:
+                continue
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], z)
+            else:
+                merged.append([a, z])
+        if coverage is None:
+            return merged
+        out: list[list[int]] = []
+        for ca, cz in sorted((int(a), int(z)) for a, z in coverage):
+            for a, z in merged:
+                lo, hi = max(a, ca), min(z, cz)
+                if hi > lo:
+                    out.append([lo, hi])
+        return out
+
+    # ------------------------------------------------------------------ 다른 세션의 잠긴 라벨 (분석 세션, D-09 5)
+    def readable_locked_sessions(self) -> list[str]:
+        """이 세션이 읽어도 되는 다른 세션 가운데 잠긴 것(labels/·locks/ 의 **이름만** 본다, 03 12-1).
+
+        분석 세션은 잠긴 1차, 조정 세션은 잠긴 세션 전부. 라벨링 세션(primary·relabel_*)은 늘 빈 목록이다.
+        """
+        scope = vis.files_to_open(self.session.session_kind)
+        if scope.other_labels == vis.NONE:
+            return []
+        sids = set()
+        for n in self._names("labels"):
+            p = parse_session_file_name(n)
+            if p and p[0] != self.session.session_id:
+                sids.add(p[0])
+        return sorted(s for s in sids if locking.is_locked(self.root, s)
+                      and scope.may_read_other_session(True, vis.session_kind_of_id(s)))
+
+    def _names(self, sub: str) -> list[str]:
+        try:
+            return sorted(os.listdir(os.path.join(self.root, sub)))
+        except OSError:
+            return []
+
+    def locked_session_view(self, session_id: str):
+        """다른 세션의 잠긴 기록으로 만든 현재 유효 라벨 뷰와 경고 문장 목록 (view, messages).
+
+        locking.read_locked_records 가 블라인드를 먼저 본다 — 이 세션 종류가 그 세션 파일을 열 수 없으면 디스크를 열기
+        전에 locking.LockBlindError. 잠기지 않은 세션이면 FileNotFoundError. 잠금 뒤 붙은 줄·잠금 뒤 생긴 파일은 빠진다.
+        """
+        from .core.resolve import resolve
+        if session_id == self.session.session_id:
+            raise ValueError("자기 세션은 effective() 로 읽습니다")
+        lr = locking.read_locked_records(self.root, session_id, reader_kind=self.session.session_kind,
+                                         reader_session_id=self.session.session_id)
+        msgs = list(lr.check.messages()) + list(lr.problems[:5])
+        if lr.skipped_files:
+            msgs.append(f"{session_id}: 잠금과 다른 기록 파일 {lr.skipped_files}개는 읽지 않았습니다 (변조/손상)")
+        return resolve(list(lr.records)), msgs
+
+    # ------------------------------------------------------------------ 세션 잠금
+    def _session_manifests(self) -> list[tuple[dict, str]]:
+        """이 세션 구간의 표본 매니페스트(samples/ 를 읽을 수 있는 세션 종류만, 03 12-1). 재라벨 세션은 빈 목록."""
+        if not vis.files_to_open(self.session.session_kind).can_read("samples"):
+            return []
+        return locking.session_manifests(self.project.paths.samples_dir, self.session.session_id)
+
+    def lock_blockers(self) -> list[str]:
+        """지금 잠글 수 없는 까닭(빈 목록이면 잠글 수 있다)."""
+        out: list[str] = []
+        if self.closed:
+            out.append("닫은 store 입니다")
+        if self.locked or locking.is_locked(self.root, self.session.session_id):
+            out.append(ALREADY_LOCKED)
+        elif self.read_only:
+            out.append("읽기 전용으로 연 세션입니다: " + "; ".join(self.read_only_reasons[:3]))
+        if self.session.session_kind not in locking.LOCKABLE_KINDS:
+            out.append(f"{self.session.session_kind} 세션은 잠그지 않습니다(라벨이 없음)")
+        if self._meta is None or self._own is None or not self._own.records:
+            out.append("세션 기록이 없습니다")
+        return out
+
+    def lock_summary(self, *, manifests: list[tuple[dict, str]] | None = None) -> locking.LockSummary:
+        """잠그기 전 요약(구간·반응 수, 표본 진행률, 미완료 경고, 잠글 수 없는 까닭). 숫자와 코드뿐이다."""
+        if manifests is None:
+            manifests = self._session_manifests()
+        recs = [r for sf in self._files for r in sf.records]
+        return locking.lock_summary(
+            self.effective(copy_records=False), session_id=self.session.session_id,
+            session_kind=self.session.session_kind, marks=[r for r in recs if r.get("kind") == "phase.mark"],
+            manifests=[m for m, _ in manifests], files=len(self._files),
+            load_warnings=bool(self.warnings or self.conflict_files or self.partial_files),
+            blockers=self.lock_blockers())
+
+    def lock_session(self, *, sample_verify: list[dict] | None = None) -> dict:
+        """세션을 잠근다(06 7-1, 03 6-14). locks/<session_id>.json 을 한 번만 만들고 잠금 내용 사본을 돌려준다.
+
+        1. 잠글 수 있는지 본다(lock_blockers). 이미 잠겼으면 locking.AlreadyLockedError, 닫았거나 읽기 전용이면
+           ReadOnlyStoreError, 그 밖(분석 세션·기록 없음)은 StoreError.
+        2. 요약을 계산하고 session.close(reason=user) 줄을 쓴다(잠금 뒤에는 쓸 수 없으므로 지금).
+        3. 이 세션 기록 파일들(다른 PC 파일 포함)을 디스크에서 읽어 sha256·크기·줄 수·last_seq 를 낸다. 다른 PC 파일이
+           연 뒤에 바뀌었으면 StoreError(다시 열어 요약을 보고 잠그게 한다).
+        4. 잠금 문서를 스키마로 검사하고 원자적으로 '없을 때만' 만든다. 그 뒤로 store 는 읽기 전용이다(풀지 않음, D-11 7).
+        sample_verify: 잠그기 전에 돌린 표본 재현 검증 [{sample_set_id, ok, problems(건수)}] (선택).
+        실패하면 잠금 파일은 생기지 않고 store 는 쓸 수 있는 채로 남는다(session.close 뒤에 쓰면 그 뒤로 이어진다).
+        """
+        blockers = self.lock_blockers()
+        if blockers:
+            if ALREADY_LOCKED in blockers:
+                raise locking.AlreadyLockedError(ALREADY_LOCKED)
+            if self.closed or self.read_only:
+                raise ReadOnlyStoreError("; ".join(blockers))
+            raise StoreError("; ".join(blockers))
+        # 연 뒤에 다른 PC 에서 새로 생긴 이 세션 기록 파일이 있으면 잠금 files[] 에서 빠져 '잠금 후 생긴 파일' 로 조용히
+        # 빠진다 → 거부하고 다시 열게 한다(디스크를 다시 나열, 이름만 본다)
+        known = {sf.name for sf in self._files} | {self.session.file_name}
+        new = [n for n in locking.session_file_names(os.path.join(self.root, "labels"), self.session.session_id)
+               if n not in known]
+        if new:
+            raise StoreError(f"연 뒤에 다른 PC 에서 이 세션 기록 파일 {len(new)}개가 생겼습니다. 프로젝트를 다시 열어 "
+                             "요약을 보고 잠그세요")
+        manifests = self._session_manifests()
+        summary = self.lock_summary(manifests=manifests)
+        body = {"reason": "user", "run_ms": max(0, int((time.perf_counter() - self._t_open) * 1000)),
+                "lines_written": self._lines_written}
+        self._append_record(self._envelope("session.close", body))
+        entries = []
+        for sf in sorted(self._files, key=lambda f: f.name):
+            with builtins.open(sf.path, "rb") as f:
+                data = f.read()
+            ent = locking.file_entry(sf.name, data)
+            if ent["last_seq"] != sf.last_seq:
+                raise StoreError("다른 PC 의 이 세션 기록 파일이 연 뒤에 바뀌었습니다. 프로젝트를 다시 연 뒤 잠그세요"
+                                 if not sf.own else "이 PC 의 기록 파일이 store 가 아는 것과 다릅니다")
+            entries.append(ent)
+        meta = self._meta or {}
+        doc = locking.build_lock_doc(
+            session_id=self.session.session_id, project_id=meta.get("project_id"),
+            labeler_id=self.session.labeler_id, session_kind=self.session.session_kind,
+            locked_at=_iso_ms(self._clock()), locked_on_machine4=self.session.machine4,
+            app_version=self._app_version, guide=meta, relabel_plan_id=meta.get("relabel_plan_id"),
+            files=entries, summary=summary, sample_manifests=[(m["sample_set_id"], h) for m, h in manifests],
+            sample_verify=sample_verify or ())
+        problems = locking.check_lock_doc(doc)
+        if problems:
+            raise LabelValidationError(problems)
+        locking.write_lock_exclusive(locking.lock_path(self.root, self.session.session_id), locking.dump_lock(doc))
+        self.locked = True
+        self.lock_doc = doc
+        self.lock_check = locking.LockCheck(doc["session_id"], tuple(
+            locking.FileCheck(e["name"], locking.ST_OK, e["last_seq"]) for e in entries))
+        self._set_ro(locking.LOCKED_REASON)
+        log.info("세션 %s 를 잠갔습니다: 기록 파일 %d개, 유효 라벨 %d건, 경고 %d종", self.session.session_id,
+                 len(entries), sum(summary.label_counts.values()), len(summary.warnings))
+        return copy.deepcopy(doc)
 
     # ------------------------------------------------------------------ 닫기
     def close(self, reason: str = "user") -> None:

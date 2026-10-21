@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/chatcoach/blob/main/schemas/session-lock.schema.json",
+  "title": "세션 잠금 (locks/<session_id>.json)",
+  "description": "세션 하나를 '이 판으로 비교한다' 고 굳힌 증거. 한 번만 만들고(있으면 만들지 않는다) 고치지도 지우지도 않는다. 풀기 기능은 없다(08 D-11 7): 고치려면 새 세션을 열고, 잘못 잠갔으면 다음 세션의 사유 칸에 적는다. 잠근 뒤 store 는 그 세션 기록 파일에 줄을 쓰지 않고, 다시 열면 읽기 전용이다. 잠금 뒤 붙은 줄(seq > last_seq)과 잠금 뒤 생긴 같은 세션의 다른 PC 파일은 뷰에서 뺀다. 파일 해시가 다르면 앞 size 바이트의 해시로 '잠금 후 추가' 와 '변조/손상' 을 가른다. 쓰는 곳: app/store.py ProjectStore.lock_session, 검사: app/locking.py. 설계 문서: docs/design/03-data-model.md 6-14·8-4·10-4, docs/design/06-evaluation-and-agreement.md 7-1·7-2.",
+  "type": "object",
+  "required": [
+    "schema", "schema_version", "session_id", "project_id", "labeler_id", "session_kind", "locked_at", "locked_by",
+    "locked_on_machine4", "app_version", "guide", "relabel_plan_id", "files", "label_counts", "status_counts",
+    "sample_manifests", "sample_verify", "summary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "chatcoach/session-lock"},
+    "schema_version": {"const": 1},
+    "session_id": {"$ref": "#/$defs/sessionId"},
+    "project_id": {"$ref": "#/$defs/uuid"},
+    "labeler_id": {"$ref": "#/$defs/labelerId", "description": "세션의 라벨러(세션 ID 앞부분과 같다)."},
+    "session_kind": {"enum": ["primary", "relabel_same", "relabel_second", "adjudication", "origin_review"], "description": "잠글 수 있는 세션 종류. 분석 세션(analysis)은 라벨이 없어 잠그지 않는다."},
+    "locked_at": {"$ref": "#/$defs/isoTime", "description": "잠근 시각(OS 시간대 오프셋 포함 ISO 8601, 밀리초). 06 7-2 '사람 세션 잠금 시각 < 봉인 해제 시각' 판단에 쓴다."},
+    "locked_by": {"$ref": "#/$defs/labelerId", "description": "잠근 사람의 labeler_id. 지금은 세션 라벨러 본인만 잠근다."},
+    "locked_on_machine4": {"$ref": "#/$defs/machine4", "description": "잠근 PC 의 machine4."},
+    "app_version": {"type": "string", "minLength": 1, "maxLength": 40},
+    "guide": {
+      "type": "object",
+      "required": ["guide_version", "guide_doc_sha256", "thresholds_sha256"],
+      "additionalProperties": false,
+      "description": "세션 session.open 에 적힌 기준서 버전과 해시(03 8-4).",
+      "properties": {
+        "guide_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+(-[a-z0-9]+)?$"},
+        "guide_doc_sha256": {"$ref": "#/$defs/sha256"},
+        "thresholds_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "relabel_plan_id": {"type": ["string", "null"], "pattern": "^RP-[0-9]{8}-[a-z0-9]{4}$", "description": "재라벨 세션이면 그 계획 ID, 아니면 null."},
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "description": "이 세션의 기록 파일(PC 마다 하나) 전부. 잠글 때 디스크 바이트로 계산한다.",
+      "items": {
+        "type": "object",
+        "required": ["name", "machine4", "size", "sha256", "lines", "last_seq"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}-(P|RS|R2|AD|OR|AN)-[0-9]{8}-[a-z0-9]{4}\\.[a-z2-7]{4}\\.jsonl$", "description": "labels/ 안의 파일 이름."},
+          "machine4": {"$ref": "#/$defs/machine4"},
+          "size": {"type": "integer", "minimum": 0, "description": "바이트 수."},
+          "sha256": {"$ref": "#/$defs/sha256", "description": "파일 바이트 전체의 SHA-256 (03 8-4 '잠금 파일의 sha256')."},
+          "lines": {"type": "integer", "minimum": 0, "description": "LF 로 끝난 줄 수."},
+          "last_seq": {"type": "integer", "minimum": 0, "description": "마지막 온전한 줄의 seq. 이보다 큰 seq 는 '잠금 후 추가' 로 뷰에서 뺀다."}
+        }
+      }
+    },
+    "label_counts": {
+      "type": "object",
+      "description": "라벨 종류별 현재 유효 라벨 수(03 11장). 이 세션 것만 센다.",
+      "additionalProperties": false,
+      "required": ["segment", "utterance", "reaction", "continuation", "video_check", "missed_candidate", "origin", "adjudication"],
+      "properties": {
+        "segment": {"$ref": "#/$defs/count"},
+        "utterance": {"$ref": "#/$defs/count"},
+        "reaction": {"$ref": "#/$defs/count"},
+        "continuation": {"$ref": "#/$defs/count"},
+        "video_check": {"$ref": "#/$defs/count"},
+        "missed_candidate": {"$ref": "#/$defs/count"},
+        "origin": {"$ref": "#/$defs/count"},
+        "adjudication": {"$ref": "#/$defs/count"}
+      }
+    },
+    "status_counts": {
+      "type": "object",
+      "description": "판 연결 상태별 대상 수(active·retracted·conflict)와 무효 줄 수(invalid).",
+      "additionalProperties": false,
+      "required": ["active", "retracted", "conflict", "invalid"],
+      "properties": {
+        "active": {"$ref": "#/$defs/count"},
+        "retracted": {"$ref": "#/$defs/count"},
+        "conflict": {"$ref": "#/$defs/count"},
+        "invalid": {"$ref": "#/$defs/count"}
+      }
+    },
+    "sample_manifests": {
+      "type": "array",
+      "description": "이 세션의 구간에서 뽑은 표본 매니페스트(samples/, source_segment.session_id 가 이 세션). 재라벨 세션은 samples/ 를 열지 않으므로 빈 목록이다.",
+      "items": {
+        "type": "object",
+        "required": ["sample_set_id", "sha256"],
+        "additionalProperties": false,
+        "properties": {
+          "sample_set_id": {"type": "string", "pattern": "^S-[0-9a-f]{8}-d[0-9]+-r[0-9]+$"},
+          "sha256": {"$ref": "#/$defs/sha256", "description": "매니페스트 파일 바이트의 SHA-256."}
+        }
+      }
+    },
+    "sample_verify": {
+      "type": "array",
+      "description": "잠글 때 실행한 표본 재현 검증 결과(03 6-14). 실행하지 않았으면 빈 목록.",
+      "items": {
+        "type": "object",
+        "required": ["sample_set_id", "ok", "problems"],
+        "additionalProperties": false,
+        "properties": {
+          "sample_set_id": {"type": "string", "pattern": "^S-[0-9a-f]{8}-d[0-9]+-r[0-9]+$"},
+          "ok": {"type": "boolean"},
+          "problems": {"$ref": "#/$defs/count", "description": "문제 건수(문구는 넣지 않는다)."}
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "description": "잠그기 화면이 보인 요약 숫자와 경고 코드. 미완료 상태로 잠갔는지를 나중에 알 수 있게 남긴다.",
+      "required": ["segments", "reactions", "samples_judged", "samples_total", "warnings"],
+      "additionalProperties": false,
+      "properties": {
+        "segments": {"$ref": "#/$defs/count"},
+        "reactions": {"$ref": "#/$defs/count"},
+        "samples_judged": {"$ref": "#/$defs/count"},
+        "samples_total": {"$ref": "#/$defs/count"},
+        "warnings": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["no_labels", "no_segments", "segments_unmarked", "reactions_unmarked", "samples_missing",
+                             "samples_pending", "conflicts", "other_machine_files", "load_warnings"]}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "sessionId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}-(P|RS|R2|AD|OR|AN)-[0-9]{8}-[a-z0-9]{4}$"},
+    "labelerId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}$"},
+    "machine4": {"type": "string", "pattern": "^[a-z2-7]{4}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "isoTime": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$"},
+    "count": {"type": "integer", "minimum": 0}
+  }
+}

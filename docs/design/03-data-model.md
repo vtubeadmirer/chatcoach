@@ -23,7 +23,7 @@
 | D7 | 채팅 가명화는 수집할 때 끝낸다. `messages.jsonl` 에는 원 닉네임·userIdHash·profile·extras 원문이 없다. 원본은 `chat/protected/` 에만 둔다. | 가명 파일만 넘겨도 재식별이 안 된다(원문을 같은 줄에 두면 가명화가 무효가 된다는 보안 검토 반영). |
 | D8 | `viewer_id` = HMAC-SHA256(프로젝트 솔트, userIdHash). 이것이 저장·참조에 쓰는 확정 가명이다. 화면의 '시청자 0012' 는 따로 계산하는 표시용 번호다(14-2). | 다시 받아도 같은 값이 나오고, 다른 방송과는 연결되지 않는다. |
 | D9 | `chat_id` = 공개 규칙 `sl-chat-id-v1`(내용 해시, 수집 순서 무관). | 다시 받아도 같은 ID 가 나오고, AI 엔진도 같은 ID 를 계산할 수 있다. |
-| D10 | 표본은 `sha256-tau-v1`([06](06-evaluation-and-agreement.md) 2장). 순서 키 = `sha256(sample_seed\|draw_no\|chat_id)` 이고, 경계 완충·후원·시스템을 뺀 적격 채팅 중 키가 임계 키 τ(처음에는 100번째 키) 이하인 것을 뽑는다. 경계가 바뀌어도 τ 는 내려가지 않고 `sample_rev` 를 올린 새 매니페스트를 쓴다. 매니페스트는 고치지 않는다(15장). | 누가 언제 뽑아도 같은 표본이 나오고, 처음 판정 수가 정확히 100이며, 다른 언어로도 재현할 수 있다. 구간을 쪼개거나 기준서를 올려도 같은 채팅은 같은 순서에 선다. |
+| D10 | 표본은 `sha256-tau-v2`([06](06-evaluation-and-agreement.md) 2장). 옛 판 `sha256-tau-v1` 은 이미 쓴 매니페스트의 재현 검증만 한다(D-11 5). 순서 키 = `sha256(sample_seed\|draw_no\|chat_id)` 이고, 경계 완충(분류가 바뀌는 경계만)·영상 밖·후원·시스템을 뺀 적격 채팅 중 키가 임계 키 τ(처음에는 100번째 키) 이하인 것을 뽑는다. 경계가 바뀌어도 τ 는 내려가지 않고 `sample_rev` 를 올린 새 매니페스트를 쓴다. 매니페스트는 고치지 않는다(15장). | 누가 언제 뽑아도 같은 표본이 나오고, 처음 판정 수가 정확히 100이며, 다른 언어로도 재현할 수 있다. 구간을 쪼개거나 기준서를 올려도 같은 채팅은 같은 순서에 선다. |
 | D11 | 블라인드는 '필터' 가 아니라 '열지 않음' 이다. 재라벨 세션은 다른 세션 파일을 디스크에서 아예 읽지 않는다. | 필터 버그로 1차 라벨이 새는 길을 없앤다. |
 | D12 | 프로젝트 단계·잠금 여부는 project.json 에 적지 않고 라벨 기록과 잠금 파일에서 계산한다. | 두 곳에 적으면 언젠가 어긋난다. |
 | D13 | 내보내기는 항상 zip + `manifest.json`(파일별 해시). CSV 는 검토용 사본이며 수식 주입을 막는다. | 받는 쪽이 손상·편집·버전 불일치를 알 수 있다. |
@@ -323,7 +323,7 @@ erDiagram
 | `guides[]` | `guide_version`, `doc_path`, `doc_sha256`, `thresholds`(시작값 스냅샷), `thresholds_sha256`, `added_at/by`, `reason` | 추가만 한다. 세션은 시작할 때 이 중 하나에 묶인다. |
 | `active_guide_version` | | 새 세션의 기본 버전. |
 | `calibration` | `active_rev`, `revs[]`(`offset_ms`, `anchors[]`, `status`, `broadcast_delay_ms`, `delay_anchors[]`) | 4-2. 판은 추가만 한다. |
-| 표본·평가 | `sample_seed`, `dataset_split` | `sample_seed` 는 프로젝트를 만들 때 한 번 만드는 임의 16바이트(hex 32자)다. 화면에서 바꿀 수 없고 비밀이 아니다. 표본 순서 키(`sha256-tau-v1`, 15장·[06](06-evaluation-and-agreement.md) 2-1)와 06 3-2 의 재라벨 블록 순서가 쓴다. `dataset_split` 은 `dev`·`test`, 기본 `dev` 다. 시범처럼 기준을 고치는 데 쓴 라벨은 `dev` 로 두고 최종 엔진 평가에 기본으로 넣지 않는다([06](06-evaluation-and-agreement.md) 9-4). 기본을 `dev` 로 두는 이유: 시범 라벨이 실수로 평가 정답에 섞이는 쪽이 더 나쁘다. 세션은 열 때 이 값을 복사하므로(6-4), 나중에 `test` 로 바꿔도 앞 세션은 `dev` 로 남는다. 추출 번호 `draw_no` 는 여기 두지 않고 표본 매니페스트(6-13)에 둔다. 구간마다 따로 오르기 때문이다. |
+| 표본·평가 | `sample_seed`, `dataset_split` | `sample_seed` 는 프로젝트를 만들 때 한 번 만드는 임의 16바이트(hex 32자)다. 화면에서 바꿀 수 없고 비밀이 아니다. 표본 순서 키(`sha256-tau-v2`, 옛 판 v1 도 순서 키는 같다 — D-11 5, 15장·[06](06-evaluation-and-agreement.md) 2-1)와 06 3-2 의 재라벨 블록 순서가 쓴다. `dataset_split` 은 `dev`·`test`, 기본 `dev` 다. 시범처럼 기준을 고치는 데 쓴 라벨은 `dev` 로 두고 최종 엔진 평가에 기본으로 넣지 않는다([06](06-evaluation-and-agreement.md) 9-4). 기본을 `dev` 로 두는 이유: 시범 라벨이 실수로 평가 정답에 섞이는 쪽이 더 나쁘다. 세션은 열 때 이 값을 복사하므로(6-4), 나중에 `test` 로 바꿔도 앞 세션은 `dev` 로 남는다. 추출 번호 `draw_no` 는 여기 두지 않고 표본 매니페스트(6-13)에 둔다. 구간마다 따로 오르기 때문이다. |
 | `labelers[]` | `labeler_id`, `role`(`primary`·`second`·`reviewer`), `assigned_session_kinds`, `engine_author` | 표시 이름(실명)은 넣지 않는다. 실명은 수집 PC 의 `data\labelers.json` 에만 둔다. `engine_author` 는 AI 엔진의 규칙·코드를 만든 사람인지(`true`/`false`, 명부에 넣을 때 묻는다)다. 엔진 규칙을 아는 사람의 라벨에는 블라인드로도 막을 수 없는 쏠림이 있어, 숨기지 않고 보고서 머리에 표시한다([06](06-evaluation-and-agreement.md) 5장). |
 | `protected_zone` | 경로 목록 | 2-3. |
 | `storage_warning_acknowledged` | `at`, `by`, `path_kind` | 프로젝트가 OneDrive·네트워크·이동식 드라이브 아래일 때 경고를 확인한 기록([05](05-security.md)). |
@@ -411,7 +411,7 @@ flowchart LR
 | `phase.mark` | 단계 완료(또는 다시 열기) 표시 | `phase`(`segments`·`reactions`·`samples`·`missed`·`origin`), `scope`(`all` 또는 구간 entity_id 목록), `done` |
 | `view.exposed` | 숨겨 둔 자료를 열어 봤을 때 | `what`(`nickname_raw`·`asr_text`·`other_session_labels`·`ai_results`·`origin_info`·`raw_chat_page`), `chat_id`, `entity_id`, `during_entity_id` |
 | `session.close` | 세션을 닫을 때(프로젝트 닫기·다른 프로젝트 열기·앱 종료) 마지막 줄. 읽기 전용으로 열었으면 쓰지 않는다(08 D-09 6) | `reason`(`user`·`switch_project`·`app_exit`·`error`, 필수), `run_ms`(단조 시계), `lines_written` |
-| `warning` | 앱 경고와 처리 | `code`(`audio_not_heard`·`recheck_missing`·`grade_rule_override`·`rationale_without_time`·`repeat_before_chat`·`calibration_unverified`·`relabel_too_early`·`segment_too_short`·`long_silence_signal`·`clock_skew`·`other`), `action`(`shown`·`dismissed`·`resolved`), `entity_id` |
+| `warning` | 앱 경고와 처리 | `code`(`audio_not_heard`·`recheck_missing`·`grade_rule_override`·`rationale_without_time`·`repeat_before_chat`·`calibration_unverified`·`relabel_too_early`·`segment_too_short`·`long_silence_signal`·`clock_skew`·`continuation_missing`(직접·높음인데 이어짐을 비움, 막지 않음 — D-10 7, D-11 4)·`other`), `action`(`shown`·`dismissed`·`resolved`), `entity_id` |
 
 `warning` 은 '들은 범위 경고를 습관적으로 닫는' 패턴을 안내서 8장 점검에 쓰기 위한 기록이다.
 
@@ -1047,13 +1047,18 @@ viewer_no = messages.jsonl 의 모든 줄을 (t_ms, chat_id) 오름차순으로 
 
 계산 규칙의 기준은 [06](06-evaluation-and-agreement.md) 2장이다. 이 장은 저장·재현에 필요한 것만 적는다. 옛 규칙 `sha256-sort-v1`(seed 에 구간·기준서 버전을 넣고, 완충을 모집단에 넣은 채 표시만 하고, 경계가 바뀌면 `draw_no + 1` 로 부족분을 더 뽑음)은 폐기했다([07](07-roadmap.md) ADR-09·질문 42 에서 결정됨 — 사용자 확정 전, 반대하면 되돌림).
 
-### 15-1. 알고리즘 `sha256-tau-v1`
+### 15-1. 알고리즘 `sha256-tau-v2` (기본) · `sha256-tau-v1` (옛 판, 재현 검증만)
+
+새로 뽑는 표본은 모두 `sha256-tau-v2` 다. `sha256-tau-v1` 은 옛 판이다. 이미 쓴 v1 매니페스트를 v1 규칙으로 재현 검증할 때만 쓰고, v1 계열을 v2 로 옮기지 않는다(필요하면 검토자가 `draw_no` 를 올려 v2 로 다시 뽑는다). 같은 계열 안에서는 알고리즘을 바꾸지 않는다 (D-10 1, D-11 3·5).
 
 ```text
 seed_material = f"{project.sample_seed}|{draw_no}"          # 구간·기준서 버전은 넣지 않는다
 key(c)        = sha256(f"{seed_material}|{c.chat_id}".encode("utf-8")).hexdigest()   # 소문자 hex
 모집단        = 범위 [start_ms, end_ms) 안, kind ∈ kinds 이고 t_ms 가 정상인 채팅
-적격          = 모집단 − 경계 완충 안 채팅 (15-2)
+적격 (v2)     = 모집단 − 영상 밖 채팅 − 경계 완충 안 채팅 (15-2)
+                # 완충은 분류가 바뀌는 경계에만(category_change). 영상 밖 = 확인 범위
+                # [max(0, t − 10초), t + 30초] 가 영상 범위 하나 안에 다 들지 않음
+적격 (v1)     = 모집단 − 경계 완충 안 채팅            # 옛 판: 모든 안쪽 경계에 완충(all_boundaries), 영상 범위 안 봄
 E, n          = 적격 수, requested_size (= sample.per_segment)
 τ             = E = 0                  → null (표본 없음)
                 E ≤ sample.census_max  → 적격 중 가장 큰 key (census = true, 전수)
@@ -1062,6 +1067,7 @@ E, n          = 적격 수, requested_size (= sample.per_segment)
 표본          = 적격이면서 key ≤ τ 인 채팅 (role = base)
 ```
 
+- 순서 키·τ·불감소는 v1 과 v2 가 같다. 다른 것은 적격 계산 둘(완충을 두는 경계, 영상 밖 제외)뿐이다 ([06](06-evaluation-and-agreement.md) 2-1·2-2, D-11 5).
 - 처음 뽑을 때 판정 수는 정확히 n(시작값 100)개이고, 전수면 적격 전부다. key 는 소문자 hex 라 문자열 비교와 숫자 비교가 같다.
 - `random.Random(seed).sample` 대신 해시를 쓰는 이유: CPython 버전에 묶이지 않고, AI 엔진 쪽(다른 언어)에서도 같은 표본을 재현할 수 있다.
 - seed 에 구간 entity_id 와 `guide_version` 을 넣지 않는 이유: 구간을 쪼개거나 합쳐도, 같은 방송을 새 기준서로 다시 매겨도 같은 채팅이 같은 순서에 선다. 그래서 버전 사이에서 같은 채팅끼리 비교할 수 있다.
@@ -1076,7 +1082,8 @@ E, n          = 적격 수, requested_size (= sample.per_segment)
 | 1 | 후원·구독·시스템(`kind ∉ kinds`, v0.1 은 `kinds = ["text"]`) | 줄 세우기 전에 뺀다 | `excluded.non_text` |
 | 2 | 채팅 시각이 없거나 범위 밖 | 줄 세우기 전에 뺀다 | `excluded.invalid_time` |
 | — | 여기까지 남은 것이 모집단 | | `population` |
-| 3 | 경계 완충 안(분류가 다른 경계의 양쪽 각 `boundary_buffer_sec`, 4-3 규칙 4) | 적격에서 뺀다. 순서 키는 매기지만 τ 계산·표본 수·판정 큐에 넣지 않는다 | `excluded.buffer` |
+| 2-1 | 영상 밖(v2 만): 확인 범위(채팅 −10초 ~ +30초)가 영상 범위 하나 안에 다 들지 않음. 완충에도 걸리면 이쪽으로 센다 | 적격에서 뺀다 (D-10 3) | `excluded.out_of_media`, `media` |
+| 3 | 경계 완충 안(v2: 분류가 다른 경계의 양쪽 각 `boundary_buffer_sec`, 4-3 규칙 4 / 옛 v1: 모든 안쪽 경계, D-11 5) | 적격에서 뺀다. 순서 키는 매기지만 τ 계산·표본 수·판정 큐에 넣지 않는다 | `excluded.buffer` |
 | — | 여기까지 남은 것이 적격 채팅 | | `eligible` |
 
 - 한 채팅은 처음 걸린 사유 하나로만 센다. 집계 이름과 적격 뒤의 표시(클린봇 가림·출처)는 [06](06-evaluation-and-agreement.md) 2-2 표를 따른다.
@@ -1270,7 +1277,7 @@ MVP 에는 4단계(`missed_candidate`) 입력 화면이 없다(v1). 그래서 �
 | `schemas/report.schema.json` | `<앱>\data\reports\…\report.json` | v1 | 6-14 '보고서', [06](06-evaluation-and-agreement.md) 6-7 |
 | `schemas/eval-settings.schema.json` | 분석 설정(eval_settings: 일치도 허용 오차·판단 기준·보고서 경고값) | v1 (일치도·AI 비교를 앱 안에서 계산할 때) | [06](06-evaluation-and-agreement.md) 10장 분석 묶음. 기준서 시작값이 아니라 guide-config 에 넣지 않는다(9-3). 파일 위치는 그때 정한다(확인 필요) |
 
-`label-event.schema.json` 에 `session.open.dataset_split`·`run.start.update_check_state`·`checked_at`·`latest_seen_version` 을 넣었다(6-4). 반응 라벨의 후보별 증거(`candidates[]`, 6-7)와 표본 매니페스트의 `sha256-tau-v1` 필드(6-13), guide-config 의 `sample.census_max`·`sample.max_extend_ratio`·`relabel.random_share`·`relabel.hard_share`·`relabel.enforce_interval` 도 스키마에 반영했다. (`project.schema.json` 의 `sample_seed`·`dataset_split`·`labelers[].engine_author` 는 이미 넣었다.)
+`label-event.schema.json` 에 `session.open.dataset_split`·`run.start.update_check_state`·`checked_at`·`latest_seen_version` 을 넣었다(6-4). 반응 라벨의 후보별 증거(`candidates[]`, 6-7)와 표본 매니페스트의 τ 방식 필드(6-13. 지금 기본 `sha256-tau-v2` 의 `media`·`boundary_buffers`·`excluded.out_of_media` 까지, 옛 판 `sha256-tau-v1` 은 재현 검증용으로 enum 에 남김 — D-10 1, D-11 5), guide-config 의 `sample.census_max`·`sample.max_extend_ratio`·`relabel.random_share`·`relabel.hard_share`·`relabel.enforce_interval` 도 스키마에 반영했다. (`project.schema.json` 의 `sample_seed`·`dataset_split`·`labelers[].engine_author` 는 이미 넣었다.)
 
 - 각 스키마는 다른 파일을 참조하지 않는 독립 파일이다. AI 엔진(다른 언어)이 필요한 파일 하나만 받아 쓸 수 있게 하려는 것이다. 대신 열거값이 여러 파일에 반복되므로, `tests/test_schemas_sync.py` 가 모든 스키마의 열거값과 `app/core/schema.py` 상수가 같은지 검사한다.
 - 줄 사이 관계(판 연결, 참조, 잠금, 강도표에 따른 등급 규칙)는 스키마로 쓸 수 없다. 18장 검사 도구가 맡는다.
@@ -1293,4 +1300,4 @@ MVP 에는 4단계(`missed_candidate`) 입력 화면이 없다(v1). 그래서 �
 | 9 | AI 엔진이 실제로 내는 결과 종류(구간·등급·반응 시각·후보·출처 중 무엇) | `ai-result` 스키마 확정 |
 | 10 | 후원 금액을 파생 필드에 남기지 않는 것(보호 원문에만)이 괜찮은지 | 후원 반응을 따로 분석하려면 바꿔야 함 |
 | 11 | 치지직 API 페이지 경계에서 같은 메시지가 다시 오는지, `extras` 에 요청마다 바뀌는 값이 있는지 | 수집기 중복 처리와 `chat_id` 규칙(확인 필요) |
-| 12 | (결정됨 — 사용자 확정 전, 반대하면 되돌림) 표본 규칙을 옛 `sha256-sort-v1`(시드 = 프로젝트·구간·기준서·draw_no)과 [06](06-evaluation-and-agreement.md) 2장 `sha256-tau-v1`(시드 = `project.sample_seed`, 임계 키 τ, 완충은 적격에서 제외) 중 무엇으로 하나 | `sha256-tau-v1` 로 정했다. 15장·6-13·9-2·`sample-manifest.schema.json` 을 06 2장에 맞췄고 `sha256-sort-v1` 은 폐기했다([07](07-roadmap.md) ADR-09·질문 42) |
+| 12 | (결정됨 — 사용자 확정 전, 반대하면 되돌림) 표본 규칙을 옛 `sha256-sort-v1`(시드 = 프로젝트·구간·기준서·draw_no)과 [06](06-evaluation-and-agreement.md) 2장 `sha256-tau-v1`(시드 = `project.sample_seed`, 임계 키 τ, 완충은 적격에서 제외) 중 무엇으로 하나 | τ 방식으로 정했다. 15장·6-13·9-2·`sample-manifest.schema.json` 을 06 2장에 맞췄고 `sha256-sort-v1` 은 폐기했다([07](07-roadmap.md) ADR-09·질문 42). 그 뒤 완충을 분류가 바뀌는 경계에만 두고 영상 밖 채팅을 빼는 `sha256-tau-v2` 가 기본이 됐다. `sha256-tau-v1` 은 옛 판, 재현 검증만 (D-10 1·3, D-11 5) |

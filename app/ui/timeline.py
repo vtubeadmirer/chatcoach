@@ -74,9 +74,10 @@ TRACK_NAMES: dict[str, str] = {
     "silence": "침묵(재검토)",
     "labels": "반응 라벨",
     "engine": "엔진",
+    "primary": "잠긴 1차 라벨",       # 분석 세션만 (08 D-09 5). 라벨링 세션에는 이 트랙이 생기지 않는다
     "anchors": "앵커",
 }
-TRACK_ORDER = ("silence", "labels", "engine", "anchors")
+TRACK_ORDER = ("silence", "labels", "primary", "engine", "anchors")
 
 # 마커 종류 → (색, 속이 빈 표시). 모르는 종류는 DEFAULT_MARK. set_marker_style 로 더하거나 바꾼다.
 DEFAULT_MARK = (QColor(255, 167, 38), False)
@@ -86,6 +87,8 @@ MARK_STYLES: dict[str, tuple[QColor, bool]] = {
     "unconfirmed": (QColor(150, 150, 160), False),    # 반응 미확인
     "engine": (QColor(38, 198, 218), False),
     "engine_weak": (QColor(38, 198, 218), True),
+    "primary": (QColor(186, 104, 200), False),       # 잠긴 1차 반응 라벨(보라, 엔진의 청록과 구분)
+    "primary_weak": (QColor(186, 104, 200), True),   # 잠긴 1차의 반응 미확인·재확인 모자람
     "anchor": (QColor(255, 213, 79), False),
     "silence": (QColor(176, 190, 197), True),
     "selected": (QColor(255, 255, 255), False),

@@ -6,9 +6,16 @@
 화면에 있는 것
 - 라벨러: <data>\\labelers.json 명부(이 PC 에만, 표시 이름 포함)에서 고른다. [새 라벨러…] 로 명부에 더한다.
   예시 값을 미리 채우지 않는다(S-37: 두 사람이 예시 ID 를 같이 써 같은 사람 재라벨로 집계되는 일을 막는다).
-- 이어 하기: 고른 라벨러 **자기** 세션만 보인다(잠긴 세션은 고를 수 없음). 다른 라벨러 세션은 이름도 보이지 않는다.
+- 이어 하기: 고른 라벨러 **자기** 세션만 보인다. 다른 라벨러 세션은 이름도 보이지 않는다. 잠긴 세션은 고르면
+  읽기 전용으로 열린다(더 쓸 수 없음, 08 D-11 7 — 보기와 잠긴 1차의 재라벨 계획 만들기용). 단 그 1차 세션을 원 세션으로
+  하는 자기 같은 사람 재라벨(relabel_same) 계획이 있고 그 재라벨 세션이 아직 잠기지 않았으면 고를 수 없다
+  (06 3-3 3일 간격·3-4, app.session.reopen_refusal).
 - 새 세션 종류: 1차·재라벨 2종·조정·출처 판정·분석. 지금 프로젝트 상태에서 열 수 있는 것만 켜지고,
-  꺼진 것은 까닭을 옆에 적는다(app.session.kind_choices).
+  꺼진 것은 까닭을 옆에 적는다(app.session.kind_choices, 이 PC 의 machine4·지금 시각을 넘긴다).
+- 재라벨 2종(08 D-11 6, 03 12-2): 고르면 그 라벨러의 계획 파일 하나만 열어(app.relabel.read_plan_for_session)
+  scope=blocks·relabel_plan_id 를 session.open 에 넣는다. 같은 사람 재라벨을 3일 간격 전에 열면 사유를 받고
+  (ask_early_reason) SessionContext.extra['relabel_too_early'] 로 넘긴다 — 작업대가 store 를 연 뒤 warning 줄로 남긴다.
+  켜진 선택의 메모(앞당긴 시작·'같은 machine_id')도 옆에 보인다.
 - 기준서 버전 표시(project.json active_guide_version, 본문 해시 앞 8자). 이어 하는 세션은 그 세션의 버전.
 - 노출 안내: 분석 세션을 고르면 '열면 기록이 남고 이 라벨러의 라벨링 세션이 노출로 표시된다'(D-09 5).
 - [보기 전용으로 열기] · [취소] · [열기].
@@ -23,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import replace
 from datetime import datetime
 from typing import Callable
 
@@ -30,6 +38,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget)
 
+from .. import relabel as relabel_io
 from .. import session as sess
 from ..i18n import tr
 
@@ -72,6 +81,7 @@ class SessionDialog(QDialog):
         self.choices: list[sess.KindChoice] = []
         self._buttons: dict[str, QRadioButton] = {}
         self._this_m4: str | None = None
+        self.early_reason: Callable[[sess.KindChoice], str | None] | None = None   # 시험용: 앞당긴 시작 사유
         self._build()
 
     # ------------------------------------------------------------------ 화면
@@ -307,18 +317,25 @@ class SessionDialog(QDialog):
             self.existing = sess.existing_sessions(self.project_root, lid, sv, self._this_m4)
         except (OSError, ValueError):
             self.existing = []
-        self.choices = sess.kind_choices(sv, lid, self.existing)
+        self.choices = sess.kind_choices(sv, lid, self.existing, this_machine4=self._this_m4,
+                                         now=self._now() if self._now else None)
         if self.existing:
             self._section(tr("이어 하기"))
             for e in self.existing:
                 where = tr("이 PC") if e.on_this_pc else tr("다른 PC 에서 시작")
                 gv = f"v{e.guide_version}" if e.guide_version else tr("기준서 ?")
                 text = f"{e.session_id}  ·  {sess.KIND_LABELS[e.session_kind]}  ·  {gv}  ·  {where}"
-                why = tr("잠긴 세션이라 더 쓸 수 없습니다") if e.locked else ""
-                self._add_choice(RESUME_PREFIX + e.session_id, text, e.resumable, why)
+                # 잠긴 세션도 고를 수 있다: store 가 읽기 전용으로 연다(풀지 않음, D-11 7). 보기·재라벨 계획 만들기용.
+                # 다만 같은 사람 재라벨이 아직 잠기지 않은 1차 세션은 막는다(06 3-3·3-4, sess.reopen_refusal)
+                block = sess.reopen_refusal(e, lid, sv, self.existing)
+                why = tr(block) if block else (
+                    tr("잠긴 세션 — 읽기 전용으로 엽니다 (더 쓸 수 없음 · 1차면 재라벨 계획을 만들 수 있음)")
+                    if e.locked else "")
+                self._add_choice(RESUME_PREFIX + e.session_id, text, block is None, why)
         self._section(tr("새 세션"))
         for c in self.choices:
-            self._add_choice(NEW_PREFIX + c.kind, c.label, c.enabled, "" if c.enabled else c.reason)
+            # 켜진 재라벨 선택의 메모(앞당긴 시작·같은 machine_id, D-11 6)도 옆에 보인다
+            self._add_choice(NEW_PREFIX + c.kind, c.label, c.enabled, c.reason)
         if sv.roster_kinds and lid not in sv.roster_kinds:
             self._hint(tr("이 라벨러는 프로젝트 명부(project.json)에 없습니다. 열 수는 있고, 가져오기·보고서에서 경고로 표시됩니다."))
         self.choice_lay.addStretch(1)
@@ -388,16 +405,44 @@ class SessionDialog(QDialog):
             return None
         mid = self._machine_id()
         if key.startswith(RESUME_PREFIX):
-            return sess.resume_session(key[len(RESUME_PREFIX):], machine_id_value=mid)
+            sid = key[len(RESUME_PREFIX):]
+            e = next((x for x in self.existing if x.session_id == sid), None)
+            if e is not None and self.survey is not None and sess.reopen_refusal(e, lid, self.survey, self.existing):
+                return None
+            return sess.resume_session(sid, machine_id_value=mid)
         kind = key[len(NEW_PREFIX):]
+        extra: dict = {}
+        plan_args: dict = {}
+        if kind in ("relabel_same", "relabel_second"):
+            # 재라벨 2종(D-11 6, 03 12-2): 고른 계획(자기 계획 하나만 연다) → scope=blocks·relabel_plan_id 를 session.open 에
+            c = next((x for x in self.choices if x.kind == kind), None)
+            if c is None or not c.enabled or not c.plan_id:
+                return None
+            plan = relabel_io.read_plan_for_session(self.project_root, kind, lid, c.plan_id)
+            plan_args = relabel_io.session_args(plan)
+            if c.early:
+                reason = self.ask_early_reason(c)
+                if not reason:
+                    return None
+                extra["relabel_too_early"] = reason       # 작업대가 store 를 연 뒤 warning(relabel_too_early) 로 남긴다
         taken = set(self.survey.session_ids if self.survey else ())
         for _ in range(20):
             r4 = self._rand4() if self._rand4 else sess.random4()
             ctx = sess.new_session(lid, kind, machine_id_value=mid,
-                                   now=self._now() if self._now else None, rand4=r4)
+                                   now=self._now() if self._now else None, rand4=r4, **plan_args)
             if ctx.session_id not in taken:
-                return ctx
+                return replace(ctx, extra=extra) if extra else ctx
         raise RuntimeError("겹치지 않는 세션 ID 를 만들지 못했습니다")
+
+    def ask_early_reason(self, choice: sess.KindChoice) -> str | None:
+        """같은 사람 재라벨을 3일 간격 전에 열 때 사유를 받는다(06 3-3). 시험에서는 early_reason 으로 바꿔 끼운다."""
+        if self.early_reason is not None:
+            return self.early_reason(choice)
+        from PySide6.QtWidgets import QInputDialog
+        text, ok = QInputDialog.getText(self, tr("앞당긴 시작"),
+                                        tr("원 세션 잠금 뒤 간격이 지나지 않았습니다 ({0}).\n사유를 적으면 기록하고 엽니다:")
+                                        .format(choice.reason))
+        return text.strip() if ok and text.strip() else None
 
     def _choose_open(self) -> None:
         try:

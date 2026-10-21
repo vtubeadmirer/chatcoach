@@ -281,9 +281,9 @@
           "enum": [
             "audio_not_heard", "recheck_missing", "grade_rule_override", "rationale_without_time",
             "repeat_before_chat", "calibration_unverified", "relabel_too_early", "segment_too_short",
-            "long_silence_signal", "clock_skew", "other"
+            "long_silence_signal", "clock_skew", "continuation_missing", "other"
           ],
-          "description": "확인 범위를 듣지 않고 저장 / 재확인 부족 / 등급 규칙과 다르게 확정 / 근거에 시각 없음 / 발화가 채팅보다 앞서는데 '되풀이' 체크 / 시각 보정 미확인 / 재라벨 간격 부족 / 30초 미만 구간 / 긴 침묵 재검토 신호 / 시계 오차 / 기타."
+          "description": "확인 범위를 듣지 않고 저장 / 재확인 부족 / 등급 규칙과 다르게 확정 / 근거에 시각 없음 / 발화가 채팅보다 앞서는데 '되풀이' 체크 / 시각 보정 미확인 / 재라벨 간격 부족 / 30초 미만 구간 / 긴 침묵 재검토 신호 / 시계 오차 / 직접·높음 반응인데 이어짐을 비움(막지 않음, 08 D-10 7·D-11 4) / 기타."
         },
         "action": {"enum": ["shown", "dismissed", "resolved"]},
         "entity_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/uuid"}]},

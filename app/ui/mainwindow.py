@@ -7,6 +7,10 @@
 (플레이어·워커·session.close 줄·잠금 정리) 새로 만든다. session.close 의 reason: 프로젝트 닫기 'user',
 다른 프로젝트 열기 'switch_project', 앱 종료 'app_exit'.
 
+세션·보고 메뉴 (06 7-1·7-3, 08 D-11): [세션 → 이 세션 잠그기…] 는 app/ui/lock_dialog(2단계) 뒤 작업대를 읽기 전용으로,
+[세션 → 재라벨 계획 만들기…] 는 잠긴 자기 1차 세션에서만(app/ui/relabel_dialog), [보고 → 일치도 보고서…] 는 잠긴 두 세션을
+골라 프로젝트 밖에 쓴다(app/ui/agreement_dialog). 보고서 메뉴는 잠기지 않은 라벨링 세션 중에는 꺼진다.
+
 업데이트 연동 흐름 (04 6장): 시작 30초 뒤 백그라운드 확인 → 상태바 3상태 → '새 버전' 버튼 → 대화상자 →
 준비(진행률·취소) → 교체 전 조건 → 적용(시작 표식 확인) → 앱 종료. 확인 시각은 updater 가 결과 뒤에 쓴다.
 """
@@ -91,6 +95,7 @@ class MainWindow(QMainWindow):
         m_file.addAction(a_quit)
         self.m_view = self.menuBar().addMenu(tr("보기(&V)"))
         self.m_view.menuAction().setVisible(False)
+        self._build_session_menus()
         # 니모닉은 &D: Alt+U 는 구간 폼의 '판단 불가' 단축키라 메뉴와 겹치면 둘 다 동작하지 않는다(애매한 단축키)
         m_upd = self.menuBar().addMenu(tr("업데이트(&D)"))
         a_check = QAction(tr("지금 확인(&C)"), self)
@@ -146,6 +151,119 @@ class MainWindow(QMainWindow):
         self.a_export.setEnabled(False)
         m_file.addAction(self.a_export)
         m_file.addSeparator()
+
+    def _build_session_menus(self) -> None:
+        """세션(&N): 이 세션 잠그기…·재라벨 계획 만들기… / 보고(&B): 일치도 보고서… (06 7-1, 08 D-11).
+        니모닉은 N·B: Alt+S·O·G·J·U 는 폼 단축키라 겹치면 둘 다 동작하지 않는다."""
+        self.m_session = self.menuBar().addMenu(tr("세션(&N)"))
+        self.a_lock = QAction(tr("이 세션 잠그기(&L)…"), self)
+        self.a_lock.triggered.connect(lambda: self.lock_session_dialog())
+        self.m_session.addAction(self.a_lock)
+        self.a_plan = QAction(tr("재라벨 계획 만들기(&P)…"), self)
+        self.a_plan.triggered.connect(lambda: self.relabel_plan_dialog())
+        self.m_session.addAction(self.a_plan)
+        self.m_report = self.menuBar().addMenu(tr("보고(&B)"))
+        self.a_agreement = QAction(tr("일치도 보고서(&A)…"), self)
+        self.a_agreement.triggered.connect(lambda: self.agreement_dialog())
+        self.m_report.addAction(self.a_agreement)
+        self.m_session.aboutToShow.connect(self.update_session_actions)
+        self.m_report.aboutToShow.connect(self.update_session_actions)
+        self.update_session_actions()
+
+    def agreement_block_reason(self) -> str | None:
+        """일치도 보고서를 지금 열 수 없는 까닭.
+
+        - 자리: 보기 전용(세션 없음)과 조정 세션만(03 12-1: 보고서 쓰기는 조정 세션 RW). 라벨링 종류(1차·재라벨)는 잠긴
+          세션을 다시 열었어도, 분석 세션(보고서 읽기만·다른 세션은 잠긴 1차만)도 끈다(06 7-3).
+        - 06 7-1: relabel/ 계획 가운데 잠긴 재라벨 세션이 아직 없는 것이 있으면 끈다(어느 1차 세션의 것이든 — 메뉴는
+          두 세션을 고르기 전이라 넓게 막는다. 고른 뒤에는 build_report 가 그 1차 세션의 계획만 다시 본다).
+        """
+        from .. import agreement_report as ar
+        wb = self.workbench
+        if wb is None or getattr(wb, "project", None) is None:
+            return tr("프로젝트를 먼저 여세요")
+        kind = wb.session_kind if wb.session is not None else None
+        why = ar.reader_block_reason(kind)
+        if why:
+            return tr(why)
+        try:
+            pending = ar.pending_relabel_plans(wb.project.root)
+        except OSError:
+            pending = []
+        if pending:
+            return tr("계획된 재라벨 세션 {0}개가 아직 잠기지 않았습니다 — 모두 잠근 뒤에 보고서를 엽니다 (06 7-1)") \
+                .format(len(pending))
+        return None
+
+    def update_session_actions(self) -> None:
+        wb = self.workbench
+        why_lock = wb.can_lock() if wb is not None else tr("프로젝트를 먼저 여세요")
+        self.a_lock.setEnabled(why_lock is None)
+        self.a_lock.setToolTip(why_lock or "")
+        why_plan = wb.can_make_relabel_plan() if wb is not None else tr("프로젝트를 먼저 여세요")
+        self.a_plan.setEnabled(why_plan is None)
+        self.a_plan.setToolTip(why_plan or "")
+        why_rep = self.agreement_block_reason()
+        self.a_agreement.setEnabled(why_rep is None)
+        self.a_agreement.setToolTip(why_rep or "")
+
+    def lock_session_dialog(self, *, run=None):
+        """'세션 → 이 세션 잠그기…' — 2단계 잠그기 화면(app/ui/lock_dialog). run(dlg) 을 주면 exec() 대신 그것을 부른다
+        (시험). 잠갔으면 잠금 내용 dict, 아니면 None. 잠근 뒤 작업대는 읽기 전용(after_session_locked)."""
+        wb = self.workbench
+        if wb is None:
+            return None
+        why = wb.can_lock()
+        if why:
+            self.statusBar().showMessage(why, 5000)
+            return None
+        if not wb.prepare_lock():
+            return None
+        from .lock_dialog import LockDialog
+        dlg = LockDialog(self, store=wb.store, sample_verify=wb.sample_verify_results())
+        try:
+            (run or (lambda d: d.exec()))(dlg)
+            doc = dlg.lock_doc
+        finally:
+            dlg.deleteLater()
+        if doc is not None:
+            wb.after_session_locked()
+            self.update_session_actions()
+            self.statusBar().showMessage(tr("세션 {0} 를 잠갔습니다").format(doc.get("session_id")), 5000)
+        return doc
+
+    def relabel_plan_dialog(self, *, run=None):
+        """'세션 → 재라벨 계획 만들기…'. run(dlg) 을 주면 exec() 대신(시험). 만든 계획 dict 또는 None."""
+        wb = self.workbench
+        if wb is None:
+            return None
+        why = wb.can_make_relabel_plan()
+        if why:
+            self.statusBar().showMessage(why, 5000)
+            return None
+        from .relabel_dialog import RelabelPlanDialog
+        dlg = RelabelPlanDialog(self, workbench=wb, data_root=self.data_root)
+        try:
+            (run or (lambda d: d.exec()))(dlg)
+            return dlg.plan
+        finally:
+            dlg.deleteLater()
+
+    def agreement_dialog(self, *, run=None):
+        """'보고 → 일치도 보고서…'. run(dlg) 을 주면 exec() 대신(시험). 만든 ReportResult 또는 None."""
+        why = self.agreement_block_reason()
+        if why:
+            self.statusBar().showMessage(why, 5000)
+            return None
+        from .agreement_dialog import AgreementDialog
+        wb = self.workbench
+        dlg = AgreementDialog(self, project_root=wb.project.root, created_by=wb.labeler_id,
+                              reader_kind=wb.session_kind if wb.session is not None else None)
+        try:
+            (run or (lambda d: d.exec()))(dlg)
+            return dlg.result
+        finally:
+            dlg.deleteLater()
 
     def _fill_recent_menu(self) -> None:
         self.m_recent.clear()
@@ -217,6 +335,7 @@ class MainWindow(QMainWindow):
                 self.move(avail.topLeft())
         wb.open_project(outcome)
         wb.setFocus()
+        self.update_session_actions()
 
     def _before_open(self, path: str) -> None:
         """열려는 폴더가 지금 작업대의 프로젝트면 작업대를 먼저 닫아 잠금(locks/open.lock)을 푼다.
@@ -253,6 +372,7 @@ class MainWindow(QMainWindow):
         self.m_view.clear()
         self.m_view.menuAction().setVisible(False)
         self.a_export.setEnabled(False)
+        self.update_session_actions()
 
     def show_home(self) -> None:
         self._close_workbench("user")

@@ -15,8 +15,12 @@
 - 라벨러 명부 <data>\\labelers.json (load_labelers·add_labeler): 표시 이름(실명일 수 있음)은 이 PC 에만 둔다.
   프로젝트·라벨·로그에는 labeler_id 만 쓴다(S-24·S-37).
 - 세션 고르기 계산 (survey_project·kind_choices): 세션 선택 화면(app/ui/session_dialog.py)이 쓴다.
-  labels/·locks/·relabel/·origin/·derived/ 의 **파일 이름만** 본다. 다른 세션 기록의 내용은 읽지 않는다(03 12-1).
-  읽는 내용은 고른 라벨러 자기 세션 파일의 첫 줄(session.open, 기준서 버전 표시용)뿐이다.
+  labels/·locks/·origin/·derived/ 의 **파일 이름만** 본다. 다른 세션 기록의 내용은 읽지 않는다(03 12-1).
+  읽는 내용은 고른 라벨러 자기 세션 파일의 첫 줄(session.open, 기준서 버전·계획 ID)과 재라벨 계획 파일의 요약 칸
+  (누구·어떤 종류·원 세션·시작 가능 시각, app.relabel.list_plans)뿐이다. 계획에는 라벨 내용이 없다.
+- 재라벨 2종(08 D-11 6, 06 3-3): 그 라벨러에게 맡긴 쓸 수 있는 계획이 있고, 원 세션이 잠겼고, 그 계획으로 연
+  자기 세션이 아직 없을 때 켜진다. relabel_same 은 3일 간격 전이면 '앞당긴 시작'(사유 필요) 또는 강제면 막힘.
+  relabel_second 는 간격이 없고, 이 PC 가 원 세션 PC 와 같으면 '같은 machine_id' 를 표시한다.
 """
 from __future__ import annotations
 
@@ -30,6 +34,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Callable, Iterable
 
+from . import relabel as relabel_io
+from .core import relabel_plan as rp
 from .core import visibility as vis
 from .core.ids import SESSION_FILE_RE, SESSION_ID_RE
 from .core.validate import StrictJsonError, load_json_strict
@@ -422,6 +428,7 @@ class ExistingSession:
     locked: bool                          # locks/<session_id>.json 이 있음 → 더 쓸 수 없음 (6-14)
     on_this_pc: bool
     guide_version: str | None = None      # 자기 세션 파일 첫 줄에서 (읽지 못하면 None)
+    relabel_plan_id: str | None = None    # 자기 세션 파일 첫 줄의 session.open.relabel_plan_id (재라벨 세션)
 
     @property
     def resumable(self) -> bool:
@@ -439,6 +446,7 @@ class ProjectSurvey:
     active_guide_version: str | None
     guide_sha8: str | None                # 그 기준서 본문 SHA-256 앞 8자 (표시용)
     roster_kinds: dict                    # project.json labelers[]: labeler_id → 맡긴 세션 종류 tuple
+    plans: tuple = ()                     # relabel_io.PlanSummary 들 (relabel/RP-*.json 요약, 이름 순)
 
     def mine(self, labeler_id: str) -> list[str]:
         return [s for s in self.session_ids if s.startswith(labeler_id + "-")
@@ -476,20 +484,31 @@ def survey_project(project_root: str, project_data: dict | None) -> ProjectSurve
         if isinstance(e, dict) and isinstance(e.get("labeler_id"), str):
             kinds = e.get("assigned_session_kinds")
             roster[e["labeler_id"]] = tuple(k for k in kinds if isinstance(k, str)) if isinstance(kinds, list) else ()
-    return ProjectSurvey(tuple(sids), locked, plans, origin, engine, gv, sha8, roster)
+    try:
+        summaries = tuple(relabel_io.list_plans(project_root))
+    except OSError:
+        summaries = ()
+    return ProjectSurvey(tuple(sids), locked, plans, origin, engine, gv, sha8, roster, summaries)
 
 
-def _first_record_guide(path: str) -> str | None:
-    """기록 파일 첫 줄(session.open)의 guide_version. 읽지 못하면 None. 첫 줄만 읽는다."""
+def _first_record_meta(path: str) -> tuple[str | None, str | None]:
+    """기록 파일 첫 줄(session.open)의 (guide_version, relabel_plan_id). 읽지 못하면 None. 첫 줄만 읽는다."""
     try:
         with builtins.open(path, "rb") as f:
             line = f.readline(FIRST_LINE_MAX_BYTES + 1)
         rec = load_json_strict(line.strip(), FIRST_LINE_MAX_BYTES)
     except (OSError, StrictJsonError):
-        return None
+        return None, None
     body = rec.get("body") if rec.get("kind") == "session.open" else None
-    gv = body.get("guide_version") if isinstance(body, dict) else None
-    return gv if isinstance(gv, str) else None
+    if not isinstance(body, dict):
+        return None, None
+    gv, pid = body.get("guide_version"), body.get("relabel_plan_id")
+    return (gv if isinstance(gv, str) else None), (pid if isinstance(pid, str) else None)
+
+
+def _first_record_guide(path: str) -> str | None:
+    """기록 파일 첫 줄(session.open)의 guide_version. 읽지 못하면 None."""
+    return _first_record_meta(path)[0]
 
 
 def existing_sessions(project_root: str, labeler_id: str, survey: ProjectSurvey,
@@ -505,13 +524,14 @@ def existing_sessions(project_root: str, labeler_id: str, survey: ProjectSurvey,
     out = []
     for sid in survey.mine(labeler_id):
         m4s = tuple(sorted(by_sid.get(sid, ())))
-        gv = None
+        gv = pid = None
         for m4 in ((this_machine4,) if this_machine4 in m4s else ()) + m4s:
-            gv = _first_record_guide(os.path.join(labels, session_file_name(sid, m4)))
-            if gv:
+            g, p = _first_record_meta(os.path.join(labels, session_file_name(sid, m4)))
+            gv, pid = gv or g, pid or p
+            if gv and pid:
                 break
         out.append(ExistingSession(sid, CODE_KINDS[SESSION_ID_RE.match(sid).group(2)], m4s,
-                                   sid in survey.locked_ids, this_machine4 in m4s, gv))
+                                   sid in survey.locked_ids, this_machine4 in m4s, gv, pid))
     return out
 
 
@@ -522,14 +542,64 @@ class KindChoice:
     label: str
     enabled: bool
     reason: str = ""                       # 막힌 까닭(화면에 보임). 열 수 있으면 빈 문자열이나 짧은 메모
+    plan_id: str | None = None             # 재라벨 2종: 이 선택으로 쓸 계획 (relabel_io.read_plan_for_session)
+    early: bool = False                    # relabel_same 을 3일 간격 전에 앞당겨 연다 → 사유를 받아 warning(relabel_too_early)
+    remaining_ms: int = 0                  # 앞당긴 시작일 때 earliest_start_at 까지 남은 시간
+    same_machine: bool = False             # relabel_second: 이 PC 가 원 세션 PC 와 같음 → 보고서 '같은 machine_id' (D-11 6)
+
+
+def _hours(ms: int) -> str:
+    h = ms / 3_600_000
+    return f"{h:.0f}시간" if h >= 1 else f"{max(1, round(ms / 60_000))}분"
+
+
+def _relabel_choice(kind: str, survey: ProjectSurvey, labeler_id: str | None, mine: list[ExistingSession],
+                    this_machine4: str | None, now: datetime) -> KindChoice:
+    """재라벨 2종 하나의 KindChoice. 쓸 수 있는 계획 가운데 이름 순 첫 번째를 고른다."""
+    label = KIND_LABELS[kind]
+    if not survey.plans:
+        return KindChoice(kind, label, False, "재라벨 계획(relabel\\)이 없습니다")
+    usable = [p for p in survey.plans if p.usable]
+    if not usable:
+        return KindChoice(kind, label, False, f"읽을 수 있는 재라벨 계획이 없습니다: {survey.plans[0].problem}")
+    used = {s.relabel_plan_id for s in mine if s.relabel_plan_id}
+    reasons: list[str] = []
+    for p in usable:
+        plan = p.as_plan()
+        why = rp.plan_refusal(plan, kind, labeler_id)
+        if why is None and p.source_session_id not in survey.locked_ids:
+            why = "원 세션이 잠기지 않았습니다"
+        if why is None and p.plan_id in used:
+            why = f"계획 {p.plan_id} 로 연 세션이 이미 있습니다"
+        if why is not None:
+            reasons.append(why)
+            continue
+        gate = rp.start_gate(plan, now.isoformat(timespec="seconds"))
+        same = kind == rp.RELABEL_SECOND and rp.same_machine(plan, this_machine4)
+        note = ("이 PC 가 원 세션과 같은 PC 입니다 — 일치도 보고서에 '같은 machine_id' 로 표시됩니다 (08 D-11 6)"
+                if same else "")
+        if gate.status == rp.GATE_BLOCKED:
+            return KindChoice(kind, label, False,
+                              f"원 세션 잠금 뒤 간격이 지나지 않았습니다 (남은 {_hours(gate.remaining_ms)}, 강제)",
+                              p.plan_id, remaining_ms=gate.remaining_ms)
+        if gate.status == rp.GATE_EARLY:
+            return KindChoice(kind, label, True,
+                              f"앞당긴 시작입니다 (남은 {_hours(gate.remaining_ms)}). 열려면 사유를 적어야 하고 기록됩니다",
+                              p.plan_id, early=True, remaining_ms=gate.remaining_ms)
+        return KindChoice(kind, label, True, note, p.plan_id, same_machine=same)
+    return KindChoice(kind, label, False, reasons[0] if len(set(reasons)) == 1 else
+                      "이 라벨러가 이 종류로 쓸 수 있는 재라벨 계획이 없습니다")
 
 
 def kind_choices(survey: ProjectSurvey, labeler_id: str | None,
-                 mine: Iterable[ExistingSession] = ()) -> list[KindChoice]:
+                 mine: Iterable[ExistingSession] = (), *, this_machine4: str | None = None,
+                 now: datetime | None = None) -> list[KindChoice]:
     """지금 프로젝트 상태에서 새로 열 수 있는 세션 종류(02 7-2 5단계, D-09 1).
 
     - primary: 늘 열 수 있다. 다만 이어 할 수 있는 같은 라벨러의 1차 세션이 있으면 새로 만들지 않고 이어 하게 한다.
-    - relabel_same·relabel_second: 재라벨 계획(relabel/RP-*.json)이 있어야 한다. 계획 고르기는 v1 이라 지금은 막는다.
+    - relabel_same·relabel_second: 그 라벨러에게 맡긴 쓸 수 있는 재라벨 계획(relabel/RP-*.json)이 있고, 원 세션이
+      잠겼고, 그 계획으로 연 자기 세션이 없어야 한다(_relabel_choice). relabel_same 은 원 세션 라벨러만,
+      relabel_second 는 다른 라벨러만. 3일 간격은 relabel_same 에만(06 3-3). now 는 그 판정의 지금(없으면 PC 시각).
     - adjudication: 잠긴 세션(locks/<session_id>.json)이 2개 이상.
     - origin_review: 출처 자료(origin/)가 있어야 한다.
     - analysis: 엔진 결과(derived/link-*.json)나 잠긴 1차 세션이 있어야 한다.
@@ -539,6 +609,9 @@ def kind_choices(survey: ProjectSurvey, labeler_id: str | None,
     mine = list(mine)
     assigned = survey.roster_kinds.get(labeler_id) if labeler_id else None
     locked_primary = [s for s in survey.locked_ids if vis.session_kind_of_id(s) == "primary"]
+    t = now if now is not None else datetime.now().astimezone()
+    if t.tzinfo is None:
+        t = t.astimezone()
     out = []
     for kind in KIND_ORDER:
         ok, why = True, ""
@@ -547,9 +620,11 @@ def kind_choices(survey: ProjectSurvey, labeler_id: str | None,
             if cont is not None:
                 ok, why = False, f"이어 할 1차 세션 {cont.session_id} 가 있습니다. 위에서 이어 하기를 고르세요"
         elif kind in ("relabel_same", "relabel_second"):
-            ok = False
-            why = ("재라벨 계획(relabel\\)이 없습니다" if survey.relabel_plans == 0
-                   else "재라벨 계획 고르기는 아직 없습니다 (v1)")
+            c = _relabel_choice(kind, survey, labeler_id, mine, this_machine4, t)
+            if c.enabled and assigned and kind not in assigned:
+                c = KindChoice(kind, c.label, False, "프로젝트 명부에서 이 라벨러에게 맡기지 않은 종류입니다", c.plan_id)
+            out.append(c)
+            continue
         elif kind == "adjudication":
             n = len(survey.locked_ids)
             if n < 2:
@@ -564,6 +639,29 @@ def kind_choices(survey: ProjectSurvey, labeler_id: str | None,
             ok, why = False, "프로젝트 명부에서 이 라벨러에게 맡기지 않은 종류입니다"
         out.append(KindChoice(kind, KIND_LABELS[kind], ok, why))
     return out
+
+
+def reopen_refusal(entry: ExistingSession, labeler_id: str | None, survey: ProjectSurvey,
+                   mine: Iterable[ExistingSession] = ()) -> str | None:
+    """잠긴 자기 세션을 (읽기 전용으로) 다시 열 수 없는 까닭. 열 수 있으면 None.
+
+    잠긴 1차 세션을 다시 열면 store 가 그 기록 파일을 열고 작업대가 구간·반응을 그린다. 같은 라벨러에게 그 세션을 원
+    세션으로 하는 같은 사람 재라벨(relabel_same) 계획이 있고, 그 계획으로 연 자기 세션이 아직 잠기지 않았으면(만들기 전
+    포함) 막는다 — 3일 간격(06 3-3)은 기억 효과를 줄이려는 것이고, 읽기 전용 보기에는 view.exposed 도 남지 않는다.
+    읽지 못한 계획은 원 세션을 알 수 없어 보지 않는다(세션 선택 화면이 그 계획의 문제를 따로 보인다).
+    """
+    if not entry.locked or entry.session_kind != "primary":
+        return None
+    mine = list(mine)
+    for p in survey.plans:
+        if not p.usable or p.session_kind != rp.RELABEL_SAME:
+            continue
+        if p.labeler_id != labeler_id or p.source_session_id != entry.session_id:
+            continue
+        if not any(s.relabel_plan_id == p.plan_id and s.locked for s in mine):
+            return (f"같은 사람 재라벨(계획 {p.plan_id})을 잠그기 전에는 이 1차 세션을 다시 열지 않습니다 "
+                    "— 3일 간격·블라인드 (06 3-3·3-4)")
+    return None
 
 
 def exposure_notes(survey: ProjectSurvey, labeler_id: str, session_kind: str) -> list[str]:

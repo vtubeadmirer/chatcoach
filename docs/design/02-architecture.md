@@ -184,7 +184,7 @@ flowchart TB
 | `app/core/phase.py` | 단계 규칙: 어떤 구간에서 어떤 단계 라벨을 만들 수 있는가, 시간 정렬 관문 | schema | 순수 함수 (6-2) | MVP |
 | `app/core/visibility.py` | `can_show(item, phase, session_kind)`, `files_to_open(session_kind, phase)` | schema | 순수 함수 표 | MVP (재라벨 분기는 v1) |
 | `app/core/rules.py` | 등급 조건 충족 계산(등급을 미리 고르지 않음, [01](01-analysis-and-ideas.md) 3-1), 시간 창 판정, 이어짐 제안·절단, 완충 판정, 노출 추정 보조값 | thresholds | 순수 함수 | MVP |
-| `app/core/sampling.py` | 표본 추출 (`sha256-tau-v1`: 순서 키, 임계 키 τ 와 불감소, 전수 전환, `draw_no`·`sample_rev`), 재현 검증 | ids | 순수 함수. 규칙은 [06](06-evaluation-and-agreement.md) | MVP |
+| `app/core/sampling.py` | 표본 추출 (`sha256-tau-v2` 기본: 순서 키, 임계 키 τ 와 불감소, 전수 전환, `draw_no`·`sample_rev`, 분류가 바뀌는 경계에만 완충, 영상 밖 제외), 재현 검증 (옛 판 `sha256-tau-v1` 매니페스트도 v1 규칙으로 재현만 — D-11 5) | ids | 순수 함수. 규칙은 [06](06-evaluation-and-agreement.md) | MVP |
 | `app/core/resolve.py` | 라벨 레코드 묶음 → '현재 유효 라벨' 뷰. supersedes 체인·철회·포크·순환·무효 참조 표시 | schema | 순수 함수, 골든 테스트 (S-10) | MVP |
 | `app/core/agreement.py` | 세션 쌍 정렬과 일치도 계산 | resolve | 순수 Python (numpy 없음) | v1 |
 | `app/jsonl.py` | JSONL 안전 읽기(BOM·잘린 마지막 줄·중간 깨짐)와 한 줄 append(끝 개행 확인 → `os.write` 1회 → `fsync`) | validate | stdlib (S-30) | MVP |
@@ -1130,7 +1130,7 @@ A·B단계 첫 측정 (2026-10-21, 개발 PC, RTX 4060 Ti, VOD 1편 `<VOD-A>`(�
 | API 응답 페이지 원문 gz 보존 | C | 채택 (보호 구역 안) | 5-4 |
 | `VERSION` 단일 소스 | B·C | 채택 | 4장 |
 | 확인 1차 경로를 raw.githubusercontent 채널 파일로 | B | 변형 채택 | 채널 파일 대신 서명된 `latest.json` 을 릴리스 자산으로 올린다. 확인은 1차 `releases/latest/download/latest.json`, 2차 REST API. 앱이 서명된 `latest.json` 하나만 믿으므로 채널 파일을 따로 운영하지 않는다 ([04](04-update-and-release.md) 0장·6-2) |
-| sha256 기반 언어 독립 표본 순서 키 + 임계 키 τ (`sha256-tau-v1`, 완충은 적격 밖, τ 불감소) | C | 채택 (사용자 확정 전, [07](07-roadmap.md) ADR-09) | `core/sampling.py`, [06](06-evaluation-and-agreement.md) 2장 |
+| sha256 기반 언어 독립 표본 순서 키 + 임계 키 τ (`sha256-tau-v2`, 완충은 적격 밖·분류가 바뀌는 경계에만, 영상 밖 제외, τ 불감소. 옛 판 `sha256-tau-v1` 은 재현 검증만 — D-11 5) | C | 채택 (사용자 확정 전, [07](07-roadmap.md) ADR-09) | `core/sampling.py`, [06](06-evaluation-and-agreement.md) 2장 |
 | 앱 밖 검증 CLI | C | 채택 (MVP 최소판) | 11-4 |
 | SQLite 색인은 프로젝트 폴더가 아니라 `data\cache` 에 | C | 채택 (v1) | 1-4, 5-2 |
 | 저장소 로드 골든 테스트를 첫날부터 | C | 채택. 로드 로직을 `core/resolve.py` 로 분리 | 11-2 |

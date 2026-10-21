@@ -33,8 +33,8 @@
 - 직접·높음은 7-2 재확인('들었다' 고 인정된 회차 min_views 이상)이 없으면 '완료' 가 아니다(질문 15 기본안).
   result['complete'] = False, warning(recheck_missing). 타임라인은 속이 빈 표시(작업대 몫).
   '들었다' 인정 비율은 기준서 시작값 recheck.heard_min_coverage(없으면 rules.HEARD_MIN_COVERAGE, D-10 6).
-- 직접·높음에서 이어짐을 비우면 경고 줄 continuation_missing(D-10 7, 막지 않음). 운영 기록에는 code 'other' 로 남긴다
-  (label-event 스키마의 warning code 목록에 없어서).
+- 직접·높음에서 이어짐을 비우면 경고 줄 continuation_missing(D-10 7, 막지 않음). 운영 기록에도 code
+  continuation_missing 으로 남긴다(label-event 스키마 warning code 목록에 넣음, D-11 4).
 - 확인 범위를 소리로 듣지 않음(audio_not_heard), 근거에 시각 없음(rationale_without_time),
   발화가 채팅보다 앞서는데 '되풀이' 체크(repeat_before_chat), 조건과 다르게 확정(grade_rule_override).
 
@@ -88,11 +88,11 @@ RATIONALE_MAX = 300
 OVERRIDE_MAX = 300
 LINKED_GRADES = ("direct", "likely")       # 연결 발화·반응 시각 필수, 이어짐·재확인 대상
 JUST_CHATTING = "just_chatting"
-CONTINUATION_MISSING = "continuation_missing"   # 편집기 경고 줄 코드(D-10 7). 운영 기록에는 'other' 로
+CONTINUATION_MISSING = "continuation_missing"   # 경고 줄·운영 기록 코드(D-10 7, 스키마 목록에 넣음 D-11 4)
 # label-event.schema.json $defs/warningBody.code 목록. 이 밖의 코드는 운영 기록에 'other' 로 쓴다.
 OPS_WARNING_CODES = frozenset({"audio_not_heard", "recheck_missing", "grade_rule_override", "rationale_without_time",
                                "repeat_before_chat", "calibration_unverified", "relabel_too_early", "segment_too_short",
-                               "long_silence_signal", "clock_skew", "other"})
+                               "long_silence_signal", "clock_skew", CONTINUATION_MISSING, "other"})
 _KEEP = object()                                 # load_context 에서 '넘기지 않음' 표시(None 과 구분)
 
 

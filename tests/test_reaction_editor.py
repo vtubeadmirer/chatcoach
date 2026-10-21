@@ -686,8 +686,19 @@ def test_direct_without_continuation_warns_but_saves(env):
     assert "이어짐을 비웠습니다" in ed.msg.text() and ed.save_btn.isEnabled()
     res = ed.save()
     assert res is not None and CONTINUATION_MISSING in res["warnings"]
-    ops = [o["body"] for o in env.ops if o["body"].get("detail", "").startswith(CONTINUATION_MISSING)]
-    assert len(ops) == 1 and ops[0]["code"] == "other"          # 스키마 목록 밖 코드는 'other' 로
+    ops = [o["body"] for o in env.ops if o["body"].get("code") == CONTINUATION_MISSING]
+    assert len(ops) == 1                                         # 스키마 목록에 넣은 코드 그대로(D-11 4)
+    assert not ops[0].get("detail", "").startswith(CONTINUATION_MISSING + ":")   # 'other' 로 감싸지 않음
+
+
+def test_ops_warning_codes_match_label_event_schema():
+    """편집기가 운영 기록에 그대로 쓰는 코드 = label-event 스키마 warningBody.code 목록(D-11 4)."""
+    from app.ui.forms.reaction_editor import CONTINUATION_MISSING, OPS_WARNING_CODES
+    with open(os.path.join(ROOT, "schemas", "label-event.schema.json"), encoding="utf-8") as f:
+        sch = json.load(f)
+    codes = set(sch["$defs"]["warningBody"]["properties"]["code"]["enum"])
+    assert CONTINUATION_MISSING in codes
+    assert set(OPS_WARNING_CODES) == codes
 
 
 def test_related_only_has_no_continuation_warning(env):

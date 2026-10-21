@@ -84,6 +84,8 @@ WAVE_MIN_POINTS = 1_000
 WAVE_MAX_POINTS = 20_000
 ENGINE_TRACK = "engine"
 LABEL_TRACK = "labels"            # timeline.TRACK_ORDER 의 라벨 트랙
+PRIMARY_TRACK = "primary"         # 분석 세션의 잠긴 1차 라벨 트랙 (08 D-09 5, 엔진 트랙과 다른 색)
+RELABEL_KINDS = ("relabel_same", "relabel_second")
 # 엔진 등급 → timeline.MARK_STYLES 의 종류 (강한 판정은 채운 표시, 약한 판정은 속이 빈 표시)
 ENGINE_MARK_KIND = {"direct": "engine", "likely": "engine", "related_only": "engine_weak", "unclear": "engine_weak"}
 LINK_MAX_BYTES = 64 * 1024 * 1024
@@ -423,6 +425,153 @@ def prepare_sample(messages_path: str, seg: Mapping, segments, *, duration_ms: i
     return man, {m["chat_id"]: m for m in msgs if m.get("chat_id") in wanted}
 
 
+def relabel_buffers(segments, scope_ranges, buffer_ms: int) -> list[tuple[int, int]]:
+    """재라벨 세션의 경계 완충: 블록마다 그 안의 자기 구간만으로 category_change 규칙(v2)을 쓴다.
+
+    블록 가장자리는 경계가 아니다(06 3-1) — 블록 [lo, hi) 를 0 ~ (hi − lo) 로 옮겨 record_buffers 에 넘기면 처음·끝이
+    전환에서 빠진다. 블록 밖 구간은 재라벨 세션에 없다(store 가 scope 밖 저장을 거부).
+    """
+    from ..core.segments import record_buffers
+    out: list[tuple[int, int]] = []
+    for lo, hi in scope_ranges:
+        inside = []
+        for s in segments or ():
+            b = s.get("body") if isinstance(s.get("body"), Mapping) else s
+            a, z = b.get("start_ms"), b.get("end_ms")
+            if _is_int(a) and _is_int(z) and lo <= a and z <= hi:
+                inside.append({"start_ms": a - lo, "end_ms": z - lo, "category": b.get("category")})
+        out += [(a + lo, z + lo) for a, z in record_buffers(inside, hi - lo, buffer_ms)]
+    return sorted(out)
+
+
+def plan_block_for(plan: Mapping, start_ms: int, end_ms: int) -> Mapping | None:
+    """구간 [start, end) 를 통째로 담는 계획의 고른 블록(selected 항목). 없으면 None."""
+    for s in plan.get("selected") or []:
+        for lo, hi in s.get("ranges") or []:
+            if lo <= start_ms and end_ms <= hi:
+                return s
+    return None
+
+
+def plan_blocks_for(plan: Mapping, start_ms: int, end_ms: int) -> list[tuple[Mapping, int, int]] | None:
+    """구간 [start, end) 를 덮는 고른 블록 조각 [(selected 항목, 조각 시작, 조각 끝)] (시각 순).
+
+    store 는 맞닿은 블록을 합친 scope 로 저장을 허락하므로(rp.scope_of), 두 블록에 걸친 구간도 있다. 조각들이 구간을
+    빈틈 없이 덮지 못하면(블록 밖이 섞임) None.
+    """
+    pieces: list[tuple[Mapping, int, int]] = []
+    for s in plan.get("selected") or []:
+        for lo, hi in s.get("ranges") or []:
+            a, z = max(lo, start_ms), min(hi, end_ms)
+            if a < z:
+                pieces.append((s, a, z))
+    pieces.sort(key=lambda p: (p[1], p[2]))
+    t = start_ms
+    for _s, a, z in pieces:
+        if a > t:
+            return None
+        t = max(t, z)
+    return pieces if pieces and t >= end_ms else None
+
+
+def prepare_relabel_sample(messages_path: str, seg: Mapping, segments, plan: Mapping, *, values: Mapping,
+                           project_data: Mapping, meta: Mapping, drawn_by: str, app_version: str, coverage,
+                           drawn_at: str | None = None) -> tuple[dict, dict[str, dict]]:
+    """재라벨 세션의 블록 표본(06 3-5)을 메모리에서 매니페스트 모양으로 만든다 — 파일에 쓰지 않는다(samples/ 를 열지 않음).
+
+    - 적격: 재라벨러 **자기** 구간표(seg = 그 저스트채팅 구간)로 06 2-2 의 0~3번(영상 밖·완충 포함, 완충은 relabel_buffers).
+    - 표본: 적격 가운데 sort_key(계획 블록의 seed_material, chat_id) ≤ τ_block (core.relabel_plan.block_sample).
+      seed_material·τ_block 은 그 블록과 겹친 1차 매니페스트(계열마다 가장 큰 rev, draw_no 가 가장 큰 판)에서 계획이
+      적어 둔 값이다 — '같은 표본 매니페스트' 의 순서 키·임계 키를 그대로 쓴다.
+    - 매니페스트 모양은 sp.build_manifest(n=1, census_max=0, 물려받은 τ = τ_block) 로 만든다. τ = max(τ_block, 가장 작은
+      key) 인데 block_sample 이 비지 않았다면 가장 작은 key ≤ τ_block 이라 items 가 block_sample 과 같다(확인한다).
+      진행률 분모가 표본 수가 되게 requested_size 를 표본 수로 바꾸고, 출처 계획을 'from_plan' 칸에 적는다.
+    - 맞닿은 두 블록에 걸친 구간(store 는 합친 scope 로 저장을 허락한다): 블록 조각마다 그 블록의 τ_block 을 쓴다.
+      매니페스트 하나는 τ 하나라서, 조각들의 seed_material 이 같으면 τ = 그 블록들 τ_block 의 최댓값으로 만든다 —
+      블록마다 따로 고른 표본을 모두 담고, τ 가 작은 블록에서 몇 건이 더 들 수 있다(일치도는 둘 다 판정한 채팅만 쓴다).
+      seed_material 이 다르면(다른 draw_no) 한 매니페스트로 만들 수 없어 블록 경계에서 구간을 나누게 한다.
+    막히면 ValueError(까닭 문장): 블록 밖 구간·이 블록에 1차 표본 없음·영상 없음·τ_block 안 적격 0.
+    """
+    from ..core import relabel_plan as rp
+    from ..core import sampling as sp
+    b = seg["body"]
+    a, z = int(b["start_ms"]), int(b["end_ms"])
+    pieces = plan_blocks_for(plan, a, z)
+    if pieces is None:
+        raise ValueError(tr("이 구간은 재라벨 계획의 블록 밖입니다"))
+    with_tau = [(s, lo, hi) for s, lo, hi in pieces if s.get("seed_material") is not None
+                and s.get("tau_block_key") is not None]
+    if not with_tau:
+        raise ValueError(tr("이 블록에는 1차 표본이 없어 판정할 재라벨 표본이 없습니다 (06 3-5)"))
+    sms = {s["seed_material"] for s, _lo, _hi in with_tau}
+    if len(sms) > 1:
+        cut = min(hi for _s, _lo, hi in pieces)
+        raise ValueError(tr("이 구간은 표본 기준이 다른 두 블록에 걸칩니다 — {0} 에서 구간을 나눈 뒤 뽑으세요 (06 3-5)")
+                         .format(tc.fmt_display(cut)))
+    sm = next(iter(sms))
+    tau = max(s["tau_block_key"] for s, _lo, _hi in with_tau)
+    blk_ids = sorted({s.get("block_index") for s, _lo, _hi in pieces if _is_int(s.get("block_index"))})
+    if coverage is None:
+        raise ValueError(tr("영상 길이를 몰라 영상 밖 채팅을 뺄 수 없습니다 — 영상을 다시 연결하세요 (D-10 3)"))
+    if not coverage:
+        raise ValueError(tr("영상이 연결되지 않았습니다 — 영상이 덮는 채팅만 표본이 됩니다 (D-10 3)"))
+    seed, draw_no = sp.parse_seed_material(sm)
+    if seed != project_data.get("sample_seed"):
+        raise ValueError(tr("계획의 시드가 이 프로젝트의 sample_seed 와 다릅니다"))
+    msgs, sha = read_messages(messages_path)
+    buf = _sec_ms(values, "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
+    scope = (meta.get("scope") or {}).get("ranges") or plan.get("scope", {}).get("ranges") or []
+    buffers = relabel_buffers(segments, [tuple(r) for r in scope], buf)
+    pre, post = recheck_rolls(values)
+    pop = sp.build_population(msgs, a, z, buffers, coverage=coverage, pre_roll_ms=pre, post_roll_ms=post)
+    # 블록마다 그 블록의 τ_block 으로 고른 표본(06 3-5) — 매니페스트(τ = 최댓값)가 이것을 모두 담는지 확인한다
+    per_block: set[str] = set()
+    for s, lo, hi in with_tau:
+        ids = [c for c, t in pop.eligible if lo <= t < hi]
+        per_block.update(rp.block_sample(ids, s["seed_material"], s["tau_block_key"]))
+    want = rp.block_sample(pop.eligible_ids, sm, tau)
+    if not want:
+        raise ValueError(tr("이 구간에는 블록 표본에 드는 적격 채팅이 없습니다 (적격 {0}건)").format(len(pop.eligible)))
+    man = sp.build_manifest(
+        project_id=project_data["project_id"],
+        source_segment={"session_id": seg["session_id"], "entity_id": seg["entity_id"], "version_id": seg["id"],
+                        "start_ms": a, "end_ms": z},
+        guide_version=meta["guide_version"], thresholds_sha256=meta["thresholds_sha256"],
+        sample_seed=seed, draw_no=draw_no, population=pop, messages_sha256=sha, n=1, census_max=0,
+        drawn_at=drawn_at or _now_iso(), drawn_by=drawn_by, app_version=app_version, inherited_tau_keys=[tau],
+        algorithm=sp.ALGORITHM_V2)
+    got = [it["chat_id"] for it in man["items"]]
+    if sorted(got) != sorted(want) or not per_block <= set(got):
+        raise ValueError(tr("블록 표본 계산이 맞지 않습니다 (내부 확인 실패)"))
+    man["requested_size"] = len(got)
+    man["from_plan"] = {"plan_id": plan.get("plan_id"), "block_index": blk_ids[0] if blk_ids else None,
+                        "block_indices": blk_ids}
+    keep = set(got)
+    return man, {m["chat_id"]: m for m in msgs if m.get("chat_id") in keep}
+
+
+def locked_label_display(view, session_id: str, *, min_views: int, min_coverage: float):
+    """잠긴 1차 세션 뷰 → (구간 레코드 목록, 타임라인 마커 [(ms, 'primary'|'primary_weak')], 채팅 표시 {chat_id: 문구}).
+
+    분석 세션 전용(08 D-09 5). 등급 이름만 짧게 쓰고 근거·본문은 넣지 않는다.
+    """
+    segs = view.items("segment", session_id)
+    reacts = view.items("reaction", session_id)
+    checks = view.items("video_check", session_id)
+    marks = [(t, "primary" if k == "reaction" else "primary_weak")
+             for t, k in reaction_marks(reacts, checks, min_views=min_views, min_coverage=min_coverage)]
+    names = {"direct": "직접", "likely": "높음", "related_only": "관련", "unclear": "불명확"}
+    chats: dict[str, str] = {}
+    for r in reacts:
+        b = r.get("body") or {}
+        cid = b.get("chat_id")
+        if not isinstance(cid, str):
+            continue
+        g = names.get(b.get("grade")) if b.get("result") == "graded" else tr("미확인")
+        chats[cid] = tr("1차 {0}").format(g or tr("반응"))
+    return segs, marks, chats
+
+
 def sample_messages(messages_path: str, chat_ids) -> dict[str, dict]:
     """표본 채팅만 골라 읽는다(큐 화면이 시각·본문·시청자만 쓴다)."""
     wanted = set(chat_ids)
@@ -723,6 +872,12 @@ class Workbench(QWidget):
         self._busy = False                   # 저장 중(D-10 2)
         self._busy_failed = False
         self._status_bar = None              # attach_status_bar 로 붙인 메인 창 상태 줄
+        self.relabel_plan: dict | None = None   # 재라벨 세션: 자기 계획(relabel/<plan_id>.json) 하나만 읽는다(03 12-1)
+        # 분석 세션(08 D-09 5): 잠긴 1차 세션의 라벨. 라벨링 세션에서는 늘 비어 있다(디스크에서 열지도 않는다)
+        self.primary_sessions: list[str] = []
+        self._primary_segments: list[dict] = []
+        self._primary_marks: list[tuple[int, str]] = []
+        self._primary_chats: dict[str, str] = {}
 
         # 바탕을 늘 칠한다: 작업대를 바꿀 때(다른 프로젝트·사본 열기) 닫힌 플레이어의 네이티브 창 자리에 옛 영상 그림이
         # 남아 보이던 것(실제 창 스모크 화면)을 막는다
@@ -1061,8 +1216,112 @@ class Workbench(QWidget):
                 self._note(st.lock_help)
         for w in st.warnings[:5]:
             self._note(str(w))
+        self._load_relabel_plan(st)
         self.refresh_labels()
+        self.load_locked_primary()
         self._update_status(full=True)
+
+    # ------------------------------------------------------------ 재라벨 세션 (06 3장, 03 12-2, D-11 6)
+    def _load_relabel_plan(self, st) -> None:
+        """재라벨 세션이면 session.open 의 relabel_plan_id 로 **자기 계획 파일 하나만** 연다(03 12-1 '자기 계획만').
+        앞당긴 시작(session.extra['relabel_too_early'] = 사유)이면 warning(relabel_too_early) 줄을 한 번 남긴다(03 6-14)."""
+        self.relabel_plan = None
+        if self.session_kind not in RELABEL_KINDS:
+            return
+        meta = st.session_meta or {}
+        pid = meta.get("relabel_plan_id")
+        if not isinstance(pid, str):
+            self._note(tr("재라벨 세션인데 계획 ID 가 없습니다 — 표본을 낼 수 없습니다"))
+            return
+        from .. import relabel as relabel_io
+        try:
+            self.relabel_plan = relabel_io.read_plan_for_session(self.project.root, self.session_kind,
+                                                                 self.labeler_id, pid)
+        except (OSError, ValueError) as e:
+            self._note(tr("재라벨 계획을 읽지 못했습니다: {0}").format(str(e)[:160]))
+            return
+        rngs = (meta.get("scope") or {}).get("ranges") or []
+        self._note(tr("재라벨 범위(블록 {0}개): {1} — 이 범위 안에서만 구간·반응을 매깁니다").format(
+            len(self.relabel_plan.get("selected") or []),
+            ", ".join(f"{tc.fmt_display(a)}~{tc.fmt_display(z)}" for a, z in rngs[:4])))
+        why = (self.session.extra or {}).get("relabel_too_early") if self.session is not None else None
+        if isinstance(why, str) and why.strip() and not st.read_only:
+            already = any(r.get("kind") == "warning" and (r.get("body") or {}).get("code") == "relabel_too_early"
+                          for r in st.records())
+            if not already:
+                try:
+                    st.append_ops("warning", {"code": "relabel_too_early", "action": "shown",
+                                              "detail": why.strip()[:300]})
+                except Exception as e:  # noqa: BLE001 — 기록 실패는 띠에 알린다(세션은 연다)
+                    self._note(tr("앞당긴 시작 기록을 남기지 못했습니다: {0}").format(type(e).__name__))
+
+    def relabel_scope(self) -> list[tuple[int, int]]:
+        """재라벨 세션의 범위(session.open.scope.ranges). 전체 범위 세션이면 빈 목록."""
+        meta = (self.store.session_meta if self.store is not None else None) or {}
+        sc = meta.get("scope") or {}
+        if sc.get("type") != "blocks":
+            return []
+        return [(int(a), int(z)) for a, z in sc.get("ranges") or []]
+
+    # ------------------------------------------------------------ 분석 세션: 잠긴 1차 라벨 (08 D-09 5)
+    def primary_view_allowed(self) -> bool:
+        """잠긴 1차 라벨을 이 세션에서 보여도 되는가 — 분석 세션이고 visibility 가 다른 세션 라벨을 허락할 때만.
+        라벨링 세션(primary·relabel_*)은 visibility 표에서 '열지 않음' 이라 False 다."""
+        try:
+            from ..core import visibility as vis
+            return self.session_kind == vis.ANALYSIS and vis.can_show(vis.OTHER_SESSION_LABELS, self.phase,
+                                                                      self.session_kind)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def load_locked_primary(self) -> int:
+        """분석 세션이면 잠긴 1차 세션들의 라벨을 store 로 읽어(블라인드는 store·locking 이 다시 본다) 타임라인의
+        '잠긴 1차 라벨' 트랙(보라)·활동 구간·채팅 표 '종류' 칸에 보인다. 읽은 세션 수를 돌려준다."""
+        self.primary_sessions, self._primary_segments, self._primary_marks, self._primary_chats = [], [], [], {}
+        if self.store is None or not self.primary_view_allowed():
+            return 0
+        try:
+            sids = [s for s in self.store.readable_locked_sessions() if s.split("-")[1] == "P"]
+        except Exception as e:  # noqa: BLE001
+            self._note(tr("잠긴 1차 세션을 찾지 못했습니다: {0}").format(type(e).__name__))
+            return 0
+        for sid in sids:
+            try:
+                view, msgs = self.store.locked_session_view(sid)
+            except Exception as e:  # noqa: BLE001 — 한 세션이 깨져도 나머지는 보인다
+                self._note(tr("잠긴 1차 세션 {0} 를 읽지 못했습니다: {1}").format(sid, type(e).__name__))
+                continue
+            for m in msgs[:3]:
+                self._note(m)
+            segs, marks, chats = locked_label_display(view, sid, min_views=self._min_views(),
+                                                      min_coverage=rules.heard_min_coverage(self.guide_values()))
+            self.primary_sessions.append(sid)
+            if not self._primary_segments:
+                self._primary_segments = segs        # 구간 트랙은 첫 세션 것만(겹쳐 그리지 않는다)
+            self._primary_marks += marks
+            for cid, t in chats.items():
+                self._primary_chats.setdefault(cid, t)
+        self._primary_marks.sort()
+        self._push_primary()
+        if self.primary_sessions:
+            self._note(tr("분석 보기: 잠긴 1차 세션 {0} 의 라벨을 보입니다 (구간 {1}·반응 {2}, 보라 표시 — 엔진은 청록)").format(
+                ", ".join(self.primary_sessions), len(self._primary_segments), len(self._primary_chats)))
+        LOG.info("분석 보기: 잠긴 1차 세션 %d개, 구간 %d, 반응 %d", len(self.primary_sessions),
+                 len(self._primary_segments), len(self._primary_chats))
+        return len(self.primary_sessions)
+
+    def _push_primary(self) -> None:
+        if not self.primary_view_allowed():
+            return
+        self.timeline.set_markers(PRIMARY_TRACK, list(self._primary_marks))
+        if hasattr(self.chat, "set_label_marks"):
+            self.chat.set_label_marks(dict(self._primary_chats))
+        self._push_segments_track()
+
+    def primary_labels(self) -> dict:
+        """지금 보이는 잠긴 1차 라벨의 숫자 요약(시험·점검용)."""
+        return {"sessions": list(self.primary_sessions), "segments": len(self._primary_segments),
+                "markers": len(self._primary_marks), "chats": len(self._primary_chats)}
 
     def refresh_labels(self) -> None:
         """store 의 현재 유효 라벨을 모두 다시 계산해 타임라인에 그린다: segment → 활동 구간, reaction → 'labels' 마커.
@@ -1110,6 +1369,8 @@ class Workbench(QWidget):
             items, buf = self.segment_form.segments_for_timeline(), self.segment_form.buffer_ms
         else:
             items = list(self._label_heads["segment"].values())
+            if not items and self._primary_segments and self.primary_view_allowed():
+                items = list(self._primary_segments)     # 분석 세션: 자기 구간이 없으니 잠긴 1차 구간을 그린다(D-09 5)
             buf = _sec_ms(self.guide_values(), "segment", "boundary_buffer_sec", DEFAULT_BUFFER_MS)
         try:
             self.timeline.set_segments(items, buffer_ms=buf)
@@ -1268,6 +1529,8 @@ class Workbench(QWidget):
         self.chat.set_time_ms(self._vod_pos, True)
         if self.editor is not None:
             self.editor.load_context(chats=self._editor_chats())
+        if self._primary_chats and hasattr(self.chat, "set_label_marks") and self.primary_view_allowed():
+            self.chat.set_label_marks(dict(self._primary_chats))   # 채팅이 store 보다 늦게 실렸을 때
         self._update_status(full=True)
 
     def _on_media_checked(self, res, err: str) -> None:
@@ -2141,18 +2404,28 @@ class Workbench(QWidget):
 
     def _manifests_for(self, entity_id: str) -> list[dict]:
         from .queue_view import list_manifests
-        if self.project is None:
-            return []
+        if self.project is None or not self._can_read_samples():
+            return []                            # 재라벨·두 번째 사람 세션은 samples/ 를 열지 않는다(03 12-1)
         out = [m for m in list_manifests(self.project.paths.samples_dir)
                if (m.get("source_segment") or {}).get("entity_id") == entity_id and m.get("draw_no") == 1]
         out.sort(key=lambda m: m.get("sample_rev", 0))
         return out
+
+    def _can_read_samples(self) -> bool:
+        try:
+            from ..core import visibility as vis
+            return vis.files_to_open(self.session_kind or "").can_read("samples")
+        except Exception:  # noqa: BLE001
+            return False
 
     def _on_sample_target(self, sync: bool = False) -> None:
         seg = self.sample_target()
         if seg is None:
             self.btn_draw.setEnabled(False)
             self._load_queue(None, {})
+            return
+        if self.session_kind in RELABEL_KINDS:
+            self._load_relabel_queue(seg, sync)
             return
         mans = self._manifests_for(seg["entity_id"])
         latest = mans[-1] if mans else None
@@ -2168,6 +2441,36 @@ class Workbench(QWidget):
         ids = [it["chat_id"] for it in latest.get("items", [])]
         self._run_job("sample_msgs", lambda cancelled: sample_messages(mpath, ids),
                       lambda msgs, err, m=latest: self._load_queue(m, msgs or {}, err), sync)
+
+    def _load_relabel_queue(self, seg: Mapping, sync: bool) -> None:
+        """재라벨 세션 ③: 계획의 블록 표본을 메모리에서 만들어 큐에 싣는다(prepare_relabel_sample, samples/ 를 열지 않음)."""
+        self.btn_draw.setText(tr("블록 표본 (재라벨 계획)"))
+        self.btn_draw.setEnabled(False)
+        self.btn_draw.setToolTip(tr("재라벨 세션은 표본을 뽑지 않습니다. 계획의 블록 표본을 자기 구간표로 다시 계산합니다 (06 3-5)"))
+        plan = self.relabel_plan
+        if plan is None or self.store is None or self.project is None:
+            self._say(tr("재라벨 계획이 없어 표본을 낼 수 없습니다"))
+            self._load_queue(None, {})
+            return
+        from .. import __version__
+        meta = self.store.session_meta or {}
+        args = dict(values=self.guide_values(), project_data=dict(self.project.data), meta=meta,
+                    drawn_by=self.labeler_id or "L01", app_version=__version__, coverage=self.media_coverage())
+        mpath = self.project.paths.messages_jsonl
+        segs = [dict(s) for s in self.segment_heads()]
+        seg_c = copy.deepcopy(seg)
+        p = copy.deepcopy(plan)
+
+        def done(res, err, self=self):
+            if res is None:
+                self._say(tr("재라벨 표본을 내지 못했습니다: {0}").format(err.split(": ", 1)[-1][:200]))
+                self._load_queue(None, {})
+                return
+            man, msgs = res
+            LOG.info("재라벨 블록 표본: 적격 %d 표본 %d", man["eligible"]["size"], len(man["items"]))
+            self._load_queue(man, msgs, from_plan=True)
+        self._run_job("sample_msgs", lambda cancelled: prepare_relabel_sample(mpath, seg_c, segs, p, **args),
+                      done, sync)
 
     def sample_stale(self, seg: Mapping, manifest: Mapping | None) -> str | None:
         """그 구간의 최근 매니페스트를 다시 뽑아야 하는 까닭(sample_stale_reason). 맞으면 None."""
@@ -2237,7 +2540,7 @@ class Workbench(QWidget):
         self.btn_draw.setEnabled(False)
         self._load_queue(man, msgs)
 
-    def _load_queue(self, manifest, msgs, err: str = "") -> None:
+    def _load_queue(self, manifest, msgs, err: str = "", *, from_plan: bool = False) -> None:
         if err:
             self._say(tr("표본 채팅을 읽지 못했습니다: {0}").format(err[:200]))
         self._sample_manifest = manifest
@@ -2249,7 +2552,7 @@ class Workbench(QWidget):
                                 viewer_no=self.chat_data.viewer_no or None,
                                 player=self.player if self.media_path else None,
                                 to_file=self.vod_to_file, to_vod=self.file_to_vod, pre_roll_ms=pre, post_roll_ms=post,
-                                autoplay=bool(self.media_path), media_coverage=self._media_cov)
+                                autoplay=bool(self.media_path), media_coverage=self._media_cov, from_plan=from_plan)
 
     def _queue_save(self, draft: dict) -> dict:
         snap = self._undo_snapshot(draft.get("entity_id") if isinstance(draft, Mapping) else None)
@@ -2297,6 +2600,96 @@ class Workbench(QWidget):
             return sp.verify_manifest(manifest, msgs, lambda rule: segment_buffers(bounds, dur, buf, rule),
                                       messages_sha256=sha, previous=prev)
         return sp.verify_manifest(manifest, msgs, messages_sha256=sha, previous=prev)
+
+    # ------------------------------------------------------------ 세션 잠그기 (06 7-1, D-11 7)
+    def can_lock(self) -> str | None:
+        """지금 이 세션을 잠글 수 없는 까닭. None 이면 잠그기 화면을 열 수 있다(실제 판단은 store.lock_blockers)."""
+        if self.session is None or self.store is None:
+            return tr("세션 없이 연 보기 전용입니다")
+        from .. import locking
+        if self.session_kind not in locking.LOCKABLE_KINDS:
+            return tr("이 세션 종류({0})는 잠그지 않습니다").format(self.session_kind)
+        if self.store.locked:
+            return tr("이미 잠긴 세션입니다")
+        if self.store.read_only:
+            return tr("라벨 기록이 읽기 전용입니다: {0}").format(self.store.read_only_reason or "")
+        return None
+
+    def prepare_lock(self) -> bool:
+        """잠그기 화면을 열기 전에: 열린 편집기를 닫게 하고 저장하지 않은 구간 변경을 처리한다. 계속해도 되면 True."""
+        if self.is_editing():
+            self._say(tr("반응 편집 중입니다 — 저장하거나 취소한 뒤에 잠그세요"))
+            return False
+        if not self.resolve_unsaved():
+            return False
+        return True
+
+    def sample_verify_results(self) -> list[dict]:
+        """잠그기 전에 이 세션 표본 매니페스트(계열마다 가장 큰 rev)의 재현 검증을 돌린다 → 잠금 파일 sample_verify 칸.
+        samples/ 를 열 수 없는 세션(재라벨)은 빈 목록. 결과는 {sample_set_id, ok, problems(건수)} 뿐이다."""
+        if self.store is None or self.project is None or self.session is None or not self._can_read_samples():
+            return []
+        from .. import locking
+        from ..core import sampling as sp
+        mans = [m for m, _ in locking.session_manifests(self.project.paths.samples_dir, self.session.session_id)]
+        out = []
+        for m in sorted(sp.latest_of(mans).values(), key=lambda x: x["sample_set_id"]):
+            try:
+                v = self._verify_sample(m)
+                out.append({"sample_set_id": m["sample_set_id"], "ok": bool(v.ok), "problems": len(v.problems)})
+            except Exception as e:  # noqa: BLE001 — 검증이 깨져도 잠금 기록에 실패로 남긴다
+                LOG.warning("잠그기 전 재현 검증 실패: %s", type(e).__name__)
+                out.append({"sample_set_id": m["sample_set_id"], "ok": False, "problems": 1})
+        return out
+
+    def after_session_locked(self) -> None:
+        """잠근 뒤: 둘러보기로 돌아가고 모드 줄·상태 칩을 읽기 전용으로 다시 그린다(store 가 읽기 전용이 됐다)."""
+        if self.mode != ph.BROWSE:
+            if self.segment_form is not None and self.segment_form.model is not None and self.segment_form.has_unsaved:
+                self.segment_form.discard_changes()
+            self.mode = ph.BROWSE
+            self.right.setCurrentWidget(self.page_chat)
+            self._push_segments_track()
+            self._apply_mode_shortcuts()
+            self.modeChanged.emit(self.mode)
+        self._reaction_undo.clear()
+        self._note(tr("이 세션을 잠갔습니다. 더 쓸 수 없습니다 — 고칠 것이 있으면 새 세션을 여세요 (08 D-11 7)"))
+        self._update_modes()
+        self._update_status(full=True)
+
+    # ------------------------------------------------------------ 재라벨 계획 만들기 (06 3장)
+    def can_make_relabel_plan(self) -> str | None:
+        """계획을 만들 수 없는 까닭. 잠긴 자기 1차 세션에서만 만든다(1차 라벨로 범위를 계산, 06 7-1)."""
+        if self.session is None or self.store is None:
+            return tr("세션 없이 연 보기 전용입니다")
+        if self.session_kind != "primary":
+            return tr("재라벨 계획은 1차 세션에서 만듭니다")
+        if not self.store.locked:
+            return tr("먼저 이 1차 세션을 잠그세요 (06 7-1: 계획은 잠금 뒤)")
+        return None
+
+    def create_relabel_plan(self, session_kind: str, labeler_id: str, *, now: datetime | None = None,
+                            rand4: str | None = None) -> dict:
+        """잠긴 이 1차 세션으로 재라벨 계획(relabel/<plan_id>.json)을 만든다. 후보는 store.done_ranges(영상 범위로 자름)로
+        가리고, 블록 범위는 블록 칸을 영상 범위(extent)로만 자른다 — 1차 구간 경계를 계획에 넣지 않는다(06 3-1).
+        막히면 ValueError(까닭 문장)."""
+        why = self.can_make_relabel_plan()
+        if why:
+            raise ValueError(why)
+        from .. import __version__
+        from .. import relabel as relabel_io
+        cov = self.media_coverage()
+        ranges = self.store.done_ranges(coverage=cov if cov else None)
+        if not ranges:
+            raise ValueError(tr("라벨을 마친 범위가 없습니다 (영상이 덮는 구간이 없음)"))
+        plan = relabel_io.create_plan(
+            self.project.root, self.project.data, session_kind=session_kind, labeler_id=labeler_id,
+            source_session_id=self.session.session_id, done_ranges=ranges, created_by=self.labeler_id,
+            created_machine4=self.session.machine4, app_version=__version__, creator_kind=self.session_kind,
+            now=now, rand4=rand4, extent=[tuple(r) for r in cov] if cov else None)
+        LOG.info("재라벨 계획 %s: %s 블록 %d개", plan["plan_id"], session_kind, len(plan["selected"]))
+        self._say(tr("재라벨 계획 {0} 를 만들었습니다 (블록 {1}개)").format(plan["plan_id"], len(plan["selected"])))
+        return plan
 
     # ------------------------------------------------------------ 내보내기
     def export_labels(self, out_path: str, *, overwrite: bool = False):

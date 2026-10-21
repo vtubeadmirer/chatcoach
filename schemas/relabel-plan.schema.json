@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/chatcoach/blob/main/schemas/relabel-plan.schema.json",
+  "title": "재라벨 계획 (relabel/<plan_id>.json)",
+  "description": "잠긴 1차 세션 하나를 다시 매길 블록 목록. 한 번 쓰면 고치지 않는다(앞당긴 시작은 재라벨 세션의 warning(relabel_too_early) 줄로 남긴다). 알고리즘 sha256-relabel-v1: seed_material = '{project.sample_seed}|relabel|{source_session_id}', 블록 k = 채팅 시계 [k×block_ms, (k+1)×block_ms), 후보 = 1차 세션이 라벨을 마친 범위와 겹친 길이가 min_block_ms 이상인 블록(그 범위는 계획에 남기지 않는다), 블록 범위 = 블록 칸 ∩ selection.extent(영상·방송 범위), 무작위 층 = sha256(seed_material + '|' + k) 작은 순, 어려움 층(v1) = 무작위 층 밖에서 어려움 점수 높은 순, 제시 순서 = sha256(seed_material + '|order|' + k) 작은 순. 같은 잠긴 세션이면 relabel_same 과 relabel_second 계획이 같은 블록을 고른다. 1차 표본 목록과 원 구간 경계는 넣지 않는다(06 3-5). 재라벨 표본은 재라벨러가 자기 구간표로 정한 블록 안 적격 채팅 중 sort_key(selected[].seed_material, chat_id) ≤ selected[].tau_block_key 인 것이다. 화면에는 층(stratum)과 τ_block 을 보이지 않는다(06 3-4). 설계 문서: docs/design/03-data-model.md 6-14·12-2, docs/design/06-evaluation-and-agreement.md 3장, 08 D-11 6·7.",
+  "type": "object",
+  "required": [
+    "schema", "schema_version", "plan_id", "plan_no", "project_id", "session_kind", "labeler_id",
+    "source_session_id", "source_labeler_id", "source_lock", "source_machine4s", "created_machine4",
+    "same_machine_as_source", "unit", "block_ms", "settings", "guide_version", "thresholds_sha256",
+    "selection", "selected", "scope", "source_manifests", "earliest_start_at", "enforce_interval",
+    "notes", "created_at", "created_by", "app_version"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "chatcoach/relabel-plan"},
+    "schema_version": {"const": 1},
+    "plan_id": {"type": "string", "pattern": "^RP-[0-9]{8}-[a-z0-9]{4}$", "description": "'RP-' + 만든 날 yyyymmdd + '-' + 무작위 4자. 날짜는 사람이 보기 위한 것이다."},
+    "plan_no": {"type": "integer", "minimum": 1, "description": "프로젝트 안 계획 순번(기록용). 고르기에는 쓰지 않는다."},
+    "project_id": {"$ref": "#/$defs/uuid"},
+    "session_kind": {"enum": ["relabel_same", "relabel_second"], "description": "이 계획으로 여는 세션 종류."},
+    "labeler_id": {"$ref": "#/$defs/labelerId", "description": "이 계획으로 재라벨할 라벨러. relabel_same 이면 원 세션 라벨러와 같고, relabel_second 면 다르다."},
+    "source_session_id": {"$ref": "#/$defs/sessionId", "description": "다시 매길 잠긴 1차(primary) 세션."},
+    "source_labeler_id": {"$ref": "#/$defs/labelerId"},
+    "source_lock": {
+      "type": "object",
+      "required": ["locked_at", "sha256"],
+      "additionalProperties": false,
+      "description": "계획을 만들 때 본 원 세션 잠금(locks/<source_session_id>.json).",
+      "properties": {
+        "locked_at": {"$ref": "#/$defs/datetime"},
+        "sha256": {"$ref": "#/$defs/sha256", "description": "잠금 파일 바이트의 SHA-256."}
+      }
+    },
+    "source_machine4s": {"type": "array", "items": {"$ref": "#/$defs/machine4"}, "uniqueItems": true, "description": "원 세션 기록 파일들의 machine4(파일 이름에서, 정렬)."},
+    "created_machine4": {"$ref": "#/$defs/machine4", "description": "계획을 만든 PC."},
+    "same_machine_as_source": {"type": "boolean", "description": "계획을 만든 PC 가 원 세션 PC 중 하나. 두 번째 사람 시험을 같은 PC 에서 할 때(08 D-11 6) 보고서가 '같은 machine_id' 로 표시하는 근거 중 하나. 실제 재라벨 PC 는 그 세션의 session.open.machine4 로 다시 본다."},
+    "unit": {"const": "block", "description": "기준서 relabel.unit 이 segment 여도 블록으로 고른다(06 3-1). 그때는 notes 에 적는다."},
+    "block_ms": {"type": "integer", "minimum": 60000, "maximum": 7200000},
+    "settings": {
+      "type": "object",
+      "required": ["block_ms", "min_block_ms", "random_share", "hard_share", "fraction_min", "fraction_max", "min_interval_days", "enforce_interval"],
+      "additionalProperties": false,
+      "description": "고를 때 쓴 값(기준서 values.relabel 에서).",
+      "properties": {
+        "block_ms": {"type": "integer", "minimum": 60000, "maximum": 7200000},
+        "min_block_ms": {"type": "integer", "minimum": 1},
+        "random_share": {"type": "number", "minimum": 0, "maximum": 1},
+        "hard_share": {"type": "number", "minimum": 0, "maximum": 1},
+        "fraction_min": {"type": "number", "minimum": 0, "maximum": 1},
+        "fraction_max": {"type": "number", "minimum": 0, "maximum": 1},
+        "min_interval_days": {"type": "number", "minimum": 0, "maximum": 365},
+        "enforce_interval": {"type": "boolean"}
+      }
+    },
+    "guide_version": {"type": "string", "minLength": 1},
+    "thresholds_sha256": {"$ref": "#/$defs/sha256"},
+    "selection": {
+      "type": "object",
+      "required": ["algorithm", "seed_material", "extent", "candidate_blocks", "n_random", "n_hard", "hard_used", "hard_scores"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {"const": "sha256-relabel-v1"},
+        "seed_material": {"type": "string", "pattern": "^[0-9a-f]{32}\\|relabel\\|[A-Z][A-Z0-9]{1,7}-P-[0-9]{8}-[a-z0-9]{4}$"},
+        "extent": {"type": ["array", "null"], "items": {"$ref": "#/$defs/range"}, "description": "블록 범위를 자른 영상·방송 범위(1차 라벨과 무관한 값). null 이면 블록 칸 전체. 1차가 라벨을 마친 범위(done_ranges)는 후보를 가리는 데만 쓰고 계획에 남기지 않는다(06 3-1, 05 S-33)."},
+        "candidate_blocks": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+        "n_random": {"type": "integer", "minimum": 0},
+        "n_hard": {"type": "integer", "minimum": 0},
+        "hard_used": {"type": "boolean"},
+        "hard_scores": {"type": ["object", "null"], "additionalProperties": {"type": "number"}, "description": "어려움 층을 썼으면 블록 번호(문자열) → 점수. 재현 검증에 쓴다."}
+      }
+    },
+    "selected": {
+      "type": "array",
+      "minItems": 1,
+      "description": "고른 블록. 제시 순서(order) 순.",
+      "items": {
+        "type": "object",
+        "required": ["block_index", "ranges", "stratum", "order", "seed_material", "tau_block_key"],
+        "additionalProperties": false,
+        "properties": {
+          "block_index": {"type": "integer", "minimum": 0},
+          "ranges": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/range"}, "description": "블록 칸 [k×block_ms, (k+1)×block_ms) 를 selection.extent 로만 자른 범위. 1차 구간 경계는 들어가지 않는다."},
+          "stratum": {"enum": ["random", "hard"], "description": "층. 화면에 보이지 않는다(06 3-4)."},
+          "order": {"type": "integer", "minimum": 1},
+          "seed_material": {"type": ["string", "null"], "pattern": "^[0-9a-f]{32}\\|[1-9][0-9]*$", "description": "τ_block 을 준 표본의 seed_material('{sample_seed}|{draw_no}'). 겹치는 표본이 없으면 null."},
+          "tau_block_key": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}], "description": "블록과 겹치는 1차 표본(계열마다 가장 큰 sample_rev, 그중 draw_no 가 가장 큰 것) tau_key 의 최댓값. 화면에 보이지 않는다."}
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "required": ["type", "ranges"],
+      "additionalProperties": false,
+      "description": "재라벨 세션 session.open.scope 에 그대로 넣는 값.",
+      "properties": {
+        "type": {"const": "blocks"},
+        "ranges": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/range"}}
+      }
+    },
+    "source_manifests": {
+      "type": "array",
+      "description": "τ_block 계산에 쓴 원 세션 표본 매니페스트(계열마다 가장 큰 sample_rev). 재현 검증용 참조이고, 재라벨 세션은 samples/ 를 열지 않는다.",
+      "items": {
+        "type": "object",
+        "required": ["sample_set_id", "sha256", "draw_no", "tau_key"],
+        "additionalProperties": false,
+        "properties": {
+          "sample_set_id": {"type": "string", "pattern": "^S-[0-9a-f]{8}-d[0-9]+-r[0-9]+$"},
+          "sha256": {"$ref": "#/$defs/sha256", "description": "매니페스트 파일 바이트의 SHA-256."},
+          "draw_no": {"type": "integer", "minimum": 1},
+          "tau_key": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}
+        }
+      }
+    },
+    "earliest_start_at": {"oneOf": [{"$ref": "#/$defs/datetime"}, {"type": "null"}], "description": "relabel_same: 원 세션 잠금 + min_interval_days. relabel_second: null(간격 없음, 06 3-3)."},
+    "enforce_interval": {"type": "boolean", "description": "true 면 earliest_start_at 전에는 사유를 적어도 열지 않는다. relabel_second 는 늘 false."},
+    "notes": {"type": "array", "items": {"type": "string"}, "description": "고를 때의 메모(설정 대체·비율 범위 밖 등). 숫자와 규칙만, 채팅 내용 없음."},
+    "created_at": {"$ref": "#/$defs/datetime"},
+    "created_by": {"$ref": "#/$defs/labelerId"},
+    "app_version": {"type": "string"}
+  },
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "labelerId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}$"},
+    "sessionId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}-(P|RS|R2|AD|OR|AN)-[0-9]{8}-[a-z0-9]{4}$"},
+    "machine4": {"type": "string", "pattern": "^[a-z2-7]{4}$"},
+    "datetime": {"type": "string", "format": "date-time"},
+    "range": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 0}, {"type": "integer", "minimum": 1}], "minItems": 2, "maxItems": 2, "description": "[start_ms, end_ms) 채팅 시계 ms."}
+  }
+}
