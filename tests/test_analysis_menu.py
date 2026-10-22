@@ -197,6 +197,211 @@ def test_analysis_flow_reasons_and_scores_adapter():
     assert ("κ_w", "보류", "0.400") in rows
 
 
+# ----------------------------------------------------------------------------- 23 5-2 의 12: 라벨링 세션 4종 열기 감시
+SESSIONS_4 = {
+    "primary": ("L01-P-20261031-bb22", "L01", None),
+    "relabel_same": ("L01-RS-20261031-cc33", "L01", "rs01"),
+    "relabel_second": ("L02-R2-20261031-dd44", "L02", "r201"),
+    "origin_review": ("L01-OR-20261031-ee55", "L01", None),
+}
+
+
+class _OpenWatch:
+    """builtins.open·io.open·os.open·os.listdir·os.scandir·os.stat·os.lstat 와 os.path.isfile·exists·lexists·isdir·
+    getsize 가운데 roots 아래(또는 접두 prefixes)를 건드린 경로를 센다('있는지 보기' 도 센다).
+    Windows 의 Python 3.12 에서 os.path.isfile·exists·isdir 는 nt._path_isfile 같은 C 함수라 os.stat 을 거치지 않는다 —
+    그래서 os.path 의 것들을 따로 감싼다(pathlib 의 exists·is_file 은 os.stat 을 거친다)."""
+
+    PATH_FNS = ("isfile", "exists", "lexists", "isdir", "getsize")
+
+    def __init__(self, monkeypatch, roots, prefixes=()):
+        self.hits = []
+        self.roots = [os.path.normcase(os.path.abspath(r)) for r in roots]
+        self.prefixes = [os.path.normcase(os.path.abspath(p)) for p in prefixes]
+        real = {"open": builtins.open, "os_open": os.open, "listdir": os.listdir, "scandir": os.scandir,
+                "stat": os.stat, "lstat": os.lstat}
+        real.update({f"path.{n}": getattr(os.path, n) for n in self.PATH_FNS})
+
+        def note(p, name):
+            try:
+                s = os.path.normcase(os.path.abspath(os.fspath(p)))
+            except TypeError:
+                return
+            if any(s == r or s.startswith(r + os.sep) for r in self.roots) or \
+                    any(s.startswith(p_) for p_ in self.prefixes):
+                import traceback
+                where = [f"{os.path.basename(f.filename)}:{f.lineno}:{f.name}" for f in traceback.extract_stack()
+                         if os.sep + "app" + os.sep in f.filename]
+                self.hits.append((name, os.path.basename(s), where[-12:]))
+
+        def wrap(name):
+            fn = real[name]
+
+            def inner(p=".", *a, **k):
+                note(p, name)
+                return fn(p, *a, **k)
+            return inner
+        monkeypatch.setattr(builtins, "open", wrap("open"))
+        monkeypatch.setattr(io, "open", wrap("open"))
+        monkeypatch.setattr(os, "open", wrap("os_open"))
+        monkeypatch.setattr(os, "listdir", wrap("listdir"))
+        monkeypatch.setattr(os, "scandir", wrap("scandir"))
+        monkeypatch.setattr(os, "stat", wrap("stat"))
+        monkeypatch.setattr(os, "lstat", wrap("lstat"))
+        for n in self.PATH_FNS:
+            monkeypatch.setattr(os.path, n, wrap(f"path.{n}"))
+
+
+def _prepare_sealed_and_reports(root, tmp_path, monkeypatch):
+    """ai\\(봉인 + 해제된 run)·reports\\(보고서 하나)·derived\\asr*(합성 파일 4개)를 만들어 둔다. 모두 합성."""
+    from app import agreement_report as ar
+    from app.project import open_project
+    monkeypatch.setattr(seal, "_now_iso", lambda now=None: "2026-10-30T09:00:00.000+09:00")
+    e = seal.seal_bytes(root, _engine_bytes(), source="file", by="L01")
+    seal.unseal(root, e.sha256, by="L01", early_reason="합성 감시 시험")
+    pid = open_project(root).project_id
+    rep = os.path.join(ar.default_out_root(root), pid, "R-synth-0001")
+    os.makedirs(rep, exist_ok=True)
+    with open(os.path.join(rep, "report.json"), "w", encoding="utf-8") as f:
+        f.write("{}")
+    der = os.path.join(root, "derived")
+    os.makedirs(der, exist_ok=True)
+    for n in ("asr.json", "asr-words.json", "asr-topic-flow.json", "asr-topic-vectors.json"):
+        with open(os.path.join(der, n), "w", encoding="utf-8") as f:
+            f.write("{}")
+    eng = tmp_path / "engine-out.json"
+    eng.write_bytes(_engine_bytes())
+    return str(eng), seal.default_ai_root(root), ar.default_out_root(root), os.path.join(der, "asr")
+
+
+@pytest.mark.parametrize("kind", list(SESSIONS_4))
+def test_labeling_session_opens_no_ai_reports_asr(win, proj, tmp_path, monkeypatch, kind):  # noqa: F811
+    """라벨링 세션 4종(1차·같은 사람 재라벨·다른 사람 재라벨·출처 판정)은 세션을 열 때부터 분석·보고·훈련 메뉴를 모두 눌러
+    봐도 ai\\·reports\\·derived\\asr* 를 열지도, 목록을 읽지도, 있는지 보지도 않는다(06 7-3, 23 5-2 의 12).
+    합성 프로젝트에 봉인·해제된 run·보고서·전사 파일을 미리 두고 본다."""
+    from app import relabel
+    from app.project import open_project
+    root = proj["root"]
+    eng, ai_root, rep_root, asr_prefix = _prepare_sealed_and_reports(root, tmp_path, monkeypatch)
+    sid, labeler, rand4 = SESSIONS_4[kind]
+    extra = {}
+    if rand4 is not None:
+        plan = relabel.create_plan(root, open_project(root).data, session_kind=kind, labeler_id=labeler,
+                                   source_session_id="L01-P-20261024-ab12", done_ranges=[(0, 600_000)],
+                                   created_by="L01", created_machine4="m3fa", app_version="0.0.1", creator_kind=None,
+                                   rand4=rand4)
+        extra = relabel.session_args(plan)
+    watch = _OpenWatch(monkeypatch, [ai_root, rep_root], prefixes=[asr_prefix])
+    wb = _open(win, root, ctx(sid, kind, labeler, **extra))
+    assert wb.session is not None and wb.session_kind == kind, wb.notes if hasattr(wb, "notes") else None
+    assert not win.m_analysis.isEnabled()
+    assert win.seal_import_dialog(path=eng, by=labeler) is None
+    assert win.unseal_dialog(by=labeler) is None
+    assert win.side_by_side_view(show=False) is None
+    assert win.broadcast_summary_view(show=False) is None
+    assert win.ai_compare_dialog(out_root=str(tmp_path / "보고서-감시")) is None
+    assert win.agreement_block_reason()
+    assert win.agreement_dialog(run=lambda dlg: None) is None
+    win.update_training_actions()                       # 메뉴를 펼 때의 길(훈련 기준은 이름만 본다, D-19 3)
+    win.training_block_reason(compute=True)
+    win.viewer_block_reason()
+    win.update_session_actions()
+    win.update_analysis_actions()
+    assert watch.hits == [], watch.hits[:5]
+    win.show_home()
+    monkeypatch.undo()
+
+
+def test_open_watch_sees_view_only_reads(win, proj, tmp_path, monkeypatch):  # noqa: F811
+    """감시가 제대로 보는지(대조): 보기 전용에서 분석 메뉴를 펴면 seal.jsonl 을 읽는다 — 감시에 걸려야 한다."""
+    root = proj["root"]
+    _eng, ai_root, rep_root, asr_prefix = _prepare_sealed_and_reports(root, tmp_path, monkeypatch)
+    watch = _OpenWatch(monkeypatch, [ai_root, rep_root], prefixes=[asr_prefix])
+    _open(win, root, None)
+    win.update_analysis_actions()
+    assert any(h[1] == "seal.jsonl" for h in watch.hits)
+    # '있는지 보기' 도 감시에 걸린다(os.path.* 는 이 Python 에서 os.stat 을 거치지 않으므로 따로 감쌌다)
+    from app.project import open_project
+    seal_file = os.path.join(seal.project_ai_dir(root, open_project(root).project_id), "seal.jsonl")
+    for fn in (os.path.exists, os.path.isfile, os.path.isdir, os.path.lexists, os.path.getsize, os.lstat):
+        n0 = len(watch.hits)
+        fn(seal_file)
+        assert len(watch.hits) >= n0 + 1, fn             # getsize 는 os.stat 도 거쳐 2번 잡힌다
+    n0 = len(watch.hits)
+    os.path.exists(asr_prefix + ".json")
+    assert len(watch.hits) == n0 + 1                     # derived\asr* 접두도
+    assert any(h[0] == "path.exists" and h[1] == "asr.json" for h in watch.hits)
+    win.show_home()
+    monkeypatch.undo()
+
+
+# ----------------------------------------------------------------------------- 23 5-2 의 10·13: 판 기록과 기본 run
+def _st(*rows, sealed=0):
+    from types import SimpleNamespace
+    return SimpleNamespace(entries=[SimpleNamespace(run_id=r, unsealed_at=at, presealed=True, engine_version=v)
+                                    for r, at, v in rows], sealed_count=sealed)
+
+
+def test_run_order_and_choices_carry_engine_version():
+    st = _st(("run-a", "2026-10-30T09:00", "link-v0.3"), ("run-b", "2026-10-30T10:00", "0.1.0"),
+             ("run-c", "2026-10-30T11:00", None))
+    assert af.unsealed_run_ids(st) == ["run-a", "run-b", "run-c"]
+    assert af.run_order(st) == ["run-a", "run-b", "run-c"] and af.default_run_id(st) == "run-a"
+    ch = af.run_choices(st)
+    assert [c.run_id for c in ch] == ["run-c", "run-b", "run-a"] and ch[0].latest
+    assert [c.engine_version for c in ch] == [None, "0.1.0", "link-v0.3"]
+    assert [c.version_text for c in ch] == ["판 모름", "판 0.1.0", "판 link-v0.3"]
+    # 판을 모르면 늦게 푼 것, 같은 판이면 늦게 푼 것, 옛 SealEntry(칸 없음)는 판 모름
+    assert af.run_order(_st(("a", "1", None), ("b", "2", None))) == ["b", "a"]
+    assert af.run_order(_st(("a", "1", "0.2"), ("b", "2", "0.2.0"))) == ["b", "a"]
+    from types import SimpleNamespace
+    old = SimpleNamespace(entries=[SimpleNamespace(run_id="x", unsealed_at="1", presealed=None)], sealed_count=0)
+    assert af.run_choices(old)[0].engine_version is None and af.default_run_id(old) == "x"
+    assert af.default_run_id(_st()) is None
+    # 이상한 판 글은 판 모름, 화면과 같은 규칙
+    assert af.clean_version(" 0.3") is None and af.clean_version("x" * 41) is None and af.clean_version(3) is None
+    from app.ui import analysis_view as av
+    for v in ("link-v0.3", "0.3.0", "0.1.0", "v1.10", None, "판모름"):
+        assert av.version_key(v) == af.version_key(v)
+    assert af.sealed_text(2) == "봉인됨 2건" and af.sealed_text(None) == "봉인됨 0건"
+
+
+def test_side_by_side_defaults_to_highest_engine_version(proj, monkeypatch):  # noqa: F811
+    """나란히 보기 자료의 기본 run = 해제 기록의 엔진 판이 가장 높은 run(화면의 판 A 기본과 같아 창 제목이 맞는다).
+    판 칸이 없는 옛 기록은 '판 모름'. 시범 해제처럼 run 둘을 같이 푼다(합성)."""
+    _write_adjudications(proj)
+    root = proj["root"]
+    monkeypatch.setattr(seal, "_now_iso", lambda now=None: "2026-10-30T09:00:00.000+09:00")
+    e = seal.seal_bytes(root, _engine_bytes(), source="file", by="L01")
+    res = seal.unseal(root, e.sha256, by="L01", early_reason="합성 시험")
+    data = af.side_by_side(root, reader_kind="analysis")
+    st = seal.seal_status(root, reader_kind="analysis")
+    want = getattr(st.entries[0], "engine_version", None)
+    assert data.run_id == res.run_id and data.engine_version == want
+    assert data.version_text == (f"판 {want}" if want else "판 모름")
+    assert data.choices[0].engine_version == want
+    tf = af.topic_flow(root, reader_kind="analysis")
+    assert tf.engine_version is None and tf.run_id is None and tf.sealed_text == "봉인됨 0건"   # 짝 주제 흐름 없음
+
+
+def test_side_by_side_window_title_shows_engine_version(win, proj, monkeypatch):  # noqa: F811
+    """메인 창 '엔진과 나란히 보기' 창 제목 = '… — run <판 A> · 판 …'(해제 기록의 판, 없으면 '판 모름')."""
+    _write_adjudications(proj)
+    root = proj["root"]
+    monkeypatch.setattr(seal, "_now_iso", lambda now=None: "2026-10-30T09:00:00.000+09:00")
+    e = seal.seal_bytes(root, _engine_bytes(), source="file", by="L01")
+    res = seal.unseal(root, e.sha256, by="L01", early_reason="합성 시험")
+    _open(win, root, ctx(AN, "analysis", "L01"))
+    dlg = win.side_by_side_view(show=False)
+    assert dlg is not None
+    st = seal.seal_status(root, reader_kind="analysis")
+    ver = getattr(st.entries[0], "engine_version", None)
+    want = f"엔진과 나란히 보기 — run {res.run_id} · " + (f"판 {ver}" if ver else "판 모름")
+    assert dlg.windowTitle() == want and dlg.view.window_title() == want
+    assert dlg.view.current_run_id() == res.run_id
+    win.show_home()
+
+
 def test_timeline_fixed_tracks_can_be_hidden(qapp):  # noqa: F811
     """분석 화면이 쓰는 Timeline.set_fixed_tracks_visible: 기본은 모두 보이고(작업대 그대로), 숨기면 칸과 높이가 준다."""
     from app.ui.timeline import Timeline

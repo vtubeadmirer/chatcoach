@@ -179,7 +179,9 @@ def test_pilot_reads_no_derived_inputs(tmp_path):
     assert vf.read_topic_vectors(pilot, {"target": {"asr_sha256": "a" * 64}}) == (vf.F_PILOT, None)
     assert vf.derived_topic_blocks(pilot) == (vf.F_PILOT, [])
     ctx_, info = vf.build_context(pilot)
-    assert info["vectors"] == vf.F_PILOT and info["topic_derived"] == vf.F_PILOT and ctx_["topic_vectors"] is None
+    # 시범 전사 낱말은 봉인 기록을 못 읽어 W_PILOT → 벡터는 전사 낱말이 없어 열어 보지도 않는다(F_NO_WORDS, 시범 길 23 5-2 의 3)
+    assert info["words"] == vf.W_PILOT and info["vectors"] == vf.F_NO_WORDS
+    assert info["topic_derived"] == vf.F_PILOT and ctx_["topic_vectors"] is None
 
 
 # ----------------------------------------------------------------------------- 화면까지: 벡터·문턱·전사 베끼기

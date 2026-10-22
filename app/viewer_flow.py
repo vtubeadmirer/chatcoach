@@ -7,7 +7,9 @@
 | 시범 판단 | block_reason | 폴더 이름(pilot-*)·시범 기록(freeze.json·setup.json)이면 시범 세션이 모두 잠기기 전에 끈다(D-20 5). |
 |  |  | 라벨링 세션에서는 잠김 판정(계획·매니페스트 열기)도 하지 않고 끈다(06 7-3 — F 와 같음) |
 | 구간 | choose_segment | 이 프로젝트의 가장 새 시나리오 구간 → 훈련 기준의 첫 구간(F 와 같은 구간) → 첫 채팅부터 10분 |
-| 주제 흐름 | topic_blocks | 해제된 run 의 짝 주제 흐름(seal.read_topics, 보기 전용도 됨). 봉인 중이면 없음 |
+| 해제된 run | unsealed_runs | seal.jsonl 만 읽어 (기본 run 먼저인 run_id 목록, 봉인됨 n건). run 파일은 열지 않는다 |
+| 주제 흐름 | topic_blocks | 해제된 run 의 짝 주제 흐름(seal.read_topics, 보기 전용도 됨). 봉인 중이면 없음. 시범도 같은 길 |
+| 시범 전사 낱말·벡터 | pilot_words · read_topic_vectors | 시범은 해제된 run 의 짝(seal.read_words · seal.read_vectors)만 |
 | 전사 낱말 | words_status · load_words | <P>\\derived\\asr-words.json(엔진 engine/transcript_words 가 VOD 로 보정해 미리 만든 것). |
 |  |  | 검사는 app.core.words_doc(엔진과 같은 규칙). asr.json 해시·보정 판·textnorm 판이 다르면 '오래됨' |
 | 전사 낱말 만들기 | words_command · run_words | 없거나 오래됐으면 열 때 엔진 도구를 따로 프로세스로(메인 창이 워커로 돌린다). |
@@ -24,7 +26,16 @@
 
 - 앱은 엔진을 import 하지 않는다(D-06) — 전사 낱말은 엔진이 쓴 파일을 읽기만 하고, 만들 때는 명령을 따로 띄운다
   (app.scenario_mix 의 '가상 채팅 만들기' 와 같은 길: run_make).
-- 시범 프로젝트(이름 pilot-*)는 어떤 함수도 그 폴더를 열지 않는다(이름만 보고 돌아간다).
+- 시범 프로젝트(이름 pilot-*, 23 5-2 의 3·10): `derived\\` 는 어떤 함수도 열지 않는다(엔진을 띄우는 명령도 만들지 않는다).
+  전사 낱말·창별 벡터·주제 흐름은 **해제된 run 폴더**(<ai 루트>\\<project_id>\\words·vectors·topics\\<run_id>.json)에서만
+  seal.read_words · seal.read_vectors · seal.read_topics 로 읽는다. 이 함수들은 해제 기록(ai.unsealed)부터 보고, 기록이
+  없으면 파일을 열지 않는다. 해제 전에는 seal.jsonl 만 읽어 '봉인됨 n건' 만 안다(W_SEALED, info 의 sealed_count).
+  run 은 analysis_flow.run_order(해제 기록의 엔진 판이 가장 높은 run → 같으면 늦게 푼 것)로 고른다.
+  전사 낱말은 검사(app.core.words_doc)와 textnorm 판·보정(판·오프셋·상태 verified·skipped)을 지금 project.json 과 맞춘다.
+  asr.json 해시는 보지 않는다(asr.json 은 derived\\ 에 있다) — 짝 봉인이 같은 엔진 실행의 묶음임을 보장한다.
+  맞지 않으면 다시 만들 수 없으므로(엔진은 시범을 거부) W_RUN_STALE(REBUILD 아님). 벡터는 그 전사 낱말과 asr 해시·보정이
+  같은 run 의 것만 쓴다.
+  이 길은 메인 창이 시범 세션이 모두 잠긴 뒤 보기 전용에서만 부른다(block_reason). 라벨링 세션은 이 모듈을 부르지 않는다.
 - 첫 판은 원래 반응·사람 라벨을 보이지 않으므로 노출로 세지 않는다(21 6-3) — 이 모듈은 training\\ 에 쓰지 않는다.
 - 로그·상태 줄에는 숫자와 코드만(낱말·채팅 본문 없음).
 """
@@ -71,7 +82,10 @@ W_STALE_TEXTNORM = "stale_textnorm"
 W_BAD = "bad"
 W_DEFAULT_CAL = "default_calibration"    # 보정 없이(오프셋 0) 만든 파일 — 시각이 맞는다고 볼 수 없어 쓰지 않는다
 W_UNVERIFIED_CAL = "unverified_calibration"   # 보정이 아직 확인 전(unverified, 예: 자동으로 생긴 판 0) — 쓰지 않는다
-W_PILOT = "pilot"
+W_PILOT = "pilot"                        # 시범인데 봉인 기록을 읽지 못했다 — 아무 run 파일도 열지 않았다
+W_SEALED = "sealed"                      # 시범: 해제된 run 이 없다(봉인됨 n건) — run 파일을 열지 않았다
+W_RUN_NO_WORDS = "run_no_words"          # 시범: 해제된 run 에 짝 전사 낱말이 없다
+W_RUN_STALE = "run_stale"                # 시범: 해제된 run 의 전사 낱말이 지금 앱(textnorm)·보정과 맞지 않거나 깨졌다
 W_BUILD_FAILED = "build_failed"          # 이 실행에서 같은 asr.json 으로 만들기가 이미 실패했다 — 다시 띄우지 않는다
 # 03 4-2 '반응 라벨링은 verified·skipped 일 때만' 과 같은 기준: 이 상태의 보정으로 만든 낱말만 채점에 쓴다
 USABLE_CAL_STATUSES = ("verified", "skipped")
@@ -79,8 +93,20 @@ WORDS_NOTE_KO = {
     W_UNVERIFIED_CAL: "전사 낱말: 영상 시각 보정 전이라 쓰지 않았습니다 — 주제 적합성은 주제 흐름만 봅니다",
     W_DEFAULT_CAL: "전사 낱말: 영상 시각 보정이 없어 쓰지 않았습니다 — 주제 적합성은 주제 흐름만 봅니다",
     W_BUILD_FAILED: "전사 낱말: 만들기가 실패해 이번 실행에서는 다시 하지 않습니다 — 주제 적합성은 주제 흐름만 봅니다",
+    W_SEALED: "전사 낱말: 시범 엔진 결과가 아직 봉인됨 — 봉인을 푼 뒤에 씁니다 (D-17 4)",
+    W_RUN_NO_WORDS: "전사 낱말: 해제된 엔진 결과에 전사 낱말이 없어 쓰지 않았습니다 — 주제 적합성은 주제 흐름만 봅니다",
+    W_RUN_STALE: "전사 낱말: 해제된 전사 낱말이 지금 보정·앱 판과 맞지 않아 쓰지 않았습니다 — 주제 적합성은 주제 흐름만 봅니다",
 }
 REBUILD = (W_MISSING, W_STALE_ASR, W_STALE_CAL, W_STALE_TEXTNORM, W_BAD)
+W_SEALED_NOTE_KO = "전사 낱말: 시범 엔진 결과가 아직 봉인됨 {0}건 — 봉인을 푼 뒤에 씁니다 (D-17 4)"
+
+
+def words_note(code: str | None, sealed_count: int | None = None) -> str | None:
+    """상태 줄 안내 한 줄(WORDS_NOTE_KO). W_SEALED 이고 건수를 알면 '봉인됨 n건'(D-18 3). 안내가 없는 코드는 None."""
+    if code == W_SEALED and isinstance(sealed_count, int) and not isinstance(sealed_count, bool) and sealed_count > 0:
+        return W_SEALED_NOTE_KO.format(sealed_count)
+    return WORDS_NOTE_KO.get(code) if code else None
+
 
 # 미리 만든 선택 파일(창별 벡터·주제 흐름·동의어) 상태 코드 — info·로그에는 이 코드만
 F_OK = "ok"
@@ -149,22 +175,32 @@ def choose_segment(*, scenario_range: Sequence[int] | None = None, reference_ran
     return None, None
 
 
-# ---------------------------------------------------------------------------- 주제 흐름 (해제된 run 만)
-def topic_blocks(project_root: str, *, ai_root: str | None = None) -> tuple[list[tuple[int, int, tuple]], str | None]:
-    """해제된 run 의 짝 주제 흐름 → ([(start_ms, end_ms, keywords)], run_id). 없거나 봉인 중·읽기 실패면 ([], None).
-    seal.jsonl → topics\\<run_id>.json 만 연다(봉인 파일·라벨은 열지 않는다). 시범 이름이면 아무것도 열지 않는다."""
-    if is_pilot_name(project_root):
-        return [], None
+# ---------------------------------------------------------------------------- 해제된 run (seal.jsonl 만)
+def unsealed_runs(project_root: str, *, ai_root: str | None = None) -> tuple[list[str] | None, int]:
+    """(해제된 run_id 를 기본 run 먼저 놓은 목록, 봉인됨 = 아직 풀지 않은 건수). 봉인 기록을 읽지 못하면 (None, 0).
+    seal.jsonl 과 잠금 파일만 읽는다(seal.seal_status — 봉인 파일·runs·topics·words·vectors 는 열지 않는다).
+    순서는 analysis_flow.run_order(해제 기록의 엔진 판이 가장 높은 run → 같으면 늦게 푼 것, 23 5-2 의 10·13)."""
     try:
         from . import analysis_flow as af
         from . import seal
-        from .core import topics as T
         st = seal.seal_status(project_root, ai_root=ai_root, reader_kind=None)
-        runs = af.unsealed_run_ids(st)
-    except Exception as e:  # noqa: BLE001 — 주제 흐름이 없어도 시청자 훈련은 된다(주제 적합성은 전사 낱말로)
-        LOG.info("시청자 훈련 주제 흐름: 봉인 기록 읽기 실패 %s", type(e).__name__)
+        return af.run_order(st), int(st.sealed_count)
+    except Exception as e:  # noqa: BLE001 — 봉인 기록이 없거나 깨져도 시청자 훈련은 연다(맥락 없이)
+        LOG.info("시청자 훈련: 봉인 기록 읽기 실패 %s", type(e).__name__)
+        return None, 0
+
+
+# ---------------------------------------------------------------------------- 주제 흐름 (해제된 run 만)
+def topic_blocks(project_root: str, *, ai_root: str | None = None) -> tuple[list[tuple[int, int, tuple]], str | None]:
+    """해제된 run 의 짝 주제 흐름 → ([(start_ms, end_ms, keywords)], run_id). 없거나 봉인 중·읽기 실패면 ([], None).
+    seal.jsonl → topics\\<run_id>.json 만 연다(봉인 파일·라벨·derived\\ 는 열지 않는다). 시범도 이 길이다(D-17 5 —
+    시범의 주제 흐름은 봉인 경로로만, 23 5-2 의 3). run 은 unsealed_runs 순서(기본 run 먼저)로 짝이 있는 첫 것."""
+    runs, _n = unsealed_runs(project_root, ai_root=ai_root)
+    if not runs:
         return [], None
-    for rid in reversed(runs):
+    from . import seal
+    from .core import topics as T
+    for rid in runs:
         try:
             doc = seal.read_topics(project_root, rid, ai_root=ai_root, reader_kind=None)
             if doc is None:
@@ -245,10 +281,15 @@ def read_words(project_root: str) -> dict | None:
     return doc
 
 
-def words_status(project_root: str, project_data: Mapping | None = None) -> tuple[str, dict | None]:
+def words_status(project_root: str, project_data: Mapping | None = None, *,
+                 ai_root: str | None = None) -> tuple[str, dict | None]:
     """(상태 코드, 쓸 수 있는 문서 또는 None) — `_words_status` 에 '이 실행에서 이미 실패' 를 더한다.
     다시 만들 상태(REBUILD)인데 이 실행에서 같은 asr.json(해시)으로 만들기가 실패했으면 W_BUILD_FAILED(REBUILD 아님 —
-    메인 창이 엔진을 다시 띄우지 않는다, 22 5-2 의 8). 실패 기억이 없는 프로젝트는 asr.json 을 다시 해시하지 않는다."""
+    메인 창이 엔진을 다시 띄우지 않는다, 22 5-2 의 8). 실패 기억이 없는 프로젝트는 asr.json 을 다시 해시하지 않는다.
+    시범 이름이면 pilot_words(해제된 run 의 짝 전사 낱말만, derived\\ 는 열지 않음)."""
+    if is_pilot_name(project_root):
+        code, doc, _rid = pilot_words(project_root, project_data, ai_root=ai_root)
+        return code, doc
     code, doc = _words_status(project_root, project_data)
     if code in REBUILD and _failed_before(project_root):
         return W_BUILD_FAILED, None
@@ -322,17 +363,103 @@ def _words_status(project_root: str, project_data: Mapping | None = None) -> tup
             sha = None
         if sha is None or sha != (doc.get("target") or {}).get("asr_sha256"):
             return W_STALE_ASR, None
+    code = _calibration_code(doc, project_data)
+    return code, (doc if code == W_OK else None)
+
+
+def _calibration_code(doc: Mapping, project_data: Mapping | None) -> str:
+    """검사를 통과한 전사 낱말 문서의 보정이 지금 project.json 과 맞나 → W_OK · W_STALE_CAL · W_DEFAULT_CAL ·
+    W_UNVERIFIED_CAL (_words_status 의 보정 규칙 — 시범 run 의 전사 낱말에도 같은 규칙)."""
     cal = doc.get("calibration") or {}
     want = _expected_calibration(project_data)
     if cal.get("source") == "project.json":
         if want is None or want != (cal.get("rev"), cal.get("offset_ms")):
-            return W_STALE_CAL, None
+            return W_STALE_CAL
     elif cal.get("source") == "default":
-        return (W_STALE_CAL if want is not None else W_DEFAULT_CAL), None
+        return W_STALE_CAL if want is not None else W_DEFAULT_CAL
     status = _project_cal_status(project_data) if project_data else None
     if (status or cal.get("status")) not in USABLE_CAL_STATUSES:
-        return W_UNVERIFIED_CAL, None
-    return W_OK, doc
+        return W_UNVERIFIED_CAL
+    return W_OK
+
+
+# ---------------------------------------------------------------------------- 시범: 해제된 run 의 짝 (23 5-2 의 3)
+# 시범 run 의 전사 낱말을 다시 만들 수 없으므로(엔진은 시범을 거부) REBUILD 코드는 W_RUN_STALE 로 바꾼다
+_PILOT_CODE = {W_STALE_TEXTNORM: W_RUN_STALE, W_STALE_CAL: W_RUN_STALE, W_BAD: W_RUN_STALE}
+_PILOT_RANK = (W_UNVERIFIED_CAL, W_DEFAULT_CAL, W_RUN_STALE)     # 쓸 run 이 없을 때 알릴 까닭(앞이 먼저)
+
+
+def pilot_words(project_root: str, project_data: Mapping | None = None, *,
+                ai_root: str | None = None) -> tuple[str, dict | None, str | None]:
+    """시범 프로젝트의 전사 낱말 → (상태 코드, 쓸 수 있는 문서 또는 None, 그 run_id 또는 None).
+
+    derived\\ 는 열지 않는다. unsealed_runs(seal.jsonl 만) → 해제된 run 이 없으면 W_SEALED(run 파일을 열지 않음).
+    run 순서대로 seal.read_words(해제 기록부터 본다)로 짝 전사 낱말을 읽어 app.core.words_doc 검사 → textnorm 판 →
+    보정(_calibration_code)을 통과한 첫 것. 짝이 하나도 없으면 W_RUN_NO_WORDS, 있는데 모두 못 쓰면 그 까닭
+    (보정 확인 전 W_UNVERIFIED_CAL · 보정 없음 W_DEFAULT_CAL · 그 밖 W_RUN_STALE). 봉인 기록을 못 읽으면 W_PILOT."""
+    runs, _n = unsealed_runs(project_root, ai_root=ai_root)
+    if runs is None:
+        return W_PILOT, None, None
+    if not runs:
+        return W_SEALED, None, None
+    from . import seal
+    seen: list[str] = []
+    for rid in runs:
+        try:
+            doc = seal.read_words(project_root, rid, ai_root=ai_root, reader_kind=None)
+        except Exception as e:  # noqa: BLE001 — 한 run 이 깨져도 다른 run 을 본다(코드만 남긴다)
+            LOG.info("시범 전사 낱말: run 읽기 실패 %s", type(e).__name__)
+            seen.append(W_RUN_STALE)
+            continue
+        if doc is None:
+            continue
+        if not isinstance(doc, Mapping) or WD.validate(doc):
+            seen.append(W_RUN_STALE)
+            continue
+        if (doc.get("engine") or {}).get("textnorm") != TN.VERSION:
+            seen.append(W_RUN_STALE)
+            continue
+        code = _calibration_code(doc, project_data)
+        if code == W_OK:
+            return W_OK, dict(doc), rid
+        seen.append(_PILOT_CODE.get(code, code))
+    if not seen:
+        return W_RUN_NO_WORDS, None, None
+    for c in _PILOT_RANK:
+        if c in seen:
+            return c, None, None
+    return W_RUN_STALE, None, None
+
+
+def _pilot_vectors(project_root: str, words_doc: Mapping | None, *,
+                   ai_root: str | None = None) -> tuple[str, list | None]:
+    """시범: 해제된 run 의 짝 창별 벡터(seal.read_vectors) 가운데 words_doc 와 asr 해시·보정이 같은 첫 것.
+    words_doc 가 없으면 아무것도 열지 않는다(F_NO_WORDS). 봉인 기록을 못 읽으면 F_PILOT."""
+    want_sha = _words_asr_sha(words_doc)
+    if want_sha is None:
+        return F_NO_WORDS, None
+    runs, _n = unsealed_runs(project_root, ai_root=ai_root)
+    if runs is None:
+        return F_PILOT, None
+    from . import seal
+    if not runs:
+        return F_MISSING, None
+    worst = F_MISSING
+    for rid in runs:
+        try:
+            doc = seal.read_vectors(project_root, rid, ai_root=ai_root, reader_kind=None)
+        except Exception as e:  # noqa: BLE001
+            LOG.info("시범 창별 벡터: run 읽기 실패 %s", type(e).__name__)
+            worst = F_BAD
+            continue
+        if doc is None:
+            continue
+        code, rows = _vectors_from(doc, words_doc, want_sha)
+        if code == F_OK:
+            return F_OK, rows
+        if worst == F_MISSING or code == F_BAD:
+            worst = code
+    return worst, None
 
 
 def tool_available() -> bool:
@@ -419,14 +546,16 @@ def topic_vectors_path(project_root: str) -> str:
     return os.path.join(os.path.abspath(project_root), *VECTORS_REL)
 
 
-def read_topic_vectors(project_root: str, words_doc: Mapping | None) -> tuple[str, list | None]:
+def read_topic_vectors(project_root: str, words_doc: Mapping | None, *,
+                       ai_root: str | None = None) -> tuple[str, list | None]:
     """(상태 코드, [(start_ms, end_ms, 벡터)] 또는 None) — 엔진이 미리 만든 창별 주제 벡터(22 7-1 의 3).
 
     벡터는 전사 풀을 넓히기만 하므로 전사 낱말을 쓰는 실행(words_doc 있음)에서만 연다. 그 문서와 asr 해시·보정(source·rev·
     offset_ms·file_start_in_vod_ms)이 같을 때만 쓴다(다르면 F_STALE). 엄한 검사는 엔진 몫, 여기서는
-    viewer_score.vectors_from_doc 이 읽은 창이 하나도 없으면 F_BAD. 시범 이름이면 아무것도 열지 않는다(F_PILOT)."""
+    viewer_score.vectors_from_doc 이 읽은 창이 하나도 없으면 F_BAD. 시범 이름이면 derived\\ 는 열지 않고 해제된 run 의
+    짝 벡터만(_pilot_vectors, seal.read_vectors)."""
     if is_pilot_name(project_root):
-        return F_PILOT, None
+        return _pilot_vectors(project_root, words_doc, ai_root=ai_root)
     p = topic_vectors_path(project_root)
     if not os.path.isfile(p):
         return F_MISSING, None
@@ -438,6 +567,11 @@ def read_topic_vectors(project_root: str, words_doc: Mapping | None) -> tuple[st
     except (OSError, UnicodeDecodeError, ValueError) as e:
         LOG.info("창별 주제 벡터 읽기 실패: %s", type(e).__name__)
         return F_BAD, None
+    return _vectors_from(doc, words_doc, want_sha)
+
+
+def _vectors_from(doc, words_doc: Mapping | None, want_sha: str) -> tuple[str, list | None]:
+    """벡터 문서 → (코드, 줄). words_doc 와 asr 해시·보정이 같을 때만 F_OK."""
     if not isinstance(doc, Mapping):
         return F_BAD, None
     tgt = doc.get("target") if isinstance(doc.get("target"), Mapping) else {}
@@ -446,7 +580,11 @@ def read_topic_vectors(project_root: str, words_doc: Mapping | None) -> tuple[st
     if tgt.get("asr_sha256") != want_sha or any(cal_v.get(k) != cal_w.get(k) for k in _CAL_KEYS):
         return F_STALE, None
     from .core import viewer_score as vsc
-    rows = vsc.vectors_from_doc(doc)
+    try:
+        rows = vsc.vectors_from_doc(doc)
+    except (ValueError, TypeError, KeyError) as e:
+        LOG.info("창별 주제 벡터 풀기 실패: %s", type(e).__name__)
+        return F_BAD, None
     if not rows:
         return F_BAD, None
     return F_OK, rows
@@ -533,7 +671,7 @@ def score_settings(project_data: Mapping | None):
 
 
 def build_context(project_root: str, project_data: Mapping | None = None, *,
-                  words_doc: Mapping | None = None) -> tuple[dict, dict]:
+                  words_doc: Mapping | None = None, ai_root: str | None = None) -> tuple[dict, dict]:
     """(viewer_train_view.start(context=…) 에 줄 dict, 숫자 정보).
 
     context = {"topic_blocks": [(s, e, keywords)], "transcript": [{start_ms, end_ms, words}], "settings": 문턱,
@@ -543,11 +681,15 @@ def build_context(project_root: str, project_data: Mapping | None = None, *,
     - 주제 흐름: 해제된 run 의 짝 → 없으면 derived_topic_blocks(미리 만든 것, 시범 아님).
     - 문턱: score_settings(project_data) — 현재 기준서의 values.viewer_score(없으면 기본값).
     - words_doc 를 주지 않으면 words_status 로 읽는다(W_OK 일 때만 쓴다). 창별 벡터는 전사 낱말을 쓸 때만.
+    - 시범(pilot-*): 주제 흐름·전사 낱말·벡터 모두 해제된 run 폴더에서만(derived\\ 는 열지 않음). 해제 전이면
+      셋 다 없음이고 info 의 sealed_count 만 뜻이 있다('봉인됨 n건', D-18 3).
     info 에는 숫자·코드만(낱말·본문 없음)."""
-    blocks, run_id = topic_blocks(project_root)
+    blocks, run_id = topic_blocks(project_root, ai_root=ai_root)
+    pilot = is_pilot_name(project_root)
+    _runs, sealed_n = unsealed_runs(project_root, ai_root=ai_root) if pilot else (None, 0)
     code = W_OK
     if words_doc is None:
-        code, words_doc = words_status(project_root, project_data)
+        code, words_doc = words_status(project_root, project_data, ai_root=ai_root)
     topic_src, derived_code = ("run", F_UNUSED) if run_id else ("none", None)
     if not run_id:
         derived_code, derived = derived_topic_blocks(project_root, words_doc)
@@ -555,7 +697,7 @@ def build_context(project_root: str, project_data: Mapping | None = None, *,
             blocks, topic_src = derived, "derived"
     windows = WD.score_windows(words_doc) if words_doc is not None else []
     cal = (words_doc or {}).get("calibration") or {}
-    vec_code, vec_rows = read_topic_vectors(project_root, words_doc if windows else None)
+    vec_code, vec_rows = read_topic_vectors(project_root, words_doc if windows else None, ai_root=ai_root)
     syn_code, syn_text = read_synonyms(project_root)
     settings, notes, src = score_settings(project_data)
     if notes:
@@ -564,7 +706,7 @@ def build_context(project_root: str, project_data: Mapping | None = None, *,
             "topic_derived": derived_code, "words": code,
             "transcript_windows": len(windows), "calibration_status": cal.get("status") or "-",
             "vectors": vec_code, "vector_windows": len(vec_rows or ()), "synonyms": syn_code,
-            "settings": src, "settings_notes": len(notes)}
+            "settings": src, "settings_notes": len(notes), "pilot": 1 if pilot else 0, "sealed_count": sealed_n}
     return {"topic_blocks": blocks, "transcript": windows, "settings": settings,
             "topic_vectors": vec_rows, "synonyms": syn_text}, info
 
@@ -575,4 +717,6 @@ __all__ = ["block_reason", "is_pilot_name", "choose_segment", "topic_blocks", "w
            "read_topic_vectors", "topic_vectors_path", "derived_topic_blocks", "derived_topics_path", "read_synonyms",
            "synonyms_path", "F_OK", "F_MISSING", "F_STALE", "F_BAD", "F_NO_WORDS", "F_PILOT", "F_UNUSED",
            "REBUILD", "W_OK", "W_MISSING", "W_NO_ASR", "W_STALE_ASR", "W_STALE_CAL", "W_STALE_TEXTNORM", "W_BAD",
-           "W_DEFAULT_CAL", "W_UNVERIFIED_CAL", "USABLE_CAL_STATUSES", "WORDS_NOTE_KO", "W_PILOT", "SEG_SCENARIO", "SEG_REFERENCE", "SEG_CHAT", "DEFAULT_SPAN_MS"]
+           "W_DEFAULT_CAL", "W_UNVERIFIED_CAL", "USABLE_CAL_STATUSES", "WORDS_NOTE_KO", "W_PILOT", "SEG_SCENARIO",
+           "SEG_REFERENCE", "SEG_CHAT", "DEFAULT_SPAN_MS", "unsealed_runs", "pilot_words", "W_SEALED", "W_RUN_NO_WORDS",
+           "W_RUN_STALE", "words_note", "W_SEALED_NOTE_KO"]

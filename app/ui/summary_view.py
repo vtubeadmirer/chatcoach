@@ -13,7 +13,9 @@
     놓친 질문 수 missed_questions · missed_question_count · missed
     본문(화면에만) text · excerpt · transcript · body · summary_text
   숫자 칸은 덩어리 안의 'stats' dict 에 있어도 된다.
-- sealed: True 면 '봉인됨' 만 보이고 topics 는 읽지도 않는다(D-15 8, D-17 5 — 시범 프로젝트의 주제 흐름은 봉인 경로).
+- sealed: True 면 '봉인됨 n건' 만 보이고 topics 는 읽지도 않는다(D-15 8, D-17 5 — 시범 프로젝트의 주제 흐름은 봉인 경로).
+  sealed_count: 봉인 건수(app.analysis_flow.BroadcastSummaryData.sealed_count). 봉인 표시는 어디서나 '봉인됨 n건'
+  (08 D-18 3 — 나란히 보기·메뉴 안내와 같은 말). 건수를 넘기지 않은 옛 부르는 쪽만 '봉인됨' 으로 둔다.
 
 화면 (D-16 클릭 한 번 원칙: 열면 바로 보이고 입력 칸이 없다)
 - 위 한 줄: 합계(주제 수 · 채팅 수 · 반응률(채팅 수로 가중) · 놓친 질문 수).
@@ -328,8 +330,15 @@ class _EnterFilter(QObject):
         return False
 
 
+def sealed_text(n: int | None) -> str:
+    """봉인 표시 글 (08 D-18 3): '봉인됨 n건'. 건수를 모르면(옛 부르는 쪽) '봉인됨'."""
+    if n is None:
+        return tr("봉인됨")
+    return tr("봉인됨 {n}건").format(n=n)
+
+
 class SummaryView(QWidget):
-    """방송 요약. sealed=True 면 '봉인됨' 만 보인다.
+    """방송 요약. sealed=True 면 '봉인됨 n건' 만 보인다(D-18 3).
 
     시그널
     - seekRequested(int): 행을 누르면 그 주제 덩어리의 시작 시각(ms).
@@ -338,13 +347,14 @@ class SummaryView(QWidget):
     seekRequested = Signal(int)
     topicActivated = Signal(int)
 
-    def __init__(self, topics: Any = None, *, sealed: bool = False, parent=None):
+    def __init__(self, topics: Any = None, *, sealed: bool = False, sealed_count: int | None = None, parent=None):
         super().__init__(parent)
         self._rows: tuple[TopicRow, ...] = ()
         self._invalid = 0
         self._sealed = False
+        self._sealed_count: int | None = None
         self._build()
-        self.set_data(topics, sealed=sealed)
+        self.set_data(topics, sealed=sealed, sealed_count=sealed_count)
 
     def _build(self) -> None:
         lay = QVBoxLayout(self)
@@ -404,16 +414,19 @@ class SummaryView(QWidget):
         self.stack.addWidget(self.table_page)
 
     # ------------------------------------------------------------------ 자료
-    def set_data(self, topics: Any = None, *, sealed: bool = False) -> None:
-        """자료를 바꾼다. sealed 면 topics 를 읽지 않고 '봉인됨' 만 보인다."""
+    def set_data(self, topics: Any = None, *, sealed: bool = False, sealed_count: int | None = None) -> None:
+        """자료를 바꾼다. sealed 면 topics 를 읽지 않고 '봉인됨 n건' 만 보인다(sealed_count 가 없으면 '봉인됨')."""
         self.table.setRowCount(0)
         self.detail_label.clear()
         self.totals_label.clear()
+        n = sealed_count if isinstance(sealed_count, int) and not isinstance(sealed_count, bool) else None
+        self._sealed_count = max(0, n) if n is not None else None
         if sealed:
             self._sealed = True
             self._rows, self._invalid = (), 0
+            self.sealed_label.setText(sealed_text(self._sealed_count))
             self.stack.setCurrentWidget(self.sealed_page)
-            LOG.info("방송 요약: 봉인됨 (열지 않음)")
+            LOG.info("방송 요약: 봉인됨 %s건 (열지 않음)", "?" if self._sealed_count is None else self._sealed_count)
             return
         self._sealed = False
         table = normalize_topics(topics)
@@ -480,6 +493,10 @@ class SummaryView(QWidget):
     # ------------------------------------------------------------------ 조회
     def is_sealed(self) -> bool:
         return self._sealed
+
+    def sealed_count(self) -> int | None:
+        """봉인 중일 때 넘겨받은 봉인 건수(넘기지 않았으면 None)."""
+        return self._sealed_count if self._sealed else None
 
     def rows(self) -> tuple[TopicRow, ...]:
         return self._rows

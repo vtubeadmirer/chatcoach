@@ -749,6 +749,21 @@ flowchart TD
 | 해제 전에 보이는 것 | '봉인됨 n건' 과 검사 결과(유효 / 거부 사유)뿐. 나란히 보기 화면·AI 비교 보고서는 열지 않는다 (D-15 7, 표시 문구 D-18 3) |
 | 기록 파일 | 봉인·해제 기록은 `data\ai\<project_id>\` 쪽 파일([03](03-data-model.md) 6-14 'AI 봉인 기록')이다. label-event 스키마를 바꾸지 않는다 (D-15 7) |
 
+**봉인 짝 네 종류 (D-17 5, D-20 3, D-22 2).** 봉인하는 것은 판정 결과 하나와, 그 판정 봉인 하나에 붙는 짝 셋이다. 짝 셋은 같은 규칙(`app/seal.py` 의 `_PairSpec` 한 표)을 따른다. 기록 칸은 [03](03-data-model.md) 6-14 가 정한다.
+
+| 종류 | 무엇 | 봉인 함수 · 기록 종류 | 해제 뒤 파일 · 읽기 | 등급 | 누가 쓰나 |
+|---|---|---|---|---|---|
+| 판정 결과 | ai-result 1판(6-1) | `seal_bytes`·`seal_file` · `ai.sealed` | `runs\<run_id>.json` · `read_run` | 판정 — 해제 전 내용·해석값 없음 | AI 비교 보고서·나란히 보기·최종 세트 |
+| 짝: 주제 흐름 | topic-flow | `seal_topics_bytes` · `topics.sealed` | `topics\<run_id>.json` · `read_topics` | 주제 이름·시각 | 방송 요약·분석 화면 주제 흐름 |
+| 짝: 시각별 전사 낱말 | transcript-words (VOD 로 보정) | `seal_words_bytes` · `words.sealed` | `words\<run_id>.json` · `read_words` | **전사문과 같음** | 시청자 훈련 채점(반복 축의 전사 베끼기) |
+| 짝: 창별 주제 벡터 | topic-vectors | `seal_vectors_bytes` · `vectors.sealed` | `vectors\<run_id>.json` · `read_vectors` | **전사문과 같음**(어느 정도 거꾸로 풀림) | 시청자 훈련 채점(주제 축의 관련 창) |
+
+- **짝은 따로 받지도 풀지도 않는다.** 짝 판정 봉인(`pair` = 그 sha256)이 있고 아직 풀리지 않았을 때만 받는다. 판정을 풀 때 같은 해제 안에서 짝을 한 번에 풀고, 해제 기록 `ai.unsealed` 의 `pairs[]`·`<짝>`·`<짝>_error` 칸에 해시·코드만 남긴다. 짝 하나가 깨져도 판정 해제는 막지 않는다(그 짝만 풀지 않음).
+- 해제 기록에는 해제한 결과의 **엔진 판**(`engine_version`)도 남긴다. 분석 화면은 판정 파일을 열기 전에 이 값으로 판 A 기본을 고른다(23 5-2 의 10). 옛 기록은 '판 모름'.
+- '봉인됨 n건' 은 판정 결과만 센다(D-18 3). 짝은 건수에 넣지 않는다.
+- 시범 프로젝트의 주제 흐름·전사 낱말·벡터는 이 짝 길로만 만든다(`tools/engine_to_ai.py --from-project <P> --seal --topics --words --vectors`). 프로젝트 `derived\` 에 평문으로 쓰지 않는다(7-2 아래 '봉인 경로만 쓰는 규칙').
+- 해제 전에는 어느 자리에서도 `read_*` 가 파일을 열지 않는다(`SealNotUnsealedError`). 해제 뒤 분석 세션은 넷 다 읽을 수 있다(7-3).
+
 **봉인 경로만 쓰는 규칙 (D-15 8).** 엔진을 프로젝트에 돌린 결과는 **처음부터 봉인 경로로만** 저장한다. 시범 프로젝트(`pilot-*`)에 엔진을 돌리는 것은 되지만, 시범 세션이 잠기기 전에는 사람도 도구도 그 결과를 열지 않는다.
 
 | 항목 | 규칙 |
@@ -767,7 +782,7 @@ flowchart TD
 ### 7-3. 열지 않음
 
 - 라벨링·재라벨 세션은 `data\ai\`, `data\reports\`, 다른 세션의 라벨 파일을 디스크에서 아예 열지 않는다. 읽은 뒤 걸러 내는 방식이 아니라 처음부터 읽지 않는 방식이다. 거르는 코드에 버그가 있어 새는 길을 없앤다 (05 S-11).
-- **분석 세션**은 `data\ai\` 가운데 **해제된 것만** 연다: `seal.jsonl`(봉인 건수·해제 여부 — 해제 전에는 '봉인됨 n건' 만 보임)과 해제 뒤 `runs\<run_id>.json`·짝 주제 흐름 `topics\<run_id>.json`. 봉인 원본 `sealed\` 는 열지 않고 봉인·해제도 못 한다(`app/core/visibility.py` 의 `UNSEALED_ONLY`, `seal._guard`). 최종 세트도 해제가 하나라도 있을 때만 만든다(D-15 7, 18 5-2 16번, [03](03-data-model.md) 12-1).
+- **분석 세션**은 `data\ai\` 가운데 **해제된 것만** 연다: `seal.jsonl`(봉인 건수·해제 여부 — 해제 전에는 '봉인됨 n건' 만 보임)과 해제 뒤 `runs\<run_id>.json`·짝 `topics\`·`words\`·`vectors\<run_id>.json`(7-2 '봉인 짝 네 종류'). 봉인 원본 `sealed\` 는 열지 않고 봉인·해제도 못 한다(`app/core/visibility.py` 의 `UNSEALED_ONLY`, `seal._guard`). 최종 세트도 해제가 하나라도 있을 때만 만든다(D-15 7, 18 5-2 16번, [03](03-data-model.md) 12-1).
 - 스트리머 훈련은 라벨링·출처 판정 세션 위에서 열지 않고, 다시 열기 전에는 기준을 읽지 않는다(7-5).
 - 무엇을 보여 줄지는 한 곳(can_show)에서만 정한다 ([02-architecture](02-architecture.md)).
 - **블라인드 시험** (16 8-1 8번): 라벨링·재라벨 세션을 연 채로 작업대 흐름을 돌리는 동안 파일 열기를 감시해(`builtins.open`·`os.open` 등), `data\ai\`·`data\reports\`(보고서 폴더)·다른 세션 라벨 파일이 한 번도 열리지 않음을 확인한다. 나란히 보기 화면(`ui/analysis_view.py`)도 라벨링·재라벨 세션에서는 열리지 않아야 한다. 시험은 합성 프로젝트로만 한다 (D-15 7).

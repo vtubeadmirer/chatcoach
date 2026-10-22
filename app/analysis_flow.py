@@ -9,9 +9,14 @@
 - 분석 세션: '봉인됨 n건' 과 해제된 결과의 나란히 보기만(visibility UNSEALED_ONLY). 해제 뒤(단계 COMPARISON)에만
   최종 세트(재라벨·조정 반영)를 만든다.
 
-해제된 run 이 여럿이면(17 6-1 4번) 화면이 판을 고르고 두 판을 견줄 수 있게 고르기 목록(RunChoice, 최신이 기본)과 읽기
+해제된 run 이 여럿이면(17 6-1 4번) 화면이 판을 고르고 두 판을 견줄 수 있게 고르기 목록(RunChoice, 최신이 맨 앞)과 읽기
 함수(RunLoader — 해제 기록부터 보고, 최종 세트는 한 번만 만든다)를 같이 넘긴다. 사람 일치도 기준은 같은 1차·재라벨 쌍의
 최신 일치도 보고서에서 읽는다(agreement_gate, 17 5-2 3번 — 못 찾으면 지금처럼 '기준 미확인').
+
+기본 run (23 5-2 의 10·13): 나란히 보기·주제 흐름·방송 요약·시청자 훈련(app.viewer_flow)이 모두 **같은 규칙**(run_order ·
+default_run_id)을 쓴다 — 해제 기록(ai.unsealed)의 engine_version 이 가장 높은 run, 같은 판이면 늦게 푼 것, 판을 아는 run 이
+없으면 가장 늦게 푼 run. 판은 seal.jsonl 에서 온 값(SealEntry.engine_version)만 본다(run 파일은 열지 않는다). 옛 기록은
+engine_version 이 없어 '판 모름'.
 
 로그·화면 문장에는 건수·해시 앞 8자·ID 만 남긴다. 채팅 본문·닉네임·전사문은 다루지 않는다.
 """
@@ -19,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, Sequence
 
@@ -52,13 +58,61 @@ def view_block_reason(reader_kind: str | None) -> str | None:
     return "엔진과 나란히 보기는 분석 세션에서 엽니다 (08 D-01 방송 분석 모드)"
 
 
+ENGINE_VERSION_MAX = 40          # ai-result 스키마 engine.version 의 maxLength 와 같다
+_VER_NUM = re.compile(r"\d+")
+VERSION_UNKNOWN_KO = "판 모름"
+
+
+def clean_version(v) -> str | None:
+    """해제 기록의 engine_version 글 → 그대로 또는 None(없거나 이상하면 '판 모름'). 순수."""
+    if isinstance(v, str) and 0 < len(v) <= ENGINE_VERSION_MAX and v.isprintable() and v.strip() == v:
+        return v
+    return None
+
+
+def version_key(ver: str | None) -> tuple[int, ...] | None:
+    """엔진 판 글 → 견줄 숫자 묶음(뒤의 0 은 뗀다). 'link-v0.3' → (0, 3), '0.3.0' → (0, 3),
+    '0.1.0'(engine/link.py 의 v0.2 규칙 판 — 판 번호를 올리지 않았다) → (0, 1). 숫자가 없으면 None(판 모름과 같다). 순수."""
+    if not isinstance(ver, str):
+        return None
+    nums = [int(n) for n in _VER_NUM.findall(ver)[:6]]
+    if not nums:
+        return None
+    while len(nums) > 1 and nums[-1] == 0:
+        nums.pop()
+    return tuple(nums)
+
+
+def version_text(ver: str | None) -> str:
+    """'판 0.3.0' 또는 '판 모름' (창 제목·고르기 글, 23 5-2 의 10)."""
+    v = clean_version(ver)
+    return f"판 {v}" if v else VERSION_UNKNOWN_KO
+
+
+def order_by_version(run_ids: Sequence[str], versions: Mapping[str, str | None]) -> list[str]:
+    """run_ids(늦게 푼 것이 앞) → 기본 run 이 맨 앞인 순서. 판을 아는 run 을 판이 높은 순(같으면 목록 순)으로 앞에,
+    판을 모르는 run 은 목록 순 그대로 뒤에. 판을 아는 run 이 없으면 run_ids 그대로. 순수."""
+    ids = list(dict.fromkeys(r for r in run_ids if isinstance(r, str) and r))
+    known = [(version_key(versions.get(r)), i, r) for i, r in enumerate(ids)]
+    good = [x for x in known if x[0] is not None]
+    good.sort(key=lambda x: x[0], reverse=True)          # 안정 정렬: 같은 판이면 목록 순(늦게 푼 것이 앞)
+    rest = [r for k, _i, r in known if k is None]
+    return [r for _k, _i, r in good] + rest
+
+
 @dataclass(frozen=True)
 class RunChoice:
-    """나란히 보기의 '엔진 판' 고르기 한 줄 (17 6-1 4번). seal.jsonl 에서 온 값만 — run 파일은 열지 않았다."""
+    """나란히 보기의 '엔진 판' 고르기 한 줄 (17 6-1 4번). seal.jsonl 에서 온 값만 — run 파일은 열지 않았다.
+    engine_version: 해제 기록(ai.unsealed)의 엔진 판(SealEntry.engine_version). 없으면 None = '판 모름'."""
     run_id: str
     unsealed_at: str | None = None
     presealed: bool | None = None
     latest: bool = False
+    engine_version: str | None = None
+
+    @property
+    def version_text(self) -> str:
+        return version_text(self.engine_version)
 
     @property
     def label(self) -> str:
@@ -91,6 +145,12 @@ class SideBySide:
     load_run: Callable[[str], dict] | None = None
     human_gate: dict | None = None                             # 최신 일치도 보고서에서 읽은 기준 (없으면 None)
     gate_report_id: str | None = None
+    engine_version: str | None = None                          # run_id 의 해제 기록 엔진 판(없으면 None = 판 모름)
+
+    @property
+    def version_text(self) -> str:
+        """창 제목에 붙일 '판 …' / '판 모름' (23 5-2 의 10)."""
+        return version_text(self.engine_version)
 
 
 def _unsealed_entries(status) -> list:
@@ -109,10 +169,34 @@ def unsealed_run_ids(status) -> list[str]:
     return [e.run_id for e in _unsealed_entries(status)]
 
 
+def _entry_version(e) -> str | None:
+    """SealEntry.engine_version(해제 기록의 엔진 판). 칸이 없는 옛 SealEntry·옛 기록은 None(판 모름)."""
+    return clean_version(getattr(e, "engine_version", None))
+
+
+def run_versions(status) -> dict[str, str | None]:
+    """seal_status 결과 → {해제된 run_id: 엔진 판 또는 None}. seal.jsonl 에서 온 값만."""
+    return {e.run_id: _entry_version(e) for e in _unsealed_entries(status)}
+
+
 def run_choices(status) -> list[RunChoice]:
-    """seal_status 결과 → 고르기 목록. 최신(가장 늦게 푼 것)이 맨 앞이고 기본으로 고른다."""
+    """seal_status 결과 → 고르기 목록. 최신(가장 늦게 푼 것)이 맨 앞이다. 기본으로 고를 run 은 default_run_id
+    (판이 가장 높은 run — 판을 모르면 맨 앞). 항목마다 해제 기록의 engine_version 을 싣는다."""
     rows = list(reversed(_unsealed_entries(status)))
-    return [RunChoice(e.run_id, e.unsealed_at, e.presealed, i == 0) for i, e in enumerate(rows)]
+    return [RunChoice(e.run_id, e.unsealed_at, e.presealed, i == 0, _entry_version(e)) for i, e in enumerate(rows)]
+
+
+def run_order(status) -> list[str]:
+    """seal_status 결과 → 해제된 run_id 를 '기본 run 먼저' 순서로(order_by_version: 판 높은 것 → 같으면 늦게 푼 것 →
+    판 모름은 늦게 푼 순). 주제 흐름·전사 낱말·벡터처럼 짝이 있는 run 을 찾을 때 이 순서로 본다."""
+    latest_first = list(reversed(unsealed_run_ids(status)))
+    return order_by_version(latest_first, run_versions(status))
+
+
+def default_run_id(status) -> str | None:
+    """판 A 기본 (app.ui.analysis_view.default_run_id 와 같은 규칙). 해제된 run 이 없으면 None."""
+    order = run_order(status)
+    return order[0] if order else None
 
 
 # ---------------------------------------------------------------------------- 사람 일치도 기준 (17 5-2 3번)
@@ -273,7 +357,8 @@ def scores_for_view(body: Mapping | None) -> dict | None:
 
 def side_by_side(project_root: str, *, reader_kind: str | None, run_id: str | None = None,
                  ai_root: str | None = None) -> SideBySide:
-    """나란히 보기 자료. 해제된 run 이 없으면 봉인 건수만(다른 파일은 열지 않는다). run_id 가 없으면 가장 늦게 푼 것.
+    """나란히 보기 자료. 해제된 run 이 없으면 봉인 건수만(다른 파일은 열지 않는다). run_id 가 없으면 default_run_id
+    (해제 기록의 엔진 판이 가장 높은 run, 판을 모르면 가장 늦게 푼 것 — 화면의 판 A 기본과 같다, 23 5-2 의 10).
 
     해제된 run 이 있으면: 그 run(runs\\<run_id>.json, 해시 대조) → 최종 세트(export.build_final_set, 잠긴 세션만 ·
     06 7-1 조건을 라벨 파일보다 먼저) → 최신 일치도 보고서의 기준(agreement_gate) → ai_compare.compare(파일을 열지 않음)
@@ -287,7 +372,8 @@ def side_by_side(project_root: str, *, reader_kind: str | None, run_id: str | No
     out = SideBySide(sealed_count=sealed, unsealed_runs=runs, choices=run_choices(st))
     if not runs:
         return out
-    rid = run_id if run_id in runs else runs[-1]
+    rid = run_id if run_id in runs else (default_run_id(st) or runs[-1])
+    out.engine_version = run_versions(st).get(rid)
     # 해제 기록을 라벨 파일보다 먼저 본다(06 7-1): 고른 run 이 해제되지 않았으면 최종 세트를 만들기 전에 멈춘다
     run = ai_compare.load_unsealed_run(project_root, rid, ai_root=ai_root, reader_kind=reader_kind, for_view=True)
     fx = export.build_final_set(project_root, reader_kind=reader_kind, ai_root=ai_root)
@@ -313,7 +399,8 @@ def side_by_side(project_root: str, *, reader_kind: str | None, run_id: str | No
             by[rsn[0]] = by.get(rsn[0], 0) + 1
         out.warnings.append(f"평가에서 빠진 사람 최종 행 {len(out.excluded_rows)}건은 나란히 보기·점수에 넣지 않았습니다 ("
                             + ", ".join(f"{k} {v}" for k, v in sorted(by.items())) + ")")
-    LOG.info("나란히 보기 자료: 해제 run %d개 · 봉인 %d건 · 최종 세트 행 %d", len(runs), sealed, len(out.final_rows))
+    LOG.info("나란히 보기 자료: 해제 run %d개 · 봉인 %d건 · 최종 세트 행 %d · %s", len(runs), sealed,
+             len(out.final_rows), "판 앎" if out.engine_version else "판 모름")
     return out
 
 
@@ -332,17 +419,30 @@ class TopicFlowView:
     doc: dict | None = None
     blocks: list = field(default_factory=list)                 # app.core.topics.TopicBlock
     warnings: list[str] = field(default_factory=list)
+    engine_version: str | None = None                          # run_id 의 해제 기록 엔진 판(없으면 None = 판 모름)
 
     @property
     def sealed(self) -> bool:
-        """해제된 run 이 하나도 없다 — 화면은 '봉인됨' 만 보인다."""
+        """해제된 run 이 하나도 없다 — 화면은 '봉인됨 n건' 만 보인다(D-18 3)."""
         return not self.unsealed_runs
+
+    @property
+    def sealed_text(self) -> str:
+        """'봉인됨 n건' (D-18 3 — 어디서나 같은 말)."""
+        return sealed_text(self.sealed_count)
+
+
+def sealed_text(n) -> str:
+    """'봉인됨 n건' (08 D-18 3). n 이 정수가 아니면 0건."""
+    k = n if isinstance(n, int) and not isinstance(n, bool) and n >= 0 else 0
+    return f"봉인됨 {k}건"
 
 
 def topic_flow(project_root: str, *, reader_kind: str | None, run_id: str | None = None,
                ai_root: str | None = None) -> TopicFlowView:
-    """해제된 run 의 짝 주제 흐름. run_id 를 주면 그 run, 없으면 짝 주제 흐름이 있는 가장 늦게 푼 run.
-    분석 세션만(view_block_reason). seal.jsonl → topics\\<run_id>.json 만 연다(봉인 파일·라벨 파일은 열지 않는다)."""
+    """해제된 run 의 짝 주제 흐름. run_id 를 주면 그 run, 없으면 run_order(판이 가장 높은 run 먼저 → 같으면 늦게 푼 것,
+    23 5-2 의 13) 가운데 짝 주제 흐름이 있는 첫 run. 분석 세션만(view_block_reason). seal.jsonl → topics\\<run_id>.json 만
+    연다(봉인 파일·라벨 파일은 열지 않는다). 해제 전이면 seal.jsonl 밖에는 아무것도 열지 않는다."""
     why = view_block_reason(reader_kind)
     if why:
         raise PermissionError(why)
@@ -351,7 +451,8 @@ def topic_flow(project_root: str, *, reader_kind: str | None, run_id: str | None
     st = seal.seal_status(project_root, ai_root=ai_root, reader_kind=reader_kind)
     runs = unsealed_run_ids(st)
     out = TopicFlowView(sealed_count=st.sealed_count, unsealed_runs=runs)
-    order = [run_id] if run_id in runs else list(reversed(runs))
+    order = [run_id] if run_id in runs else run_order(st)
+    versions = run_versions(st)
     for rid in order:
         try:
             doc = seal.read_topics(project_root, rid, ai_root=ai_root, reader_kind=reader_kind)
@@ -365,7 +466,7 @@ def topic_flow(project_root: str, *, reader_kind: str | None, run_id: str | None
         except ValueError:
             out.warnings.append(f"run {rid} 의 주제 흐름 형식이 맞지 않습니다")
             continue
-        out.run_id, out.doc = rid, doc
+        out.run_id, out.doc, out.engine_version = rid, doc, versions.get(rid)
         break
     LOG.info("주제 흐름: 해제 run %d개 · 봉인 %d건 · 덩어리 %d개", len(runs), out.sealed_count, len(out.blocks))
     return out
@@ -382,6 +483,12 @@ class BroadcastSummaryData:
     reaction_source: str | None = None                         # 'final_set'(사람 최종 세트) · 'engine'(해제된 엔진 판정)
     question_source: str | None = None                         # 'missed_check'(놓친 후보 판정의 질문 표시) · None
     warnings: list[str] = field(default_factory=list)
+    topic_engine_version: str | None = None                    # topic_run_id 의 해제 기록 엔진 판(없으면 판 모름)
+
+    @property
+    def sealed_text(self) -> str:
+        """'봉인됨 n건' (D-18 3)."""
+        return sealed_text(self.sealed_count)
 
 
 def _chat_times_kinds(project_root: str) -> list[dict]:
@@ -411,7 +518,7 @@ def broadcast_summary(project_root: str, *, reader_kind: str | None, run_id: str
     tf = flow if flow is not None else topic_flow(project_root, reader_kind=reader_kind, run_id=run_id,
                                                   ai_root=ai_root)
     out = BroadcastSummaryData(sealed_count=tf.sealed_count, sealed=tf.sealed, topic_run_id=tf.run_id,
-                               warnings=list(tf.warnings))
+                               warnings=list(tf.warnings), topic_engine_version=tf.engine_version)
     if tf.doc is None:
         return out
     from . import export
@@ -457,4 +564,6 @@ def broadcast_summary(project_root: str, *, reader_kind: str | None, run_id: str
 __all__ = ["ANALYSIS_MENU_KINDS", "SEAL_KINDS", "VIEW_KINDS", "menu_block_reason", "seal_block_reason",
            "view_block_reason", "SideBySide", "unsealed_run_ids", "seal_counts", "scores_for_view", "side_by_side",
            "short", "RunChoice", "run_choices", "RunLoader", "agreement_gate", "TopicFlowView", "topic_flow",
-           "BroadcastSummaryData", "broadcast_summary"]
+           "BroadcastSummaryData", "broadcast_summary", "run_versions", "run_order", "default_run_id",
+           "order_by_version", "version_key", "version_text", "clean_version", "sealed_text", "VERSION_UNKNOWN_KO",
+           "ENGINE_VERSION_MAX"]

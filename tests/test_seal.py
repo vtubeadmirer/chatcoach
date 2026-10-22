@@ -12,9 +12,12 @@ from datetime import timedelta
 import pytest
 
 from app import ai_results as air
-from app import relabel, seal
-from tests.test_agreement import MID_1, NOW, SID_A, SID_B, _lock, cid, proj  # noqa: F401
+from app import jsonl, project, relabel, seal
+from app.core import viewer_score as VS
+from tests.test_agreement import (MID_1, NOW, PID, SALT, SID_A, SID_B, _grade_pairs, _label_lines,  # noqa: F401
+                                  _lock, _write_session, A_SEG, B_SEG, cid, proj)
 from tools import ai_seal
+from tools import engine_to_ai as e2a
 
 SECRET_RUN = "run-synthmarker-77"
 SECRET_ENGINE = "synthengine-marker"
@@ -146,7 +149,9 @@ def test_labeling_sessions_cannot_touch_ai_folder(proj, kind, monkeypatch):
                  lambda: seal.seal_status(proj["root"], reader_kind=kind),
                  lambda: seal.unseal_conditions(proj["root"], reader_kind=kind),
                  lambda: seal.unseal(proj["root"], "0" * 64, by="L01", reader_kind=kind),
-                 lambda: seal.read_run(proj["root"], SECRET_RUN, reader_kind=kind)):
+                 lambda: seal.read_run(proj["root"], SECRET_RUN, reader_kind=kind),
+                 lambda: seal.seal_vectors_bytes(proj["root"], b"{}", pair_sha256="0" * 64, by="L01", reader_kind=kind),
+                 lambda: seal.read_vectors(proj["root"], SECRET_RUN, reader_kind=kind)):
         with pytest.raises(seal.SealBlindError):
             call()
     assert opened == []
@@ -457,3 +462,346 @@ def test_engine_to_ai_finds_words_sealer():
     assert list(sig.parameters)[:2] == ["project_root", "data"]
     for k in ("pair_sha256", "by", "source", "ai_root"):
         assert sig.parameters[k].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+# ============================================================================== 창별 주제 벡터 짝 봉인 (23 5-2 의 2)
+def _vhash(windows):
+    rows = [[w["start_ms"], w["end_ms"], w["v"]] for w in windows]
+    return hashlib.sha256(json.dumps(rows, separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
+
+
+def vectors_doc(project_id=None, video_no="777", **kw):
+    """합성 topic-vectors(round4, 4차원 단위 벡터 2창). 창 글·낱말은 없다(엔진 문서와 같다)."""
+    wins = [{"start_ms": 100_000, "end_ms": 110_000, "v": [1.0, 0.0, 0.0, 0.0]},
+            {"start_ms": 110_000, "end_ms": 120_000, "v": [0.0, 0.6, 0.8, 0.0]}]
+    d = {"schema": "chatcoach/topic-vectors", "schema_version": 1, "run_id": "tvec-synth-1",
+         "created_at": "2026-10-23T10:00:00+09:00",
+         "engine": {"name": "chatcoach-topic-vectors", "version": "0.1.0", "config_sha256": None},
+         "model": {"backend": "fake", "name": "fake-embedder", "repo": None, "revision": None, "model_sha256": None,
+                   "dim": 4, "prefix": None, "pooling": None},
+         "target": {"project_id": project_id, "video_no": video_no, "asr_sha256": "a" * 64},
+         "time_axis": "vod_ms",
+         "calibration": {"source": "project.json", "rev": 0, "method": "single_offset", "status": "verified",
+                         "offset_ms": 0, "file_start_in_vod_ms": 0},
+         "window_ms": 10_000, "span_ms": 10_000, "encoding": "round4", "dim": 4,
+         "range": {"start_ms": 0, "end_ms": 600_000}, "stats": {"windows": 2},
+         "vectors_sha256": _vhash(wins), "windows": wins}
+    d.update(kw)
+    return d
+
+
+def test_vectors_doc_matches_engine_rules():
+    """합성 벡터 문서가 엔진 검사(engine.topic_vectors.validate)도 통과하고, 벡터 해시 식이 엔진과 같다."""
+    TV = pytest.importorskip("engine.topic_vectors")
+    d = vectors_doc(project_id=PID)
+    assert TV.validate(d) == []
+    assert seal._vectors_hash(d["windows"]) == TV.vectors_sha256(d["windows"]) == d["vectors_sha256"]
+    assert tuple(TV.TOP_KEYS) == seal.VECTORS_TOP_KEYS and tuple(TV.WINDOW_KEYS) == seal.VECTORS_WINDOW_KEYS
+    assert seal.vectors_check(data_of(d), {"project_id": PID, "broadcast": {"video_no": "777"}}) == ("valid", [])
+
+
+def test_seal_vectors_pairs_and_unseals_with_ai_result(proj):
+    root = proj["root"]
+    vdata = data_of(vectors_doc(project_id=_pid(root)))
+    with pytest.raises(seal.SealError, match="짝"):
+        seal.seal_vectors_bytes(root, vdata, pair_sha256="0" * 64, by="L01")
+    e = seal.seal_bytes(root, data_of(result_doc()), source="engine_link", by="L01", now=NOW)
+    ve = seal.seal_vectors_bytes(root, vdata, pair_sha256=e.sha256, by="L01", source="engine_vectors", now=NOW)
+    assert ve.new and ve.check == "valid" and ve.sha256 == hashlib.sha256(vdata).hexdigest() and ve.run_id is None
+    assert seal.seal_vectors_bytes(root, vdata, pair_sha256=e.sha256, by="L01").new is False
+    st = seal.seal_status(root)
+    assert st.sealed_count == 1 and st.entries[0].vectors_sha256 == ve.sha256 and st.entries[0].words_sha256 is None
+    d = ai_dir(proj)
+    raw = open(os.path.join(d, "seal.jsonl"), encoding="utf-8").read()
+    recs = [json.loads(x) for x in raw.splitlines()]
+    assert [r["kind"] for r in recs] == ["ai.sealed", "vectors.sealed"]
+    assert set(recs[1]) == {"v", "seq", "kind", "at", "by", "app_version", "sha256", "size", "source", "pair",
+                            "check", "reject_reasons"}
+    assert recs[1]["source"] == "engine_vectors" and "0.6" not in raw         # 벡터 수를 기록에 남기지 않는다
+    with pytest.raises(seal.SealNotUnsealedError):
+        seal.read_vectors(root, SECRET_RUN, reader_kind="analysis")
+    _ready(root)
+    res = seal.unseal(root, e.sha256, by="L01", now=NOW + timedelta(days=4))
+    assert res.record["vectors"]["sha256"] == ve.sha256 and res.record["vectors_error"] is None
+    assert "words" not in res.record and "topics" not in res.record
+    assert [p["kind"] for p in res.record["pairs"]] == ["vectors"] and res.record["pairs"][0]["error"] is None
+    doc = seal.read_vectors(root, res.run_id, reader_kind="analysis")
+    assert doc == json.loads(vdata) and len(VS.vectors_from_doc(doc)) == 2
+    with pytest.raises(seal.SealError, match="이미 해제"):
+        seal.seal_vectors_bytes(root, data_of(vectors_doc(project_id=_pid(root), run_id="tvec-synth-2")),
+                                pair_sha256=e.sha256, by="L01")
+    with open(os.path.join(d, seal.VECTORS_DIR, f"{res.run_id}.json"), "ab") as f:
+        f.write(b" ")
+    with pytest.raises(seal.SealError, match="기록과 다릅니다"):
+        seal.read_vectors(root, res.run_id)
+    assert not os.path.exists(os.path.join(root, "ai"))
+
+
+def test_seal_vectors_rejects_with_codes_only(proj, tmp_path, monkeypatch):
+    root = proj["root"]
+    pid = _pid(root)
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    bad_hash = vectors_doc(project_id=pid, vectors_sha256="b" * 64)
+    extra_key = {**vectors_doc(project_id=pid), "text": "합성 창 글"}            # 창 글이 끼어들면 거부
+    bad_row = vectors_doc(project_id=pid)
+    bad_row["windows"][1]["start_ms"] = 105_000
+    bad_vec = vectors_doc(project_id=pid)
+    bad_vec["windows"][0]["v"] = [1.0, 0.0]                                    # 차원이 다름
+    bad_vec["vectors_sha256"] = _vhash(bad_vec["windows"])
+    cases = [(bad_hash, "vectors_format"), (extra_key, "vectors_format"), (bad_row, "vectors_format"),
+             (bad_vec, "vectors_format"), (vectors_doc(project_id=pid, window_ms=0), "vectors_format"),
+             (vectors_doc(project_id=pid, video_no="999"), "vectors_video_mismatch"),
+             (vectors_doc(project_id="0" * 8 + "-0000-0000-0000-" + "0" * 12), "vectors_project_mismatch")]
+    for doc, code in cases:
+        x = seal.seal_vectors_bytes(root, data_of(doc), pair_sha256=e.sha256, by="L01")
+        assert x.check == "rejected" and x.reject_reasons == [code], code
+    assert seal.seal_vectors_bytes(root, b'{"x": NaN}', pair_sha256=e.sha256, by="L01").reject_reasons == \
+        ["vectors_json"]
+    raw = open(os.path.join(ai_dir(proj), "seal.jsonl"), encoding="utf-8").read()
+    assert "합성 창 글" not in raw
+    assert seal.seal_status(root).entries[0].vectors_sha256 is None           # 거부된 것은 짝으로 치지 않는다
+    with pytest.raises(seal.SealError, match="출처"):
+        seal.seal_vectors_bytes(root, b"{}", pair_sha256=e.sha256, by="L01", source="engine_words")
+    f = tmp_path / "v.json"
+    f.write_bytes(data_of(vectors_doc(project_id=pid)))
+    vf = seal.seal_vectors_file(root, str(f), pair_sha256=e.sha256, by="L01")
+    assert vf.source == "file" and vf.check == "valid" and f.exists()
+    monkeypatch.setattr(seal, "VECTORS_MAX_BYTES", 10)
+    with pytest.raises(seal.SealError, match="상한"):
+        seal.seal_vectors_bytes(root, b"x" * 11, pair_sha256=e.sha256, by="L01")
+
+
+def test_engine_to_ai_finds_vectors_sealer():
+    """tools/engine_to_ai --vectors --seal 이 찾는 이름(VECTORS_SEAL_FN)이 이 함수다(words 와 같은 인자)."""
+    assert e2a._vectors_sealer() is seal.seal_vectors_bytes
+    sig = inspect.signature(seal.seal_vectors_bytes)
+    assert list(sig.parameters)[:2] == ["project_root", "data"]
+    assert list(sig.parameters) == list(inspect.signature(seal.seal_words_bytes).parameters)
+    for k in ("pair_sha256", "by", "source", "ai_root"):
+        assert sig.parameters[k].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+# ============================================================================== 해제 기록의 엔진 판·짝 목록 (23 5-2 의 10)
+def test_unseal_records_engine_version_and_pairs_and_old_records_still_read(proj):
+    root = proj["root"]
+    pid = _pid(root)
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    we = seal.seal_words_bytes(root, data_of(words_doc(project_id=pid)), pair_sha256=e.sha256, by="L01")
+    ve = seal.seal_vectors_bytes(root, data_of(vectors_doc(project_id=pid)), pair_sha256=e.sha256, by="L01")
+    with open(os.path.join(ai_dir(proj), "sealed", f"{ve.sha256}.bin"), "ab") as f:
+        f.write(b" ")                                                          # 벡터 .bin 만 깨짐
+    _ready(root)
+    res = seal.unseal(root, e.sha256, by="L01", now=NOW + timedelta(days=4))
+    rec = res.record
+    assert rec["engine_version"] == "0.0.1"
+    assert rec["pairs"] == [
+        {"kind": "words", "sha256": we.sha256, "file_sha256": rec["words"]["file_sha256"], "error": None},
+        {"kind": "vectors", "sha256": ve.sha256, "file_sha256": None, "error": "vectors_bin_mismatch"}]
+    assert rec["vectors"] is None and rec["vectors_error"] == "vectors_bin_mismatch"
+    assert seal.read_vectors(root, res.run_id) is None and seal.read_words(root, res.run_id) is not None
+    st = seal.seal_status(root)
+    assert st.entries[0].engine_version == "0.0.1" and st.entries[0].vectors_sha256 == ve.sha256
+    ev, _ = seal.unseal_events(root)
+    assert ev[0]["engine_version"] == "0.0.1" and ev[0]["run_id"] == res.run_id
+    # 옛 기록(engine_version·pairs·vectors 칸 없음)도 그대로 읽힌다 — seal.jsonl 하위 호환
+    p = os.path.join(ai_dir(proj), "seal.jsonl")
+    lines = [json.loads(x) for x in open(p, encoding="utf-8").read().splitlines()]
+    for r in lines:
+        if r["kind"] == "ai.unsealed":
+            for k in ("engine_version", "pairs", "vectors", "vectors_error"):
+                r.pop(k)
+    with open(p, "w", encoding="utf-8", newline="\n") as f:
+        f.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in lines))
+    st = seal.seal_status(root)
+    assert st.problems == [] and st.entries[0].engine_version is None and st.entries[0].run_id == res.run_id
+    assert seal.unseal_events(root)[0][0]["engine_version"] is None
+    assert seal.read_vectors(root, res.run_id) is None
+    assert seal.read_words(root, res.run_id) == words_doc(project_id=pid)
+    assert seal.read_run(root, res.run_id)["run_id"] == SECRET_RUN
+
+
+@pytest.mark.parametrize("reader", [None, "adjudication", "analysis"])
+def test_every_reader_is_blind_before_unseal(proj, monkeypatch, reader):
+    """해제 전: 네 읽기 함수 모두 SealNotUnsealedError(SealBlindError) — runs·topics·words·vectors·sealed 를 열지 않는다."""
+    root = proj["root"]
+    pid = _pid(root)
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    seal.seal_words_bytes(root, data_of(words_doc(project_id=pid)), pair_sha256=e.sha256, by="L01")
+    seal.seal_vectors_bytes(root, data_of(vectors_doc(project_id=pid)), pair_sha256=e.sha256, by="L01")
+    opened = []
+    real = builtins.open
+
+    def spy(path, *a, **kw):
+        p = os.path.normcase(os.path.abspath(os.fspath(path)))
+        if any(os.sep + x + os.sep in p for x in ("runs", "topics", "words", "vectors", "sealed")):
+            opened.append(p)
+        return real(path, *a, **kw)
+    monkeypatch.setattr(builtins, "open", spy)
+    for fn in (seal.read_run, seal.read_topics, seal.read_words, seal.read_vectors):
+        with pytest.raises(seal.SealBlindError) as ei:
+            fn(root, SECRET_RUN, reader_kind=reader)
+        assert isinstance(ei.value, seal.SealNotUnsealedError) and "해제 기록" in str(ei.value)
+    assert opened == []
+
+
+def test_cli_status_shows_pairs_and_verify_empty(proj, capsys):
+    root = proj["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    seal.seal_vectors_bytes(root, data_of(vectors_doc(project_id=_pid(root))), pair_sha256=e.sha256, by="L01")
+    assert ai_seal.main(["status", "--project", root]) == 0
+    row = json.loads(capsys.readouterr().out)["entries"][0]
+    assert row["pairs"] == {"topics": False, "words": False, "vectors": True} and row["engine_version"] is None
+    assert ai_seal.main(["verify", "--project", root]) == 0                     # 해제된 run 이 없으면 빈 목록
+    assert json.loads(capsys.readouterr().out) == {"runs": [], "ok": True}
+    with pytest.raises(SystemExit):                                             # --sha256 과 --all 은 하나만
+        ai_seal.main(["unseal", "--project", root, "--by", "L01"])
+    capsys.readouterr()
+
+
+# ============================================================================== 해제 당일 리허설 (D-22 2, 합성 시범 프로젝트)
+TOPIC_SECRET = "합성주제표지"
+
+
+def topic_doc(video_no="777"):
+    """합성 주제 흐름(app.core.topics 형식, tests/test_topics_integration.topic_doc 과 같은 모양)."""
+    from app.core import topics as T
+    return {
+        "schema": T.SCHEMA, "schema_version": T.SCHEMA_VERSION, "run_id": "topics-synth-1",
+        "created_at": "2026-10-23T08:30:00+09:00",
+        "engine": {"name": "synthetic-topics", "version": "0.0.1", "config_sha256": None, "embedding": None},
+        "target": {"video_no": video_no, "messages_sha256": None, "asr_sha256": None},
+        "time_axis": T.TIME_AXIS, "window_ms": 20_000, "range": {"start_ms": 100_000, "end_ms": 200_000},
+        "stats": {"windows": 5, "blocks": 2},
+        "blocks": [
+            {"index": 0, "start_ms": 100_000, "end_ms": 140_000, "keywords": [TOPIC_SECRET, "보스"],
+             "name_keywords": [TOPIC_SECRET], "top_keyword": TOPIC_SECRET, "change_ms": None, "boundary_score": None,
+             "utterances": 4, "chats": 3},
+            {"index": 1, "start_ms": 140_000, "end_ms": 200_000, "keywords": ["요리", "라면"],
+             "name_keywords": ["요리", "라면"], "top_keyword": "요리", "change_ms": 140_000, "boundary_score": 0.4,
+             "utterances": 5, "chats": 3},
+        ],
+        "gaps": [{"at_ms": 140_000, "similarity": 0.1, "depth": 0.4}],
+    }
+
+
+PILOT_RUN = "link-v03-synth-pilot"
+
+
+def engine_doc():
+    """engine.link 결과 2판 초안 모양(합성, v0.3 판)."""
+    return {"schema": "chatcoach/ai-result", "schema_version": 2, "run_id": PILOT_RUN,
+            "created_at": "2026-10-23T10:00:00+09:00",
+            "engine": {"name": SECRET_ENGINE, "version": e2a.V03_VERSION, "preregistered": True,
+                       "components": {"vad": None, "asr": "synth", "ocr": None, "other": None}},
+            "target": {"platform": "chzzk", "video_no": "777", "chat_id_algorithm": "sl-chat-id-v1"},
+            "time_axis": "vod_ms", "media": None,
+            "semantic": {"active": True, "status": "ok", "fallback": None},
+            "reactions": [{"chat_id": cid(1), "result": "graded", "grade": "direct", "reaction_time_ms": 3000,
+                           "utterance_start_ms": 3000, "utterance_end_ms": 4000, "score": 0.9}]}
+
+
+@pytest.fixture
+def pilot(tmp_path):
+    """합성 시범 프로젝트: 폴더 이름 pilot-777(시범 이름 규칙), 1차·두 번째 사람 재라벨 세션(tests.test_agreement 장면)."""
+    base = tmp_path / "chatcoach-data" / "projects"
+    p = project.create(str(base), "pilot", 777, "시험용", "L01", "0.0.1", NOW, PID, SALT,
+                       guide=project.GuideSource("0.1", b"# guide\n", {"segment": {"boundary_buffer_sec": 10}}),
+                       machine4="m3fa")
+    root = p.root
+    jsonl.write_all(os.path.join(root, "chat", "messages.jsonl"), [{"chat_id": cid(1), "t_ms": 1000, "text": "합성"}])
+    ra, rb = _grade_pairs()
+    _write_session(root, SID_A, MID_1, _label_lines(SID_A, MID_1, A_SEG, ra, kind="primary", start=0))
+    _write_session(root, SID_B, MID_1, _label_lines(SID_B, MID_1, B_SEG, rb, kind="relabel_second", start=5000))
+    return {"root": root, "tmp": tmp_path}
+
+
+def _tree(root):
+    out = {}
+    for d, _dirs, files in os.walk(root):
+        for n in files:
+            p = os.path.join(d, n)
+            st = os.stat(p)
+            out[os.path.relpath(p, root)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+def _last_json(capsys):
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def test_pilot_unseal_day_rehearsal(pilot, monkeypatch, capsys):
+    """해제 당일 리허설(합성 시범): engine_to_ai --topics --words --vectors --seal → 조건 미충족 거부(읽기도 블라인드)
+    → 세션 잠금 → ai_seal unseal --all → verify → 네 파일(판정·주제 흐름·전사 낱말·주제 벡터)이 모두 읽힌다.
+    사람 클릭 0: 모든 단계가 명령(도구)이다. 시범 프로젝트 폴더에는 아무것도 쓰지 않는다."""
+    root = pilot["root"]
+    assert os.path.basename(root) == "pilot-777" and e2a._is_pilot(root)
+    pid = _pid(root)
+    tdoc, wdoc, vdoc = topic_doc(), words_doc(project_id=pid), vectors_doc(project_id=pid)
+
+    def fake_engine(project_dir, ns, topics_out=None):
+        assert ns.engine == "v0.3" and ns.seal
+        if topics_out is not None:
+            topics_out["doc"] = tdoc
+        return engine_doc()
+    monkeypatch.setattr(e2a, "_run_engine", fake_engine)
+    monkeypatch.setattr(e2a, "_run_words", lambda project_dir, ns: wdoc)
+    monkeypatch.setattr(e2a, "_run_vectors", lambda project_dir, ns: vdoc)
+    before = _tree(root)
+
+    # 1. 봉인 — 시범도 봉인 경로로는 만든다. 짝 셋이 거부 없이 붙는다
+    rc = e2a.main(["--from-project", root, "--seal", "--by", "L01", "--engine", "v0.3",
+                   "--topics", "--words", "--vectors"])
+    raw_out = capsys.readouterr().out
+    out = json.loads(raw_out.strip().splitlines()[-1])
+    assert rc == 0, out
+    assert out["check"] == out["topics_check"] == out["words_check"] == out["vectors_check"] == "valid"
+    assert out["engine_version"] == e2a.V03_VERSION and out["engine_fallback"] is False
+    for secret in (SECRET_WORD, TOPIC_SECRET, PILOT_RUN, SECRET_ENGINE, "0.6"):
+        assert secret not in raw_out                                         # 내용은 찍지 않는다
+    assert _tree(root) == before                                             # 시범 폴더는 그대로
+    st = seal.seal_status(root)
+    assert st.sealed_count == 1
+    ent = st.entries[0]
+    assert (ent.topics_sha256, ent.words_sha256, ent.vectors_sha256) == \
+        (out["topics_sealed"], out["words_sealed"], out["vectors_sealed"])
+
+    # 2. 조건 미충족: check·unseal --all 거부, 아무것도 풀리지 않는다. 읽기 함수는 모두 블라인드
+    assert ai_seal.main(["check", "--project", root]) == 1
+    assert _last_json(capsys)["conditions_met"] is False
+    assert ai_seal.main(["unseal", "--project", root, "--all", "--by", "L01"]) == 1
+    assert _last_json(capsys)["error"] == "SealBlockedError"
+    for fn in (seal.read_run, seal.read_topics, seal.read_words, seal.read_vectors):
+        with pytest.raises(seal.SealBlindError):
+            fn(root, PILOT_RUN, reader_kind="analysis")
+    d = seal.project_ai_dir(root, pid)
+    assert sorted(os.listdir(d)) == ["seal.jsonl", "sealed"]                  # runs·topics·words·vectors 없음
+
+    # 3. 세션 잠금(1차 + 두 번째 사람 재라벨 계획·잠금)
+    _ready(root)
+    assert ai_seal.main(["check", "--project", root]) == 0
+    capsys.readouterr()
+
+    # 4. 해제: 명령 한 번에 판정과 짝 셋이 함께 풀린다
+    assert ai_seal.main(["unseal", "--project", root, "--all", "--by", "L01"]) == 0
+    u = _last_json(capsys)
+    assert u["errors"] == [] and len(u["unsealed"]) == 1
+    row = u["unsealed"][0]
+    assert row["run_id"] == PILOT_RUN and row["conditions_met"] is True and row["engine_version"] == e2a.V03_VERSION
+    assert [(p["kind"], p["error"]) for p in row["pairs"]] == [("topics", None), ("words", None), ("vectors", None)]
+
+    # 5. 확인: verify 와 네 읽기 함수
+    assert ai_seal.main(["verify", "--project", root]) == 0
+    v = _last_json(capsys)
+    assert v["ok"] is True and v["runs"] == [{"run_id": PILOT_RUN, "engine_version": e2a.V03_VERSION, "run": "ok",
+                                              "topics": "ok", "words": "ok", "vectors": "ok"}]
+    run = seal.read_run(root, PILOT_RUN, reader_kind="analysis")
+    assert [x["chat_id"] for x in run["reactions"]] == [cid(1)] and run["engine"]["version"] == e2a.V03_VERSION
+    assert seal.read_topics(root, PILOT_RUN, reader_kind="analysis") == tdoc
+    assert seal.read_words(root, PILOT_RUN, reader_kind="analysis") == wdoc
+    vec = seal.read_vectors(root, PILOT_RUN, reader_kind="analysis")
+    assert vec == vdoc and len(VS.vectors_from_doc(vec)) == 2
+    assert seal.seal_status(root).entries[0].engine_version == e2a.V03_VERSION
+    # 두 번째 unseal --all 은 할 일이 없다(같은 것을 두 번 풀지 않는다)
+    assert ai_seal.main(["unseal", "--project", root, "--all", "--by", "L01"]) == 0
+    assert _last_json(capsys)["unsealed"] == []
+    assert _tree(root) == {**before, **{k: v for k, v in _tree(root).items() if k.startswith(("locks", "relabel"))}}

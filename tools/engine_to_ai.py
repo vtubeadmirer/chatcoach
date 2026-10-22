@@ -23,15 +23,19 @@
 메모리로 만들어, --seal 이면 판정 봉인의 **짝**으로 봉인하고(seal.seal_topics_bytes — 판정을 풀 때 같이 풀린다),
 --out a.json 이면 a.topics.json 에 쓴다('분석 → AI 결과 가져오기' 가 같은 이름을 찾아 같이 봉인한다).
 --words 를 주면 같은 asr·보정으로 시각별 전사 낱말(transcript-words, D-20 3, engine.transcript_words)도 메모리로 만들어
---seal 이면 판정 봉인의 짝으로 봉인하고(app.seal.seal_words_bytes — **그 함수가 있을 때만**. 없으면 아무것도 봉인하지 않고
-종료 1, words_seal_unsupported), --out a.json 이면 a.words.json 에 쓴다. 낱말 파일은 전사문과 같은 등급이라 a.words.json 이
-그 프로젝트 보호 구역 안(예: --out <프로젝트>\\derived\\asr-link.json)일 때만 쓰고, 아니면 엔진을 돌리기 전에 종료 2
-(words_out_unprotected). --asr 가 시범 폴더 안이면 --out 은 거부(pilot_needs_seal).
+--seal 이면 판정 봉인의 짝으로 봉인하고(app.seal.seal_words_bytes), --out a.json 이면 a.words.json 에 쓴다. 낱말 파일은
+전사문과 같은 등급이라 a.words.json 이 그 프로젝트 보호 구역 안(예: --out <프로젝트>\\derived\\asr-link.json)일 때만 쓰고,
+아니면 엔진을 돌리기 전에 종료 2(words_out_unprotected). --asr 가 시범 폴더 안이면 --out 은 거부(pilot_needs_seal).
 --vectors 를 주면 같은 asr·보정으로 창별 주제 벡터(topic-vectors, G 둘째 22 7-1 의 3, engine.topic_vectors — 로컬 e5-small,
 --models-dir·--semantic-backend 를 같이 쓴다)도 메모리로 만들어 --seal 이면 판정 봉인의 짝으로 봉인하고
-(app.seal.seal_vectors_bytes — **그 함수가 있을 때만**. 없으면 엔진을 돌리기 전에 아무것도 봉인하지 않고 종료 1,
-vectors_seal_unsupported), --out a.json 이면 a.vectors.json 에 쓴다. 벡터도 전사에서 나온 값이라 낱말 파일과 같이 그 프로젝트
-보호 구역 안일 때만 쓴다(아니면 종료 2, vectors_out_unprotected). 임베딩 모델이 없으면 아무것도 봉인·쓰지 않고 종료 1.
+(app.seal.seal_vectors_bytes, 23 5-2 의 2), --out a.json 이면 a.vectors.json 에 쓴다. 벡터도 전사에서 나온 값이라 낱말 파일과
+같이 그 프로젝트 보호 구역 안일 때만 쓴다(아니면 종료 2, vectors_out_unprotected). 임베딩 모델이 없으면 아무것도 봉인·쓰지
+않고 종료 1.
+짝 봉인 함수(seal_words_bytes·seal_vectors_bytes)를 app.seal 에서 이름으로 찾는다. 찾지 못하는 앱(옛 판)이면 판정만 봉인되고 짝이
+빠지지 않게 엔진을 돌리기 전에 아무것도 봉인하지 않고 종료 1(words_seal_unsupported · vectors_seal_unsupported).
+짝은 판정을 풀 때 같은 해제에서 한 번에 풀린다(tools/ai_seal.py unseal --all · verify).
+시범 해제 리허설(합성 시범 프로젝트, D-22 2): --from-project <pilot-…> --seal --by L01 --topics --words --vectors
+→ ai_seal check(거부) → 세션 잠금 → ai_seal unseal --all → ai_seal verify. 사용자 클릭 0(Claude 가 명령으로).
 
 사용
   python tools/engine_to_ai.py --in link.json --out ai.json
@@ -248,7 +252,7 @@ def words_out_protected(project_dir: str, out: str) -> bool:
     return backup.in_protected_zone(rel, backup.DEFAULT_PROTECTED_ZONE)
 
 
-WORDS_SEAL_FN = "seal_words_bytes"   # app.seal 에 이 이름의 짝 봉인 함수가 생기면 --words --seal 이 된다
+WORDS_SEAL_FN = "seal_words_bytes"   # app.seal 의 전사 낱말 짝 봉인 함수(없는 옛 앱이면 --words --seal 은 종료 1)
 
 
 def _words_sealer():
@@ -268,7 +272,7 @@ def _run_words(project_dir: str, ns) -> dict:
                            allow_pilot=bool(ns.seal))
 
 
-VECTORS_SEAL_FN = "seal_vectors_bytes"   # app.seal 에 이 이름의 짝 봉인 함수가 생기면 --vectors --seal 이 된다
+VECTORS_SEAL_FN = "seal_vectors_bytes"   # app.seal 의 주제 벡터 짝 봉인 함수(없는 옛 앱이면 --vectors --seal 은 종료 1)
 
 
 def vectors_out_path(out: str) -> str:
@@ -341,10 +345,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="주제 흐름에 로컬 임베딩을 섞을지(기본 off = 낱말만)")
     ap.add_argument("--words", action="store_true",
                     help="--from-project 에서 시각별 전사 낱말(transcript-words)도 만든다. --seal 이면 판정 봉인의 짝으로 "
-                         "봉인(app.seal.seal_words_bytes 가 있을 때만), --out 이면 <out>.words.json")
+                         "봉인(app.seal.seal_words_bytes), --out 이면 <out>.words.json")
     ap.add_argument("--vectors", action="store_true",
                     help="--from-project 에서 창별 주제 벡터(topic-vectors, 로컬 e5-small)도 만든다. --seal 이면 판정 봉인의 "
-                         "짝으로 봉인(app.seal.seal_vectors_bytes 가 있을 때만), --out 이면 <out>.vectors.json")
+                         "짝으로 봉인(app.seal.seal_vectors_bytes), --out 이면 <out>.vectors.json")
     ap.add_argument("--allow-fallback", action="store_true",
                     help="--engine v0.3 --seal 에서 의미 비교가 돌지 못해 v0.2 로 물러나도 봉인한다(기본은 봉인하지 않고 종료 1)")
     ns = ap.parse_args(argv)

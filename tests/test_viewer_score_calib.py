@@ -495,3 +495,170 @@ def test_topics_zone_and_refuse_unprotected_name(tmp_path, capsys):
     assert cal.main(["--project", p, "--topics", bad]) == 2
     err = capsys.readouterr().err
     assert "보호 구역" in err and "합성" not in err
+
+
+# ───────────────────────────────────────────────────────────── 시범 최종 세트 길 (D-22 1·2, 23 6장 '나')
+
+def fcid(n):
+    return "c" + f"{n:020x}"
+
+
+def _frow(n, grade, *, result="graded", lenient=True, strict=True, t=None):
+    return {"label_kind": "reaction", "chat_id": fcid(n), "chat_t_ms": t if t is not None else 100_000 + n * 5_000,
+            "result": result, "grade": None if result == "unconfirmed" else grade, "rationale": "합성 근거 문장",
+            "eval": {"strict": strict, "lenient": lenient, "excluded_reasons": [] if lenient else ["grade_unclear"]}}
+
+
+#: 합성 최종 세트: 1·3·5 직접 · 7 높음 · 9 직접(엄격 아님) · 11·13 반응 미확인 · 15 평가 제외(lenient 아님)
+FINAL_ITEMS = [("final", _frow(1, "direct")), ("final", _frow(3, "direct")), ("final", _frow(5, "direct")),
+               ("final", _frow(7, "likely")), ("final", _frow(9, "direct", strict=False)),
+               ("final", _frow(11, None, result="unconfirmed")), ("final", _frow(13, None, result="unconfirmed")),
+               ("final", _frow(15, "direct", lenient=False, strict=False)), ("excluded", _frow(17, "direct")),
+               ("ambiguous", _frow(19, "direct"))]
+
+
+def _fmsgs(n=30):
+    texts = ("떡볶이 치즈 추가하면 어떤 맛이에요?", "어묵 국물 매운가요?", "ㅋㅋㅋㅋ", "분식집 메뉴 추천해 주세요")
+    return [_msg(fcid(i), 100_000 + i * 5_000, f"v{i % 6}", texts[i % len(texts)]) for i in range(1, n + 1)]
+
+
+def test_labels_from_final_codes_and_eval_modes():
+    fin = cal.FinalInput(list(FINAL_ITEMS) + [("final", {"label_kind": "segment"}), ("final", _frow(2, "direct") |
+                                                                                      {"chat_id": "zz"})],
+                         [(0, 1_000_000)], {})
+    labels, c = cal.labels_from_final(fin)
+    by = {r.chat_id: r.grade for r in labels}
+    assert by[fcid(1)] == by[fcid(9)] == "direct" and by[fcid(7)] == "likely"
+    assert by[fcid(11)] == by[fcid(13)] == cal.NONE_CODE
+    assert by[fcid(15)] == by[fcid(17)] == by[fcid(19)] == cal.EXCLUDED_CODE
+    assert c["reaction_rows"] == 10 and c["bad_rows"] == 1
+    strict, _ = cal.labels_from_final(fin, eval_mode="strict")
+    assert {r.chat_id: r.grade for r in strict}[fcid(9)] == cal.EXCLUDED_CODE
+    assert "합성" not in repr(labels) and "합성" not in json.dumps(c, ensure_ascii=False)
+    with pytest.raises(cal.CalibError):
+        cal.labels_from_final(fin, eval_mode="loose")
+
+
+def test_build_groups_none_group_and_ranges():
+    chats = cal.parse_messages(_fmsgs())
+    fin = cal.FinalInput(list(FINAL_ITEMS), [(0, 150_000), (160_000, 1_000_000)], {})
+    labels, _ = cal.labels_from_final(fin)
+    groups, info = cal.build_groups(chats, labels, grades=cal.FINAL_GRADES, none_grades=(cal.NONE_CODE,),
+                                    ranges=fin.ranges)
+    ids = {g: sorted(chats[i].chat_id for i in idx) for g, idx in groups.items()}
+    assert ids["reacted"] == [fcid(1), fcid(3), fcid(5), fcid(9)]            # 직접 반응만(높음 7 은 뺌)
+    # 확인된 반응 없음은 범위로만 거른다: 11(155초)은 150~160초 틈이라 빠지고, 13(165초)은 반응받은 끝(145초) 뒤여도 든다
+    assert ids["labelled_none"] == [fcid(13)]
+    assert info["label_none_out_of_span"] == 1
+    labelled = {r.chat_id for r in labels}
+    assert not labelled & set(ids["others"])                               # 최종 세트 행(제외·모호 포함)은 대조군 밖
+    # 구간 105~145초(반응받은 첫~끝) 안이고 최종 구간 조각 안: 2·4·6·8
+    assert ids["others"] == [fcid(2), fcid(4), fcid(6), fcid(8)]
+    narrow, _ = cal.build_groups(chats, labels, grades=cal.FINAL_GRADES, none_grades=(cal.NONE_CODE,),
+                                 ranges=[(0, 120_000)])
+    assert [chats[i].chat_id for i in narrow["others"]] == [fcid(2)]
+
+
+def _final_project(tmp_path, name="proj-final-a", pid="00000000-0000-4000-8000-0000000000f1"):
+    p = os.path.join(str(tmp_path), name)
+    os.makedirs(os.path.join(p, "chat"))
+    with open(os.path.join(p, "project.json"), "w", encoding="utf-8") as f:
+        json.dump({"project_id": pid}, f)
+    with open(os.path.join(p, "chat", "messages.jsonl"), "w", encoding="utf-8") as f:
+        f.write("\n".join(_fmsgs()) + "\n")
+    return p
+
+
+def _final_zip(path, pid, *, export_type="ground_truth_lenient"):
+    import zipfile
+    good = [r for st, r in FINAL_ITEMS if st == "final" and r["eval"]["lenient"]]
+    good.append({"label_kind": "segment", "start_ms": 0, "end_ms": 1_000_000, "eval": {"lenient": True}})
+    amb = [r for st, r in FINAL_ITEMS if st == "ambiguous"]
+    man = {"export_type": export_type, "project_id": pid, "messages_sha256": None, "warnings": []}
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("manifest.json", json.dumps(man))
+        z.writestr("labels.jsonl", "\n".join(json.dumps(r, ensure_ascii=False) for r in good) + "\n")
+        z.writestr("ambiguous.jsonl", "\n".join(json.dumps(r, ensure_ascii=False) for r in amb) + "\n")
+    return path
+
+
+def test_final_set_zip_end_to_end_numbers_only(tmp_path, capsys):
+    pid = "00000000-0000-4000-8000-0000000000f1"
+    p = _final_project(tmp_path, pid=pid)
+    z = _final_zip(str(tmp_path / "final.zip"), pid)
+    out = str(tmp_path / "res.json")
+    assert cal.main(["--project", p, "--final-set", z, "--quick", "--out", out]) == 0
+    printed = capsys.readouterr().out
+    rep = json.loads(open(out, encoding="utf-8").read())
+    inp = rep["input"]
+    assert inp["label_source"] == "final_set" and inp["grades"] == ["direct"]
+    assert inp["groups"]["reacted"] == 4 and inp["groups"]["labelled_none"] == 2
+    fs_ = inp["final_set"]
+    assert fs_["source"] == "zip" and fs_["excluded_rows_known"] is False and fs_["ranges"] == 1
+    assert "reacted_vs_none" in rep["variants"]["base"]
+    assert "확인된 반응 없음 2" in printed
+    blob = printed + open(out, encoding="utf-8").read()
+    assert "합성" not in blob and "떡볶이" not in blob and fcid(1) not in blob
+    # 엄격: 9 는 빠진다
+    rep2 = cal.calibrate(p, final_set=z, final_eval="strict", quick=True)
+    assert rep2["input"]["groups"]["reacted"] == 3
+    # 다른 프로젝트의 zip·최종 세트가 아닌 zip·zip 아님은 거부
+    assert cal.main(["--project", p, "--final-set", _final_zip(str(tmp_path / "o.zip"), "1" * 8 + pid[8:])]) == 2
+    assert cal.main(["--project", p, "--final-set", _final_zip(str(tmp_path / "t.zip"), pid,
+                                                               export_type="labels")]) == 2
+    (tmp_path / "bad.zip").write_bytes(b"not a zip")
+    assert cal.main(["--project", p, "--final-set", str(tmp_path / "bad.zip")]) == 2
+    assert cal.main(["--project", p, "--final-set", "L01-RS-20261019-cd34"]) == 2     # 1차 세션 ID 가 아님
+
+
+def test_final_set_from_export_object_and_pool(tmp_path):
+    p = _final_project(tmp_path)
+    fx = {"items": [{"set": st, "row": r} for st, r in FINAL_ITEMS],
+          "segment_items": [{"set": "final", "piece": {"start_ms": 0, "end_ms": 1_000_000}}],
+          "info": {"relabel_session_ids": ["x"], "adjudication_session_ids": [], "warnings": []}}
+    rep = cal.calibrate(p, final_set=fx, quick=True)
+    assert rep["input"]["final_set"]["excluded_rows_known"] is True
+    assert rep["input"]["groups"]["reacted"] == 4
+    pooled = cal.pool_reports([rep, rep])
+    assert pooled["pooled"] == 2 and pooled["input"]["groups"]["reacted"] == 8
+    b1, b2 = rep["variants"]["base"], pooled["variants"]["base"]
+    for axis in vs.AXES:
+        assert b2["groups"]["reacted"][axis]["good"] == 2 * b1["groups"]["reacted"][axis]["good"]
+        assert b2["groups"]["reacted"][axis]["good_pct"] == b1["groups"]["reacted"][axis]["good_pct"]
+        assert b2["reacted_vs_others"][axis]["good_lift"] == b1["reacted_vs_others"][axis]["good_lift"]
+    assert b2["flow_presend"]["reacted"]["flow_hit"] == 2 * b1["flow_presend"]["reacted"]["flow_hit"]
+    assert set(pooled["candidates"]) == set(vs.AXES)
+    assert "\n".join(cal._table(pooled))                                    # 표도 그려진다(묶은 결과)
+    other = dict(rep, scorer="viewer_score/9.9")
+    with pytest.raises(cal.CalibError):
+        cal.pool_reports([rep, other])
+    with pytest.raises(cal.CalibError):
+        cal.pool_reports([])
+
+
+def test_words_code_matches_viewer_flow_rules(tmp_path):
+    from app.core import textnorm as TN
+    p = _final_project(tmp_path)
+    pdata = {"calibration": {"active_rev": 0, "revs": [{"rev": 0, "offset_ms": 0, "status": "verified",
+                                                        "method": "single_offset", "anchors": []}]}}
+    doc = {"schema": "chatcoach/transcript-words", "schema_version": 1, "run_id": "w-1",
+           "created_at": "2026-10-23T10:00:00+09:00",
+           "engine": {"name": "transcript_words", "version": "0.1.0", "config_sha256": None, "textnorm": TN.VERSION},
+           "target": {"project_id": None, "video_no": "1", "asr_sha256": None}, "time_axis": "vod_ms",
+           "calibration": {"source": "project.json", "rev": 0, "method": "single_offset", "status": "verified",
+                           "offset_ms": 0, "file_start_in_vod_ms": 0},
+           "window_ms": 10_000, "range": {"start_ms": 0, "end_ms": 20_000},
+           "windows": [{"start_ms": 0, "end_ms": 10_000, "words": ["라면"], "segments": 1}]}
+    try:
+        from app.core.timecode import calibration_from_json
+        calibration_from_json(pdata["calibration"])
+    except Exception:  # noqa: BLE001 — 보정 형식이 다르면 이 시험은 상태 칸만 본다
+        pytest.skip("보정 형식")
+    assert cal.words_code(p, None, pdata) == "missing"
+    assert cal.words_code(p, doc, pdata) == "ok"
+    assert cal.words_code(p, {**doc, "windows": "x"}, pdata) == "bad"
+    assert cal.words_code(p, {**doc, "engine": {**doc["engine"], "textnorm": "textnorm-v0"}}, pdata) == "stale_textnorm"
+    moved = {**doc, "calibration": {**doc["calibration"], "offset_ms": 500}}
+    assert cal.words_code(p, moved, pdata) == "stale_calibration"
+    unv = {"calibration": {"active_rev": 0, "revs": [dict(pdata["calibration"]["revs"][0], status="unverified")]}}
+    assert cal.words_code(p, doc, unv) == "unverified_calibration"

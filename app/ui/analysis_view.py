@@ -24,6 +24,10 @@
   고르기 목록 항목의 engine_version(seal.jsonl 의 ai.unsealed 기록에서 온 값)만 본다. 판을 아는 run 이 없으면 지금처럼
   가장 늦게 푼 run(목록 맨 앞)이고, 판을 모르는 run 은 고르기 글에 '판 모름' 을 붙인다(한 번 읽은 run 은 결과 파일의
   엔진 이름·판).
+- 창 제목 (23 5-2 의 10): '<기본 제목> — run <판 A> · 판 <engine_version>'(해제 기록의 판, 없으면 '판 모름'), 판끼리
+  견주면 '… ↔ run <판 B> · 판 …', 해제 전이면 '<기본 제목> — 봉인됨 n건'(D-18 3). window_title() 이 글을 만들고,
+  이 화면을 담은 창이 대화상자(QDialog)이면 판이 바뀔 때마다 그 창 제목을 바꾼다(titleChanged 도 보낸다). 기본 제목은
+  title_base 인자, 없으면 그 창의 지금 제목에서 ' — ' 앞부분(메인 창이 넣은 '엔진과 나란히 보기').
   다른 판을 고르면 판끼리 견준다 — 위 트랙 = 판 A, 아래 = 판 B, 필터는 '다름만'(같은 채팅에 다른 등급 · 한쪽만 반응)으로
   바뀌고, 결과 이름은 A만·B만, 고른 건 칸에는 사람 최종을 참고 열로 더한다. 점수 표는 두 판의 점수(각각 사람과 견준 것)를
   나란히 둔다. 다른 판은 받은 run_loader 로만 읽는다(이 파일은 디스크를 열지 않는다). 다른 곳 규칙과 대상 영상 검사는
@@ -44,17 +48,17 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
                                QPushButton, QScrollArea, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
 from .. import ai_compare
+from .. import analysis_flow as af
 from ..core.rules import EVIDENCE_KEYS, V0_1_STRENGTH
 from ..core.timecode import fmt_display
 from ..i18n import tr
@@ -504,16 +508,13 @@ def _run_entries(runs) -> list[tuple[str, str]]:
     return out
 
 
-ENGINE_VERSION_MAX = 40          # ai-result 스키마 engine.version 의 maxLength 와 같다
-_VER_NUM = re.compile(r"\d+")
+ENGINE_VERSION_MAX = af.ENGINE_VERSION_MAX     # ai-result 스키마 engine.version 의 maxLength 와 같다
 
 
 def _choice_version(r) -> str | None:
     """고르기 항목의 engine_version(dict 키 또는 RunChoice 류의 속성). 없거나 이상하면 None(= 판 모름)."""
     v = r.get("engine_version") if isinstance(r, Mapping) else getattr(r, "engine_version", None)
-    if isinstance(v, str) and 0 < len(v) <= ENGINE_VERSION_MAX and v.isprintable() and v.strip() == v:
-        return v
-    return None
+    return af.clean_version(v)
 
 
 def run_versions(runs) -> dict[str, str | None]:
@@ -527,16 +528,9 @@ def run_versions(runs) -> dict[str, str | None]:
 
 
 def version_key(ver: str | None) -> tuple[int, ...] | None:
-    """엔진 판 글 → 견줄 숫자 묶음(뒤의 0 은 뗀다). 'link-v0.3' → (0, 3), '0.3.0' → (0, 3),
-    '0.1.0'(engine/link.py 의 v0.2 규칙 판 — 판 번호를 올리지 않았다) → (0, 1). 숫자가 없으면 None(판 모름과 같다)."""
-    if not isinstance(ver, str):
-        return None
-    nums = [int(n) for n in _VER_NUM.findall(ver)[:6]]
-    if not nums:
-        return None
-    while len(nums) > 1 and nums[-1] == 0:
-        nums.pop()
-    return tuple(nums)
+    """엔진 판 글 → 견줄 숫자 묶음(app.analysis_flow.version_key 와 같다 — 나란히 보기 자료·주제 흐름·시청자 훈련이
+    같은 규칙으로 기본 run 을 고른다). 'link-v0.3' → (0, 3), '0.3.0' → (0, 3). 숫자가 없으면 None(판 모름과 같다)."""
+    return af.version_key(ver)
 
 
 def default_run_id(runs, versions: Mapping[str, str | None] | None = None) -> str | None:
@@ -570,13 +564,16 @@ class AnalysisView(QWidget):
     chatSelected = Signal(str)       # 고른 chat_id
     seekRequested = Signal(int)      # 고른 채팅의 VOD 시각 (플레이어를 옮길 때)
     runChanged = Signal(str, str)    # (판 A run_id, 견줄 것: run_id 또는 '' = 사람 최종)
+    titleChanged = Signal(str)       # 창 제목 글이 바뀜 (window_title())
 
     def __init__(self, parent=None, *, run: Mapping | None = None, final_rows: Iterable[Mapping] | None = None,
                  sealed_count: int = 0, scores: Mapping | None = None, chat_times: Mapping[str, int] | None = None,
                  duration_ms: int | None = None, runs: Sequence | None = None,
                  run_loader: Callable[[str], Mapping] | None = None, run_id: str | None = None,
-                 pick_default: bool = True):
+                 pick_default: bool = True, title_base: str | None = None):
         super().__init__(parent)
+        self._title_base: str | None = title_base if isinstance(title_base, str) and title_base else None
+        self._title = ""
         self._cmp = Comparison([], {}, {})
         self._visible: list[CompareItem] = []
         self._filter = FILTER_ALL
@@ -783,6 +780,7 @@ class AnalysisView(QWidget):
             self._fill_run_bar()
             self.sealed_label.setText(tr("봉인됨 {n}건").format(n=self._sealed_count))
             self.stack.setCurrentWidget(self.sealed_page)
+            self._sync_title()
             LOG.info("분석 나란히 보기: 봉인 %d건 (열지 않음)", self._sealed_count)
             return
         self._sealed = False
@@ -813,6 +811,7 @@ class AnalysisView(QWidget):
         if msg:
             self._show_run_msg(msg)
         self._render()
+        self._sync_title()
 
     # ------------------------------------------------------------------ 판 고르기 (17 6-1 4번)
     _filter_auto = False      # 판끼리 견주기로 들어가며 '다름만' 으로 바꾼 것인가
@@ -855,15 +854,19 @@ class AnalysisView(QWidget):
         self.run_msg.setVisible(False)
 
     def _run_label(self, rid: str, label: str) -> str:
-        """고르기 글. 한 번 읽은 판은 결과 파일의 엔진 이름·판을, 아직 안 읽은 판은 고르기 목록의 engine_version
-        ('판 …')을, 그것도 없으면 '판 모름' 을 덧붙인다(해제 기록에 판이 없던 run)."""
+        """고르기 글 (23 5-2 의 10). 해제 기록(ai.unsealed)의 engine_version 을 '판 …' 으로, 없으면 '판 모름' 을 붙인다
+        — 판 A 기본(default_run_id)이 보는 값과 같다. 해제 기록에 판이 없고 한 번 읽은 판이면 결과 파일의 엔진 이름·판을
+        참고로 뒤에 더 붙인다(기본 고르기에는 쓰지 않는 값)."""
+        ver = self._versions.get(rid)
+        if ver:
+            return f"{label} · " + tr("판 {0}").format(ver)
+        text = f"{label} · " + tr("판 모름")
         got = self._loaded.get(rid)
         run = got.get("run") if got else None
         eng = run.get("engine") if isinstance(run, Mapping) and isinstance(run.get("engine"), Mapping) else None
         if eng:
-            return f"{label} · {eng.get('name', '?')} {eng.get('version', '?')}"
-        ver = self._versions.get(rid)
-        return f"{label} · " + (tr("판 {0}").format(ver) if ver else tr("판 모름"))
+            text += f" · {eng.get('name', '?')} {eng.get('version', '?')}"
+        return text
 
     def run_version(self, run_id: str) -> str | None:
         """고르기 목록이 알려 준 엔진 판(없으면 None = 판 모름)."""
@@ -908,6 +911,7 @@ class AnalysisView(QWidget):
                 self._filter, self._filter_auto = FILTER_ALL, False
         self._fill_run_bar()
         self._render()
+        self._sync_title()
         self.runChanged.emit(self._run_id, self._against or "")
         return True
 
@@ -937,8 +941,40 @@ class AnalysisView(QWidget):
             self._fill_run_bar_keep_msg()
             self._render()
             return False
+        self._sync_title()
         self.runChanged.emit(self._run_id or "", self._against or "")
         return True
+
+    # ------------------------------------------------------------------ 창 제목 (23 5-2 의 10)
+    def _title_version(self, rid: str | None) -> str:
+        """'판 …'(해제 기록의 engine_version) 또는 '판 모름'."""
+        ver = self._versions.get(rid) if rid else None
+        return tr("판 {0}").format(ver) if ver else tr("판 모름")
+
+    def window_title(self, base: str | None = None) -> str:
+        """창 제목 글. base(없으면 title_base·담은 창의 지금 제목 앞부분, 그것도 없으면 '엔진과 나란히 보기') 뒤에
+        해제 전이면 '봉인됨 n건', 아니면 'run <판 A> · 판 …'(판끼리 견주면 ' ↔ run <판 B> · 판 …')."""
+        b = base or self._title_base or tr("엔진과 나란히 보기")
+        if self._sealed:
+            return f"{b} — " + tr("봉인됨 {n}건").format(n=self._sealed_count)
+        head = f"{b} — run {self._run_id} · {self._title_version(self._run_id)}"
+        if self._against:
+            head += f" ↔ run {self._against} · {self._title_version(self._against)}"
+        return head
+
+    def _sync_title(self) -> None:
+        """담은 창이 대화상자이면 그 제목을 window_title() 로 바꾼다(메인 창 같은 다른 창은 건드리지 않는다)."""
+        win = self.window()
+        host = win if win is not self and isinstance(win, QDialog) else None
+        if self._title_base is None and host is not None:
+            cur = host.windowTitle() or ""
+            self._title_base = cur.split(" — ", 1)[0].strip() or None
+        text = self.window_title()
+        if host is not None and host.windowTitle() != text:
+            host.setWindowTitle(text)
+        if text != self._title:
+            self._title = text
+            self.titleChanged.emit(text)
 
     def _fill_run_bar_keep_msg(self) -> None:
         msg = self.run_msg.text()          # _fill_run_bar 가 지우므로 글이 있으면 보이던 것

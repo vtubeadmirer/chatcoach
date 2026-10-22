@@ -24,6 +24,12 @@ a = Analysis(
         ('schemas\\scenario.schema.json', 'schemas'),
         ('schemas\\training-event.schema.json', 'schemas'),
         ('schemas\\viewer-event.schema.json', 'schemas'),
+        # 번들하지 않는 것 (D-22 '시범 해제 준비' 묶음에서 다시 확인, 2026-10-23):
+        # - topic-flow·transcript-words·topic-vectors·guide-config 스키마 — 앱은 파일을 읽지 않고 같은 규칙을 손으로 본다
+        #   (app/core/topics.py·words_doc.py·viewer_score.vectors_from_doc·seal.vectors_check, assets 의 guide-config 는 위 'assets').
+        # - seal.jsonl 짝 기록(topics·words·vectors.sealed)·ai.unsealed 의 engine_version·pairs — 스키마 파일 없음(03 19장 '아직 없는 스키마').
+        # - tools\\*.py·engine\\ — 묶은 exe 에서는 엔진·도구 길을 끈다(scenario_mix.tool_path·viewer_flow.tool_available 이 frozen 이면 None/False).
+        #   smoke_watch·pilot_unseal_day·viewer_score_calib 는 개발 PC 에서 저장소로 돌리는 도구다.
         ('VERSION', '.'),
     ],
     # mpv(python-mpv)는 main.py 가 직접 import 하지 않고 selftest·player 가 importlib 로 늦게 부른다 → 명시

@@ -15,14 +15,18 @@
 | `calibrate.py` | 영상 시각 = 채팅 시각 앵커로 시각 보정을 기록한다. |
 | `extract_audio.py` | 영상에서 STT 용 16kHz 모노 WAV 를 뽑고 걸린 시간을 출력한다. |
 | `export_labels.py` | 프로젝트의 현재 유효 라벨을 zip 하나로 내보낸다 (`app.export.export_labels`). |
+| `make_scenario.py` | 가상 채팅 시나리오('retrieved' 만, H-2)를 `scenarios\` 에 만든다. 시범 프로젝트는 거부. 금칙어는 저장소 밖 `config\blocklist-ko.txt`(해시만 기록). |
+| `viewer_score_calib.py` | 시청자 훈련 채점 보정 자료: 반응받은 채팅과 같은 구간 다른 채팅의 세 축 분포·lift·정밀도·문턱 후보(기본값은 바꾸지 않음). 손라벨 길과 시범 최종 세트 길(`--final-set`, D-22). 출력은 숫자·코드만. |
 
 ## AI 결과 · 봉인
 
 | 도구 | 한 줄 설명 |
 |---|---|
-| `engine_to_ai.py` | 엔진 link 출력 → ai-result 1판. 시범 프로젝트는 `--seal` 로만 받는다(D-15 8). `--engine v0.3`(로컬 임베딩 의미 비교, 엔진 venv) · `--topics`(주제 흐름도 만들어 판정 봉인의 짝으로 봉인, `--out a.json` 이면 `a.topics.json`, D-17 5). |
-| `ai_seal.py` | AI 결과 봉인 받기·상태·해제 (`app.seal`). |
+| `engine_to_ai.py` | 엔진 link 출력 → ai-result 1판. 시범 프로젝트는 `--seal` 로만 받는다(D-15 8). `--engine v0.3`(로컬 임베딩 의미 비교, 엔진 venv) · 짝 셋(판정 봉인의 짝으로 봉인, `--out a.json` 이면 `a.<짝>.json`): `--topics`(주제 흐름, D-17 5) · `--words`(시각별 전사 낱말, D-20 3) · `--vectors`(창별 주제 벡터, D-22). 낱말·벡터 평문 파일은 그 프로젝트 보호 구역 안일 때만 쓴다. 리허설·시범: `--from-project <P> --seal --by L01 --topics --words --vectors`. |
+| `ai_seal.py` | AI 결과 봉인 받기·상태·해제 (`app.seal`). `seal`·`status`('봉인됨 n건', 짝 유무, 해제 뒤 엔진 판)·`check`(해제 조건만)·`unseal --all`(프로젝트 하나를 손으로 풀 때 — 해제 당일 입구는 `pilot_unseal_day.py` 하나)·`verify`(해제된 결과·짝 파일을 해제 기록 해시와 대조). 출력은 JSON 한 줄(해시 앞 12자·코드·건수). |
 | `ai_compare.py` | 해제한 run 과 최종 세트로 AI 비교 보고서를 만든다 (`app.ai_compare`). |
+| `pilot_unseal_day.py` | **시범 해제 당일 한 번에**(D-22 2): 조건 확인 → 3편 해제(짝 포함) → 해제 파일 대조(`ai_seal.verify_project`) → 일치도 보고서가 없으면 만듦(요약 폴더 `agreement\`) → AI 비교 보고서 → 엔진 판끼리 견주기 → 보정 재측정 → 요약(숫자·코드·ID 만). 한 편이라도 조건이 안 되면 아무것도 풀지 않고 종료 3. **기본은 dry-run**(조건만 보고 아무것도 쓰지 않음) — 되돌릴 수 없는 해제는 `--go` 를 줄 때만. 기본 폴더는 없다: `--projects-root`·`--project` 를 주거나, 실제 데이터 폴더(`chatcoach-data`)면 `--real` 이 있어야 한다(없으면 아무것도 열기 전에 종료 2). 해제 당일 차례: 세션이 모두 잠긴 뒤 `--real`(dry-run) → 사용자 세션의 '시작' 확인 → `--real --go`. 유효한 봉인이 풀리지 않거나 seal.jsonl 이 깨졌으면 오류 코드(`unseal:SealError`·`seal_jsonl:problems`)와 종료 1. 시범 폴더 안에는 쓰지 않고(열기 감시), 사람 클릭 0 — Claude 가 돌린다. 리허설은 합성 시범 프로젝트로만(사용자가 라벨링 중인 실제 시범 폴더로는 dry-run 도 돌리지 않는다). |
+| `agreement_report.py` | 잠긴 두 세션의 일치도 보고서 (`app.agreement_report`). 하나라도 안 잠겼으면 라벨 파일을 열지 않고 종료 3. |
 
 - **시범 엔진 작업 폴더(`chatcoach-data\sealed-work`)의 산출물(wav·asr.json 등)은 휴지통으로 보내지 않는다.** 봉인(`sealed\<sha>.bin`)이
   결과를 보존하므로, 봉인이 끝나면 **영구 삭제**(PowerShell `Remove-Item`, 탐색기 Shift+Delete)한다. 휴지통에 두면 시범 세션이 잠기기
@@ -46,19 +50,25 @@
 |---|---|
 | `make_fixture.py` | 합성 픽스처 생성기 (sha1('fixture-N')·'시청자N'·video_no 0). `--check` 로 `tests/fixtures/labels_*.jsonl` 골든이 그대로 다시 만들어지는지 본다. |
 | `gui_smoke.py` | 실제 창을 띄워 작업대 단계(프로젝트 열기 → 영상 → 탐색 → 채팅 → 타임라인)를 PASS/FAIL 로 점검한다 (릴리스 전 수동). `--labeling-flow` 는 사본(project.json·guide·messages.jsonl)에서 세션 → 구간 → 반응(재확인) → 표본 → 내보내기 → 다시 열기까지 돌리고 사본을 지운다. |
-| `smoke_watch.py` | gui_smoke 를 자식으로 띄워 **바깥에서** 감시한다(22 5-2 의 1번). 2초마다 자식 나무의 스레드 수·Suspended 수·CPU 를 적고, 출력이 `--stall` 초(기본 30) 멈추면 그 순간의 스레드 상태를 남기고 gui_smoke `--faulthandler-file` 로 모든 스레드 스택을 받는다. 끝에 요약 한 줄(종료 코드·멈춤·Suspended·덤프 수). 사용: `python tools/smoke_watch.py -- --project <P> --offscreen --analysis-flow`. 기록은 `%LOCALAPPDATA%\ChatCoachSmoke\watch\<시각>-<pid>\`(watch.log·stack.txt, 새 20개만 남김). |
+| `smoke_watch.py` | gui_smoke 를 자식으로 띄워 **바깥에서** 감시한다(22 5-2 의 1번). 2초마다 자식 나무의 스레드 수·Suspended 수·CPU 를 적고, 출력이 `--stall` 초(기본 30) 멈추면 그 순간의 스레드 상태를 남기고 gui_smoke `--faulthandler-file` 로 모든 스레드 스택을 받는다. 끝에 요약 한 줄(종료 코드·멈춤·Suspended·덤프 수). 사용: `python tools/smoke_watch.py -- --project <P> --offscreen --analysis-flow`. 기록은 `%LOCALAPPDATA%\ChatCoachSmoke\watch\<시각>-<pid>\`(watch.log·stack.txt, 새 20개만 남김). **`--summarize [기록 폴더·stack.txt·watch.log …] [--last N]`** 은 감시하지 않고 끝난 기록을 읽어 멈춤마다 앞·뒤 단계·CPU 초/초·Suspended·판정 한 마디와, 덤프마다 주 스레드의 gui_smoke 단계 함수(`step_*`)·줄·앱 코드 틀을 요약한다(23 5-2 의 23. 경로가 없으면 가장 새 기록). |
 | `ci_selftest.py` | 빌드된 exe 를 한글 폴더 사본에서 `--selftest` 로 점검한다 (release.yml). |
+| `bench_c6.py` | 합성 20만 건으로 채팅 색인·재현 검증 워커·타임라인 갱신·확대 성능을 잰다 (14 6-1). 숫자만. |
 | `update_roundtrip.py` | 앱 안 업데이트 왕복 시험(04 12-5)을 자동으로 돌린다. `--rollback` 이면 업데이트 직후 실행에서 [도움말 → 이전 버전으로 되돌리기] 메뉴 함수로 되돌리고 확인한다. |
 | `pilot_setup.py` | 시범 영상 폴더 → 프로젝트·채팅·앵커 후보 (보정은 제안만). `--dry-run` 은 아무것도 쓰지 않는다. |
 | `pilot_freeze.py` | 시범 시작 때 라벨 형식·기준서 v0.1 고정 기록(freeze.json)을 한 번 만들고, 시범 중에는 `--check` 로 확인. |
 | `fake_release_server.py` | 127.0.0.1 전용 가짜 릴리스 서버와 시험 릴리스 준비. |
 
-- **스모크가 멈췄을 때 읽는 법** (`smoke_watch.py` 요약 줄·watch.log):
-  ① 멈춤 기록에 `ALL-SUSPENDED`(스레드가 모두 Suspended)이고 요청한 덤프를 '받음 0' → 프로세스가 **밖에서 통째로 정지**됐다
+- **스모크가 멈췄을 때 읽는 법** (`smoke_watch.py` 요약 줄·watch.log — 먼저 `python tools/smoke_watch.py --summarize` 한 번):
+  ① 멈춤 기록에 `ALL-SUSPENDED`(스레드가 모두 Suspended) 또는 `MOSTLY-SUSPENDED`(80% 이상 — 실제 외부 정지는 런처 스레드와 멈춘 동안 새로 생긴
+  스레드가 멈추지 않아 17/19 였다, 23 3-4)이고 요청한 덤프를 '받음 0' → 프로세스가 **밖에서 통째로 정지**됐다
   (보안 프로그램 등, 19 3-2). 코드 문제가 아니다 — Acronis 신뢰 목록에 python.exe 를 넣는다(사용자 몫).
-  ② Suspended 가 0 인데 출력이 멈추고 덤프를 받았다 → `stack.txt` 의 '== 요청 덤프 n' 아래 스택에서 주 스레드가 기다리는 곳을 본다.
-  ③ `Timeout (` 덤프(자동) → 어떤 스레드가 GIL 을 60초 넘게 쥐었다. ④ `Windows fatal exception` → 치명 오류(접근 위반 등) 순간의 스택.
-  스택 파일에는 파일·함수 이름과 줄 번호만 있다(채팅 본문·닉네임 없음). gui_smoke 를 혼자 돌릴 때도 `--faulthandler-file <경로>` 를 쓸 수 있다.
+  ② Suspended 가 0 인데 출력이 멈추고 덤프를 받았다 → 요약의 '주 스레드: 단계 step_… (줄)' 과 '가장 안쪽' 틀을 본다.
+  요약 판정이 'CPU 를 쓰며 돎' 이면 출력 없이 긴 단계(예: 23 5-2 의 23 — `flow_reaction` 의 두 번 듣기 2배속 재생 42초, `step_labeling_flow`
+  가 재생 범위 도달을 기다림)이고 교착이 아니다. 'CPU 거의 0' 이면 무언가를 기다리는 것이라 그 틀이 원인 후보다.
+  ③ `Timeout (` 덤프(자동) → 어떤 스레드가 GIL 을 60초 넘게 쥐었다(같은 실행에 Suspended 표본이 있으면 외부 정지가 풀릴 때 생긴 가짜일 수 있음,
+  23 5-2 의 24). ④ `Windows fatal exception` → 치명 오류(접근 위반 등) 순간의 스택('오류 난 스레드').
+  스택 파일에는 파일·함수 이름과 줄 번호만 있다(채팅 본문·닉네임 없음). 요약은 경로를 저장소 상대·`site-packages/…`·파일 이름으로 줄이고,
+  자식 출력에서는 PASS/FAIL 단계 이름과 ms 만 옮긴다. gui_smoke 를 혼자 돌릴 때도 `--faulthandler-file <경로>` 를 쓸 수 있다.
 
 ## 빌드 · 의존성
 

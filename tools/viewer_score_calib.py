@@ -24,12 +24,29 @@
 읽기만 한다: project.json, labels\\manual-*.csv(chat_id·chat_vod_ms·grade 칸만, note 칸은 읽지 않는다), chat\\messages.jsonl,
 derived\\asr-words.json, 주제 흐름 파일. 아무것도 쓰지 않는다(--out 을 주면 그 파일 하나만).
 출력은 **숫자·코드만**이다: 채팅 본문·닉네임·viewer_id·chat_id·낱말은 표준 출력·결과 파일·로그 어디에도 넣지 않는다.
-시범 프로젝트(pilot-* 또는 시범 기록에 적힌 것)는 열지 않고 거부한다(D-15 8, D-17 4).
+시범 프로젝트(pilot-* 또는 시범 기록에 적힌 것)는 손라벨 길로는 열지 않고 거부한다(D-15 8, D-17 4).
+
+시범 최종 세트 길 (--final-set, D-22 1·2, 23 6장 '나')
+  손라벨 CSV 대신 **사람 최종 세트**(app.export.build_final_set — 잠긴 1차 + 재라벨 + 조정 기록)를 반응받음의 기준으로 쓴다.
+  - --final-set <zip>        export_final_set 이 만든 zip(export_type ground_truth_lenient). manifest.json 의 project_id 가
+                             --project 와 같아야 한다. labels.jsonl(참고 점수 행)·ambiguous.jsonl 만 읽는다.
+  - --final-set auto | <1차 세션 ID>   그 프로젝트에서 바로 만든다(세션 밖 읽기 — 잠긴 세션만, 06 7-1 조건을 라벨보다 먼저).
+  반응받음 = set=final · reaction · graded · grade **direct 만**(기본, --grades 로 바꿈) · eval.<--final-eval>(기본 lenient).
+  반응 없음(대조군) = 같은 구간의 다른 일반 채팅 가운데 최종 세트 어느 행에도 없는 것 + 최종 구간 조각(set=final) 안의 것.
+  **사람이 '반응 미확인' 으로 본 채팅**(result unconfirmed, 같은 eval)은 따로 '확인된 반응 없음'(labelled_none) 묶음으로 낸다.
+  zip 에는 평가 제외(exclude_from_eval) 행이 없어 그 채팅은 반응 없음 쪽에 섞일 수 있다(건수만 info 에 '모름' 으로 적는다).
+  시범 프로젝트는 이 길로만, **시범 세션이 모두 잠긴 뒤**(reference_set.pilot_sessions_locked = seal.unseal_conditions 와 같은
+  판단)에만 연다. 맥락(주제 흐름·전사 낱말)은 시범이면 **해제된 run 의 짝**(seal.read_topics · seal.read_words)에서만 읽는다
+  (derived\\asr-words.json 같은 평문 자리는 보지 않는다). --run-id 로 고르고, 없으면 전사 낱말 짝이 있는 가장 늦게 푼 run.
+
+여러 프로젝트 묶기: pool_reports(결과 목록) 가 묶음·판별 건수를 더해 같은 숫자(분포·lift·정밀도·p·후보)를 다시 낸다.
 
 사용(저장소 루트, 앱 .venv)
   python tools/viewer_score_calib.py --project <P> [--topics <topic-flow.json>] [--labels <csv>]
          [--grades direct,likely] [--near-sec 30] [--out <결과.json>] [--quick]
-종료 코드: 0 정상 · 1 거부(시범·손라벨 없음) · 2 입력 오류
+  python tools/viewer_score_calib.py --project <pilot> --final-set <zip|auto|1차 세션 ID> [--final-eval lenient|strict]
+         [--run-id <해제된 run>] [--ai-root <폴더>] [--out <결과.json>] [--quick]
+종료 코드: 0 정상 · 1 거부(시범·손라벨 없음·잠기지 않음) · 2 입력 오류
 """
 from __future__ import annotations
 
@@ -44,10 +61,12 @@ for _s in (sys.stdout, sys.stderr):
 import argparse
 import bisect
 import csv
+import hashlib
 import json
 import math
 import os
 import time
+import zipfile
 from dataclasses import dataclass, replace
 from typing import Iterable, Mapping, Sequence
 
@@ -58,8 +77,14 @@ if ROOT not in sys.path:
 from app.core import viewer_score as vs  # noqa: E402
 
 TOOL = "viewer_score_calib"
-TOOL_VERSION = "0.1"
+TOOL_VERSION = "0.2"
 DEFAULT_GRADES = ("direct", "likely")
+FINAL_GRADES = ("direct",)              # 시범 최종 세트는 직접 반응만(D-22 1, 23 5-1 의 19)
+FINAL_EVALS = ("lenient", "strict")
+NONE_CODE = "unconfirmed"               # 최종 세트에서 사람이 '반응 미확인' 으로 본 채팅
+EXCLUDED_CODE = "_excluded"             # 최종 세트 행이지만 평가에 들지 않는 것(대조군에서도 뺀다)
+FINAL_EXPORT_TYPE = "ground_truth_lenient"
+ZIP_MEMBER_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_NEAR_SEC = 30
 HISTORY_SPAN_MS = 10 * 60_000          # history: 같은 시청자가 앞 10분 안에 쓴 글
 HISTORY_MAX = 50
@@ -75,7 +100,9 @@ G_OTHERS = "others"
 G_NEAR = "others_near"
 G_TEXT = "others_text"
 G_DIRECT = "reacted_direct"
+G_NONE = "labelled_none"               # 최종 세트에서 사람이 '반응 미확인' 으로 본 채팅(손라벨 길에서는 비어 있음)
 GROUPS = (G_REACTED, G_OTHERS, G_NEAR, G_TEXT)
+ALL_GROUPS = GROUPS + (G_DIRECT, G_NONE)
 
 #: 바꿔 볼 판: (이름, 보는 축, guide-config values.viewer_score 칸, 맥락). 맥락 full = 주제 흐름 + 전사, no_flow = 전사만.
 #: 축이 None 이면 세 축 모두를 본다. 값은 settings_from_values 로 검사한다(범위 밖이면 기본값 + 메모).
@@ -229,19 +256,300 @@ def read_topic_blocks(path: str) -> list[tuple[int, int, tuple[str, ...]]]:
     return [(int(b.start_ms), int(b.end_ms), tuple(b.keywords)) for b in blocks]
 
 
+# ───────────────────────────────────────────────────────────── 시범 최종 세트 (D-22 1·2)
+
+@dataclass
+class FinalInput:
+    """최종 세트에서 읽은 것. rows 는 (set, export-row) — 메모리에만 두고 결과에는 숫자(info)만 낸다."""
+    rows: list[tuple[str, dict]]
+    ranges: list[tuple[int, int]]
+    info: dict
+
+    def __repr__(self) -> str:
+        return f"FinalInput(rows={len(self.rows)}, ranges={len(self.ranges)})"
+
+
+def _merge_ranges(rs: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    out: list[list[int]] = []
+    for a, b in sorted(rs):
+        if b <= a:
+            continue
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def _piece_range(item: Mapping) -> tuple[int, int] | None:
+    pc = item.get("piece") if isinstance(item.get("piece"), Mapping) else item.get("row") or {}
+    a, b = pc.get("start_ms"), pc.get("end_ms")
+    return (a, b) if _is_int(a) and _is_int(b) and b > a else None
+
+
+def final_from_export(fx) -> FinalInput:
+    """export.build_final_set 결과(FinalSetExport 또는 {items, segment_items, info} dict) → FinalInput.
+    반응 행은 모든 세트(final·excluded·ambiguous)를 넣는다 — 평가에 들지 않는 행도 대조군에서 빼야 하므로."""
+    items = fx.get("items") if isinstance(fx, Mapping) else getattr(fx, "items", None)
+    segs = fx.get("segment_items") if isinstance(fx, Mapping) else getattr(fx, "segment_items", None)
+    fi = (fx.get("info") if isinstance(fx, Mapping) else getattr(fx, "info", None)) or {}
+    rows = [(str(it.get("set")), it["row"]) for it in items or () if isinstance(it, Mapping)
+            and isinstance(it.get("row"), Mapping)]
+    ranges = _merge_ranges(r for s in segs or () if isinstance(s, Mapping) and s.get("set") == "final"
+                           for r in [_piece_range(s)] if r)
+    info = {"source": "project", "excluded_rows_known": True,
+            "relabel_sessions": len(fi.get("relabel_session_ids") or ()),
+            "adjudication_sessions": len(fi.get("adjudication_session_ids") or ()),
+            "warnings": len(fi.get("warnings") or ())}
+    return FinalInput(rows, ranges, info)
+
+
+def _zip_member(z: zipfile.ZipFile, name: str) -> bytes | None:
+    try:
+        zi = z.getinfo(name)
+    except KeyError:
+        return None
+    if zi.file_size > ZIP_MEMBER_MAX_BYTES:
+        raise CalibError("최종 세트 zip 의 파일이 너무 큽니다")
+    return z.read(zi)
+
+
+def _jsonl_rows(raw: bytes | None) -> list[dict]:
+    out = []
+    for line in (raw or b"").decode("utf-8-sig").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            raise CalibError("최종 세트 zip 의 줄이 JSON 이 아닙니다") from None
+        if isinstance(d, dict):
+            out.append(d)
+    return out
+
+
+def final_from_zip(path: str, *, project_id: str | None = None) -> FinalInput:
+    """export_final_set 이 만든 zip → FinalInput. manifest.json(export_type·project_id)·labels.jsonl·ambiguous.jsonl 만 읽는다.
+    labels.jsonl 은 참고 점수 행(eval.lenient)만 들어 있다. 평가 제외 행은 zip 에 없다(info.excluded_rows_known = False)."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            man_raw = _zip_member(z, "manifest.json")
+            if man_raw is None:
+                raise CalibError("최종 세트 zip 에 manifest.json 이 없습니다")
+            try:
+                man = json.loads(man_raw.decode("utf-8-sig"))
+            except ValueError:
+                raise CalibError("최종 세트 zip 의 manifest.json 이 JSON 이 아닙니다") from None
+            if not isinstance(man, dict) or man.get("export_type") != FINAL_EXPORT_TYPE:
+                raise CalibError("최종 세트 zip 이 아닙니다(export_type ground_truth_lenient 아님)")
+            if project_id is not None and man.get("project_id") != project_id:
+                raise CalibError("최종 세트 zip 의 project_id 가 이 프로젝트와 다릅니다")
+            good = _jsonl_rows(_zip_member(z, "labels.jsonl"))
+            amb = _jsonl_rows(_zip_member(z, "ambiguous.jsonl"))
+    except zipfile.BadZipFile:
+        raise CalibError("최종 세트 파일이 zip 이 아닙니다") from None
+    rows = [("final", r) for r in good if r.get("label_kind") == "reaction"]
+    rows += [("ambiguous", r) for r in amb if r.get("label_kind") == "reaction"]
+    ranges = _merge_ranges(r for row in good if row.get("label_kind") == "segment" for r in [_piece_range({"row": row})]
+                           if r)
+    info = {"source": "zip", "excluded_rows_known": False,
+            "messages_sha256": man.get("messages_sha256") if isinstance(man.get("messages_sha256"), str) else None,
+            "warnings": len(man.get("warnings") or ())}
+    return FinalInput(rows, ranges, info)
+
+
+def labels_from_final(fin: FinalInput, *, eval_mode: str = "lenient") -> tuple[list[LabelRow], dict]:
+    """최종 세트 반응 행 → LabelRow(chat_id·채팅 시각·등급 코드). 등급 코드는 세트 final 이고 eval.<eval_mode> 인 행만
+    등급(direct·likely·…) 또는 NONE_CODE(반응 미확인), 나머지는 EXCLUDED_CODE(대조군에서도 빠지게 이름만 남긴다)."""
+    if eval_mode not in FINAL_EVALS:
+        raise CalibError("--final-eval 은 lenient 또는 strict")
+    from app.core.ids import CHAT_ID_RE
+    out: list[LabelRow] = []
+    counts = {"reaction_rows": 0, "bad_rows": 0, "codes": {}}
+    for st, row in fin.rows:
+        if row.get("label_kind") != "reaction":
+            continue
+        cid = row.get("chat_id")
+        if not isinstance(cid, str) or not CHAT_ID_RE.match(cid):
+            counts["bad_rows"] += 1
+            continue
+        counts["reaction_rows"] += 1
+        t = row.get("chat_t_ms") if _is_int(row.get("chat_t_ms")) else -1
+        ev = row.get("eval") if isinstance(row.get("eval"), Mapping) else {}
+        ok = st == "final" and ev.get(eval_mode) is True
+        res, grade = row.get("result"), row.get("grade")
+        if ok and res == "graded" and isinstance(grade, str) and grade:
+            code = grade
+        elif ok and res == "unconfirmed":
+            code = NONE_CODE
+        else:
+            code = EXCLUDED_CODE
+        counts["codes"][code] = counts["codes"].get(code, 0) + 1
+        out.append(LabelRow(cid, int(t), code))
+    counts["codes"] = dict(sorted(counts["codes"].items()))
+    return out, counts
+
+
+def load_final_set(project: str, spec, *, ai_root: str | None = None) -> FinalInput:
+    """spec: zip 경로 · 'auto' · 1차 세션 ID · 이미 만든 export.build_final_set 결과. 잠기지 않았으면 CalibError(1)."""
+    if not isinstance(spec, str):
+        return final_from_export(spec)
+    if spec.lower().endswith(".zip") or os.path.isfile(spec):
+        if not os.path.isfile(spec):
+            raise CalibError("최종 세트 zip 이 없습니다")
+        pid = None
+        try:
+            with open(os.path.join(project, "project.json"), "rb") as f:
+                pid = json.loads(f.read().decode("utf-8-sig")).get("project_id")
+        except (OSError, ValueError, AttributeError):
+            raise CalibError("project.json 을 읽지 못했습니다") from None
+        return final_from_zip(spec, project_id=pid if isinstance(pid, str) else None)
+    from app import export
+    from app.core.ids import SESSION_ID_RE
+    primary = None
+    if spec != "auto":
+        m = SESSION_ID_RE.match(spec)
+        if not m or m.group(2) != "P":
+            raise CalibError("--final-set 은 zip 경로·auto·1차 세션 ID 가운데 하나")
+        primary = spec
+    try:
+        fx = export.build_final_set(project, primary_session_id=primary, ai_root=ai_root)
+    except Exception as e:  # noqa: BLE001 — 잠기지 않음(NotLockedError)·재현 검증 실패·형식 오류. 문구에 내용 없음
+        raise CalibError(f"최종 세트를 만들지 못했습니다: {type(e).__name__}", 1) from None
+    return final_from_export(fx)
+
+
+# ───────────────────────────────────────────────────────────── 해제된 run 의 맥락 (시범)
+
+def _active_calibration(pdata: Mapping | None):
+    pj = (pdata or {}).get("calibration") if isinstance(pdata, Mapping) else None
+    if not pj:
+        return None
+    try:
+        from app.core.timecode import calibration_from_json
+        return calibration_from_json(pj)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def words_code(project: str, doc: Mapping | None, pdata: Mapping | None, *, pilot: bool | None = None) -> str:
+    """해제된 전사 낱말(seal.read_words 결과)을 채점에 쓸 수 있나 — viewer_flow 의 상태 코드와 같은 이름(ok·bad·
+    stale_textnorm·stale_asr·stale_calibration·default_calibration·unverified_calibration·missing). 낱말은 보지 않는다.
+    pilot(None = 폴더 이름으로 판단): 시범이면 derived\\asr.json 을 열지 않고 asr 해시도 견주지 않는다 — 앱의 시범 길
+    (viewer_flow.pilot_words: 해제된 run 의 짝만, derived\\ 는 열지 않음)과 같은 규칙. 짝 전사 낱말은 같은 엔진 실행에서
+    봉인됐으므로 그 run 에는 맞는 전사다(지금 asr.json 이 다시 만들어졌어도 보정 숫자가 앱 채점과 갈리지 않게)."""
+    from app import viewer_flow as vf
+    from app.core import textnorm as TN
+    from app.core import words_doc as WD
+    if pilot is None:
+        pilot = vf.is_pilot_name(project)
+    if doc is None:
+        return vf.W_MISSING
+    if WD.validate(doc):
+        return vf.W_BAD
+    if (doc.get("engine") or {}).get("textnorm") != TN.VERSION:
+        return vf.W_STALE_TEXTNORM
+    ap = os.path.join(project, *vf.ASR_REL)
+    want_asr = (doc.get("target") or {}).get("asr_sha256")
+    if not pilot and want_asr is not None and os.path.isfile(ap):
+        h = hashlib.sha256()
+        with open(ap, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        if h.hexdigest() != want_asr:
+            return vf.W_STALE_ASR
+    cal = doc.get("calibration") or {}
+    act = _active_calibration(pdata)
+    if cal.get("source") in ("project.json", "project.json+cli_file_start"):
+        if not act or (int(act.rev), int(act.offset_ms)) != (cal.get("rev"), cal.get("offset_ms")):
+            return vf.W_STALE_CAL
+    elif cal.get("source") == "default":
+        return vf.W_STALE_CAL if act else vf.W_DEFAULT_CAL
+    status = getattr(act, "status", None) if act else None
+    if (status or cal.get("status")) not in vf.USABLE_CAL_STATUSES:
+        return vf.W_UNVERIFIED_CAL
+    return vf.W_OK
+
+
+def unsealed_context(project: str, pdata: Mapping | None, *, run_id: str | None = None,
+                     ai_root: str | None = None) -> tuple[list, list, dict]:
+    """(주제 흐름 덩어리, 전사 창, 숫자 정보) — 해제된 run 의 짝 주제 흐름·전사 낱말(seal 해제 길)만 읽는다.
+    run_id 가 없으면 analysis_flow.run_order(해제 기록의 엔진 판이 가장 높은 run 먼저 → 같으면 늦게 푼 것 — 시청자 훈련·
+    분석 화면과 같은 규칙, 23 5-2 의 10·13) 순서로 전사 낱말 짝이 있는 첫 run, 그것도 없으면 주제 흐름 짝이 있는 첫 run."""
+    from app import analysis_flow as af
+    from app import seal
+    from app.core import topics as T
+    from app.core import words_doc as WD
+    info: dict = {"topic_source": "none", "words": "missing", "context_run": None}
+    try:
+        st = seal.seal_status(project, ai_root=ai_root)
+    except seal.SealError:
+        raise CalibError("봉인 기록을 읽지 못했습니다") from None
+    runs = af.unsealed_run_ids(st)
+    info["unsealed_runs"] = len(runs)
+    if run_id is not None:
+        if run_id not in runs:
+            raise CalibError("--run-id 가 해제된 run 이 아닙니다", 1)
+        cands = [run_id]
+    else:
+        cands = af.run_order(st)
+    picked = None
+    for rid in cands:
+        try:
+            w = seal.read_words(project, rid, ai_root=ai_root)
+            t = seal.read_topics(project, rid, ai_root=ai_root)
+        except (seal.SealError, OSError, ValueError):
+            continue
+        if w is not None or run_id is not None:
+            picked = (rid, w, t)
+            break
+        if picked is None and t is not None:
+            picked = (rid, w, t)
+    blocks: list = []
+    windows: list = []
+    if picked is not None:
+        rid, w, t = picked
+        info["context_run"] = rid
+        if t is not None:
+            try:
+                blocks = [(int(b.start_ms), int(b.end_ms), tuple(b.keywords)) for b in T.blocks_from_doc(t)]
+                info["topic_source"] = "unsealed_run"
+            except ValueError:
+                info["topic_source"] = "bad"
+        code = words_code(project, w, pdata)
+        info["words"] = code
+        if code == "ok":
+            windows = WD.score_windows(w)
+    info["topic_blocks"] = len(blocks)
+    info["transcript_windows"] = len(windows)
+    return blocks, windows, info
+
+
 # ───────────────────────────────────────────────────────────── 묶음 나누기
 
+def _in_ranges(t: int, starts: Sequence[int], ranges: Sequence[tuple[int, int]]) -> bool:
+    k = bisect.bisect_right(starts, t) - 1
+    return k >= 0 and ranges[k][0] <= t < ranges[k][1]
+
+
 def build_groups(chats: Sequence[Chat], labels: Sequence[LabelRow], *, grades: Sequence[str] = DEFAULT_GRADES,
-                 near_ms: int = DEFAULT_NEAR_SEC * 1000) -> tuple[dict[str, list[int]], dict]:
+                 near_ms: int = DEFAULT_NEAR_SEC * 1000, none_grades: Sequence[str] = (),
+                 ranges: Sequence[tuple[int, int]] | None = None) -> tuple[dict[str, list[int]], dict]:
     """(묶음 → chats 의 번호 목록, 숫자 정보).
 
     반응받음 = 손라벨의 grade 가 grades 안이고 messages 에서 찾은 채점 대상 채팅. 반응 없음 = 반응받음의 첫~끝 시각 안의
-    다른 채점 대상 채팅(손라벨 어느 줄에도 없는 것). 가까운 반응 없음 = 그 가운데 반응받은 채팅과 ±near_ms 안인 것."""
+    다른 채점 대상 채팅(손라벨 어느 줄에도 없는 것). 가까운 반응 없음 = 그 가운데 반응받은 채팅과 ±near_ms 안인 것.
+    none_grades: 이 코드의 라벨 줄은 '확인된 반응 없음'(G_NONE) 으로 따로 묶는다(사람이 본 채팅이라 반응받은 첫~끝 시각으로는
+    자르지 않고 ranges 로만 거른다). 최종 세트 길에서 쓴다.
+    ranges: 주면 반응 없음·확인된 반응 없음을 이 범위([시작, 끝)) 안으로 더 좁힌다(최종 구간 조각)."""
     by_id = {c.chat_id: i for i, c in enumerate(chats)}
     labelled = {r.chat_id for r in labels}
     want = set(grades)
+    want_none = set(none_grades)
     reacted: list[int] = []
     direct: list[int] = []
+    none_idx: list[int] = []
     info = {"label_rows": len(labels), "label_grades": {}, "label_found": 0, "label_time_match": 0,
             "label_not_scorable": 0}
     for r in labels:
@@ -259,15 +567,30 @@ def build_groups(chats: Sequence[Chat], labels: Sequence[LabelRow], *, grades: S
             reacted.append(i)
             if r.grade == "direct":
                 direct.append(i)
+        elif r.grade in want_none and i not in none_idx:
+            none_idx.append(i)
     reacted.sort()
     direct.sort()
-    groups = {G_REACTED: reacted, G_DIRECT: direct, G_OTHERS: [], G_NEAR: [], G_TEXT: []}
+    none_idx = sorted(set(none_idx) - set(reacted))
+    groups = {G_REACTED: reacted, G_DIRECT: direct, G_OTHERS: [], G_NEAR: [], G_TEXT: [], G_NONE: []}
     if not reacted:
         return groups, info
     lo, hi = chats[reacted[0]].t_ms, chats[reacted[-1]].t_ms
+    rg = list(ranges) if ranges else []
+    rg_starts = [a for a, _b in rg]
+
+    def in_scope(t: int) -> bool:
+        return not rg or _in_ranges(t, rg_starts, rg)
+
+    def inside(t: int) -> bool:
+        return lo <= t <= hi and in_scope(t)
+    # 확인된 반응 없음은 사람이 본 채팅이라 반응받은 첫~끝 시각으로 자르지 않고 범위(최종 구간 조각)로만 거른다
+    groups[G_NONE] = [i for i in none_idx if in_scope(chats[i].t_ms)]
+    if want_none:
+        info["label_none_out_of_span"] = len(none_idx) - len(groups[G_NONE])
     rts = [chats[i].t_ms for i in reacted]
     for i, c in enumerate(chats):
-        if not c.scorable or c.chat_id in labelled or not lo <= c.t_ms <= hi:
+        if not c.scorable or c.chat_id in labelled or not inside(c.t_ms):
             continue
         groups[G_OTHERS].append(i)
         k = bisect.bisect_left(rts, c.t_ms)
@@ -453,10 +776,21 @@ def settings_for(overrides: Mapping) -> tuple[vs.ViewerScoreSettings, list[str]]
     return vs.settings_from_values({"viewer_score": dict(overrides)})
 
 
+def row_compares(dists: Mapping[str, Mapping]) -> dict:
+    """묶음별 분포 → 판 한 줄의 비교 칸들(run_variants·pool_reports 가 같은 규칙으로 쓴다)."""
+    empty = {"n": 0, **{a: {lv: 0 for lv in vs.LEVELS} for a in vs.AXES}}
+    none = dists.get(G_NONE) or empty
+    return {"reacted_vs_others": compare(dists[G_REACTED], dists[G_OTHERS]),
+            "reacted_vs_near": compare(dists[G_REACTED], dists[G_NEAR]),
+            "reacted_vs_text": compare(dists[G_REACTED], dists[G_TEXT]),
+            "direct_vs_others": compare(dists[G_DIRECT], dists[G_OTHERS]),
+            "reacted_vs_none": compare(dists[G_REACTED], none)}
+
+
 def run_variants(scorer: CalibScorer, groups: Mapping[str, Sequence[int]], *, no_flow_ctx: vs.ScoreContext,
                  names: Sequence[str] | None = None) -> dict:
     """판마다 묶음별 분포·비교. base 와 견준 '단계가 바뀐 수' 는 TOGGLES 판에만."""
-    idx_all = sorted({i for g in GROUPS + (G_DIRECT,) for i in groups.get(g, ())})
+    idx_all = sorted({i for g in ALL_GROUPS for i in groups.get(g, ())})
     results: dict = {}
     base_scores = None
     for name, axis, ov, ctx_kind in VARIANTS:
@@ -467,16 +801,12 @@ def run_variants(scorer: CalibScorer, groups: Mapping[str, Sequence[int]], *, no
         t0 = time.perf_counter()
         sc = scorer.score(idx_all, s, ctx)
         el = time.perf_counter() - t0
-        dists = {g: distribution(sc, groups.get(g, ())) for g in GROUPS + (G_DIRECT,)}
+        dists = {g: distribution(sc, groups.get(g, ())) for g in ALL_GROUPS}
         row = {"axis": axis, "overrides": dict(ov), "context": ctx_kind, "notes": notes,
-               "elapsed_s": round(el, 3), "groups": dists,
-               "reacted_vs_others": compare(dists[G_REACTED], dists[G_OTHERS]),
-               "reacted_vs_near": compare(dists[G_REACTED], dists[G_NEAR]),
-               "reacted_vs_text": compare(dists[G_REACTED], dists[G_TEXT]),
-               "direct_vs_others": compare(dists[G_DIRECT], dists[G_OTHERS])}
+               "elapsed_s": round(el, 3), "groups": dists, **row_compares(dists)}
         if name == "base":
             base_scores = sc
-            row["flow_presend"] = {g: scorer.flow_presend(groups.get(g, ()), sc, s) for g in GROUPS + (G_DIRECT,)}
+            row["flow_presend"] = {g: scorer.flow_presend(groups.get(g, ()), sc, s) for g in ALL_GROUPS}
         elif base_scores is not None and name in TOGGLES:
             row["changed_vs_base"] = {g: changed(base_scores, sc, groups.get(g, ())) for g in (G_REACTED, G_OTHERS)}
         results[name] = row
@@ -529,6 +859,64 @@ def candidates(results: Mapping) -> dict:
                      "text_good_diff_pp": t["good_diff_pp"],
                      "base_text_good_diff_pp": base["reacted_vs_text"][axis]["good_diff_pp"]}
     return out
+
+
+# ───────────────────────────────────────────────────────────── 여러 프로젝트 묶기
+
+def _sum_dist(dists: Sequence[Mapping]) -> dict:
+    n = sum(int(d.get("n") or 0) for d in dists)
+    out: dict = {"n": n}
+    for axis in vs.AXES:
+        cnt = {lv: sum(int((d.get(axis) or {}).get(lv) or 0) for d in dists) for lv in vs.LEVELS}
+        codes: dict[str, int] = {}
+        for d in dists:
+            for k, v in ((d.get(axis) or {}).get("codes") or {}).items():
+                codes[k] = codes.get(k, 0) + int(v)
+        out[axis] = {**cnt, **{f"{lv}_pct": _pct(cnt[lv], n) for lv in vs.LEVELS}, "codes": dict(sorted(codes.items()))}
+    return out
+
+
+def _sum_counts(rows: Sequence[Mapping]) -> dict:
+    out: dict = {}
+    for r in rows:
+        for k, v in (r or {}).items():
+            if isinstance(v, Mapping):
+                out[k] = _sum_counts([out.get(k) or {}, v])
+            elif _is_int(v):
+                out[k] = out.get(k, 0) + v
+    return out
+
+
+def pool_reports(reps: Sequence[Mapping]) -> dict:
+    """calibrate 결과 여러 개(프로젝트마다) → 묶음·판별 건수를 더한 결과(같은 모양: input·variants·candidates).
+    판은 모든 결과에 있는 것만. 채점기 판이 다르면 CalibError. 숫자만 다룬다(채팅·본문 없음)."""
+    reps = [r for r in reps if isinstance(r, Mapping) and r.get("variants")]
+    if not reps:
+        raise CalibError("묶을 결과가 없습니다")
+    scorers = {r.get("scorer") for r in reps}
+    if len(scorers) != 1:
+        raise CalibError("채점기 판이 다른 결과는 묶지 않습니다")
+    names = [n for n in reps[0]["variants"] if all(n in r["variants"] for r in reps)]
+    variants: dict = {}
+    for name in names:
+        rows = [r["variants"][name] for r in reps]
+        dists = {g: _sum_dist([(row.get("groups") or {}).get(g) or {"n": 0} for row in rows]) for g in ALL_GROUPS}
+        out = {"axis": rows[0].get("axis"), "overrides": dict(rows[0].get("overrides") or {}),
+               "context": rows[0].get("context"), "notes": sorted({n for row in rows for n in row.get("notes") or ()}),
+               "elapsed_s": round(sum(float(row.get("elapsed_s") or 0) for row in rows), 3), "groups": dists,
+               **row_compares(dists)}
+        if all("flow_presend" in row for row in rows):
+            out["flow_presend"] = _sum_counts([row["flow_presend"] for row in rows])
+        if all("changed_vs_base" in row for row in rows):
+            out["changed_vs_base"] = _sum_counts([row["changed_vs_base"] for row in rows])
+        variants[name] = out
+    inp = _sum_counts([{k: v for k, v in (r.get("input") or {}).items()
+                        if k in ("messages", "scorable", "visible", "label_rows", "label_found", "topic_blocks",
+                                 "transcript_windows", "groups")} for r in reps])
+    return {"tool": TOOL, "tool_version": TOOL_VERSION, "scorer": reps[0].get("scorer"),
+            "normalizer": reps[0].get("normalizer"), "pooled": len(reps), "input": inp,
+            "load_s": round(sum(float(r.get("load_s") or 0) for r in reps), 3),
+            "variants": variants, "candidates": candidates(variants)}
 
 
 # ───────────────────────────────────────────────────────────── 실행
@@ -589,35 +977,96 @@ def load_context(project: str, *, topics_path: str | None) -> tuple[list, list, 
     return blocks, windows, info
 
 
+def _pilot_locked(project: str) -> bool:
+    from app import reference_set as rs
+    try:
+        return bool(rs.pilot_sessions_locked(project)[0])
+    except Exception:  # noqa: BLE001 — 판단 못 하면 잠기지 않은 것으로(블라인드 쪽으로 안전하게)
+        return False
+
+
+def _read_pdata(project: str) -> dict:
+    try:
+        with open(os.path.join(project, "project.json"), "rb") as f:
+            d = json.loads(f.read().decode("utf-8-sig"))
+    except (OSError, ValueError):
+        raise CalibError("project.json 을 읽지 못했습니다") from None
+    return d if isinstance(d, dict) else {}
+
+
 def calibrate(project: str, *, topics_path: str | None = None, labels_path: str | None = None,
-              grades: Sequence[str] = DEFAULT_GRADES, near_sec: int = DEFAULT_NEAR_SEC, quick: bool = False) -> dict:
+              grades: Sequence[str] | None = None, near_sec: int = DEFAULT_NEAR_SEC, quick: bool = False,
+              final_set=None, final_eval: str = "lenient", run_id: str | None = None,
+              ai_root: str | None = None) -> dict:
+    """보정 자료 한 프로젝트. final_set 을 주면(zip 경로·'auto'·1차 세션 ID·build_final_set 결과) 손라벨 대신 최종 세트를
+    쓰고 grades 기본은 FINAL_GRADES(direct 만). 시범 프로젝트는 final_set 길로만, 시범 세션이 모두 잠긴 뒤에만 연다."""
     project = os.path.abspath(project)
     if not os.path.isfile(os.path.join(project, "project.json")):
         raise CalibError("프로젝트 폴더가 아닙니다(project.json 없음)")
-    if _is_pilot(project):
-        raise CalibError("시범 프로젝트는 열지 않습니다(시범 세션이 모두 잠기고 해제된 뒤, D-17 4)", 1)
-    lp = labels_path or find_manual_csv(project)
-    if not lp or not os.path.isfile(lp):
-        raise CalibError("손라벨 labels\\manual-*.csv 가 없습니다", 1)
+    pilot = _is_pilot(project)
+    if final_set is None:
+        if pilot:
+            raise CalibError("시범 프로젝트는 손라벨 길로 열지 않습니다(--final-set, 시범 세션이 모두 잠긴 뒤, D-17 4)", 1)
+        grades = tuple(grades) if grades else DEFAULT_GRADES
+        lp = labels_path or find_manual_csv(project)
+        if not lp or not os.path.isfile(lp):
+            raise CalibError("손라벨 labels\\manual-*.csv 가 없습니다", 1)
+    else:
+        if final_eval not in FINAL_EVALS:
+            raise CalibError("--final-eval 은 lenient 또는 strict")
+        if pilot and not _pilot_locked(project):
+            raise CalibError("시범 세션이 모두 잠기기 전에는 최종 세트를 열지 않습니다 (D-17 4)", 1)
+        if pilot and topics_path:
+            raise CalibError("시범 프로젝트의 주제 흐름은 해제된 run 에서만 읽습니다(--topics 를 쓰지 않음)")
+        grades = tuple(grades) if grades else FINAL_GRADES
     t0 = time.perf_counter()
-    labels = read_manual_csv(lp)
+    fin_info: dict | None = None
+    ranges = None
+    if final_set is None:
+        labels = read_manual_csv(lp)
+        none_grades: tuple[str, ...] = ()
+    else:
+        fin = load_final_set(project, final_set, ai_root=ai_root)
+        labels, lc = labels_from_final(fin, eval_mode=final_eval)
+        ranges = fin.ranges or None
+        none_grades = (NONE_CODE,)
+        fin_info = {**fin.info, **lc, "eval": final_eval, "ranges": len(fin.ranges)}
     chats = read_messages(os.path.join(project, "chat", "messages.jsonl"))
-    blocks, windows, cinfo = load_context(project, topics_path=topics_path)
-    groups, ginfo = build_groups(chats, labels, grades=grades, near_ms=int(near_sec) * 1000)
+    if fin_info is not None and fin_info.get("messages_sha256"):
+        h = hashlib.sha256()
+        with open(os.path.join(project, "chat", "messages.jsonl"), "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        fin_info["messages_match"] = h.hexdigest() == fin_info.pop("messages_sha256")
+    else:
+        if fin_info is not None:
+            fin_info.pop("messages_sha256", None)
+    if pilot:
+        blocks, windows, cinfo = unsealed_context(project, _read_pdata(project), run_id=run_id, ai_root=ai_root)
+    elif run_id is not None:
+        blocks, windows, cinfo = unsealed_context(project, _read_pdata(project), run_id=run_id, ai_root=ai_root)
+    else:
+        blocks, windows, cinfo = load_context(project, topics_path=topics_path)
+    groups, ginfo = build_groups(chats, labels, grades=grades, near_ms=int(near_sec) * 1000,
+                                 none_grades=none_grades, ranges=ranges)
     if not groups[G_REACTED]:
-        raise CalibError("손라벨에서 반응받은 채팅을 찾지 못했습니다", 1)
+        raise CalibError("반응받은 채팅을 찾지 못했습니다(손라벨·최종 세트)", 1)
     base_ctx = vs.ScoreContext.build(topic_blocks=blocks, transcript=windows)
     no_flow_ctx = vs.ScoreContext.build(topic_blocks=(), transcript=windows)
     scorer = CalibScorer(chats, base_ctx)
     load_s = time.perf_counter() - t0
     results = run_variants(scorer, groups, no_flow_ctx=no_flow_ctx, names=QUICK if quick else None)
+    inp = {"messages": len(chats), "scorable": sum(1 for c in chats if c.scorable),
+           "visible": sum(1 for c in chats if c.visible), **ginfo, **cinfo,
+           "grades": list(grades), "near_sec": int(near_sec), "pilot": pilot,
+           "label_source": "final_set" if fin_info is not None else "manual_csv",
+           "groups": {g: len(groups.get(g, ())) for g in ALL_GROUPS}}
+    if fin_info is not None:
+        inp["final_set"] = fin_info
     return {
         "tool": TOOL, "tool_version": TOOL_VERSION, "scorer": f"viewer_score/{vs.VERSION}",
         "normalizer": vs.NORMALIZER,
-        "input": {"messages": len(chats), "scorable": sum(1 for c in chats if c.scorable),
-                  "visible": sum(1 for c in chats if c.visible), **ginfo, **cinfo,
-                  "grades": list(grades), "near_sec": int(near_sec),
-                  "groups": {g: len(groups.get(g, ())) for g in GROUPS + (G_DIRECT,)}},
+        "input": inp,
         "load_s": round(load_s, 3),
         "variants": results,
         "candidates": candidates(results),
@@ -628,10 +1077,16 @@ def _table(rep: Mapping) -> list[str]:
     """사람이 읽는 숫자 표(본문 없음)."""
     lines = []
     inp = rep["input"]
-    lines.append(f"{rep['scorer']} · 채팅 {inp['messages']} · 반응받음 {inp['groups'][G_REACTED]}"
-                 f"(direct {inp['groups'][G_DIRECT]}) · 반응 없음 {inp['groups'][G_OTHERS]}"
-                 f" · 가까운 반응 없음 {inp['groups'][G_NEAR]} · 낱말 있는 반응 없음 {inp['groups'][G_TEXT]}"
-                 f" · 주제 흐름 {inp['topic_blocks']} · 전사 창 {inp['transcript_windows']}({inp['words']})")
+    gr = inp.get("groups") or {}
+    head = (f"{rep['scorer']} · 채팅 {inp.get('messages')} · 반응받음 {gr.get(G_REACTED)}"
+            f"(direct {gr.get(G_DIRECT)}) · 반응 없음 {gr.get(G_OTHERS)}"
+            f" · 가까운 반응 없음 {gr.get(G_NEAR)} · 낱말 있는 반응 없음 {gr.get(G_TEXT)}"
+            f" · 주제 흐름 {inp.get('topic_blocks')} · 전사 창 {inp.get('transcript_windows')}({inp.get('words', '-')})")
+    if gr.get(G_NONE):
+        head += f" · 확인된 반응 없음 {gr.get(G_NONE)}"
+    if rep.get("pooled"):
+        head += f" · 묶은 프로젝트 {rep['pooled']}"
+    lines.append(head)
     lines.append("판 | 축 | 반응받음 good/ok/weak % | 반응 없음 good/ok/weak % | good 건수(반응받음/반응 없음) | lift | 정밀도"
                  " | good 차이 %p | p | 낱말 있는 쪽과 lift | 차이 %p | p")
     for name, row in rep["variants"].items():
@@ -644,7 +1099,12 @@ def _table(rep: Mapping) -> list[str]:
                          f"{b['good_pct']}/{b['ok_pct']}/{b['weak_pct']} | {a['good']}/{b['good']} | {c['good_lift']}"
                          f" | {c['good_precision']} | {c['good_diff_pp']} | {c['fisher_p_good']}"
                          f" | {t['good_lift']} | {t['good_diff_pp']} | {t['fisher_p_good']}")
-    fp = (rep["variants"].get("base") or {}).get("flow_presend")
+    base = rep["variants"].get("base") or {}
+    if (base.get("groups") or {}).get(G_NONE, {}).get("n"):
+        lines.append("base 반응받음 ↔ 확인된 반응 없음: " + " · ".join(
+            f"{axis} lift {base['reacted_vs_none'][axis]['good_lift']} 차이 {base['reacted_vs_none'][axis]['good_diff_pp']}"
+            f" p {base['reacted_vs_none'][axis]['fisher_p_good']}" for axis in vs.AXES))
+    fp = base.get("flow_presend")
     if fp:
         lines.append("주제 흐름 누출(base): " + " · ".join(
             f"{g} flow_hit {fp[g]['flow_hit']} = 보낸 시각 앞 전사에도 {fp[g]['presend']} + 뒤에만 "
@@ -661,19 +1121,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--topics", help="주제 흐름 파일(engine.topics 결과, <P>\\derived\\asr-topic-flow.json 처럼 보호 구역 "
                                      "derived\\asr* 안). 프로젝트 안의 보호 구역 밖 파일은 거부. 없으면 해제된 run 의 주제 흐름")
     ap.add_argument("--labels", help="손라벨 CSV(기본 labels\\manual-*.csv 이름 순 첫 파일)")
-    ap.add_argument("--grades", default=",".join(DEFAULT_GRADES), help="반응받음으로 볼 grade(쉼표)")
+    ap.add_argument("--grades", default=None, help="반응받음으로 볼 grade(쉼표). 기본: 손라벨 direct,likely · "
+                                                   "최종 세트 direct")
     ap.add_argument("--near-sec", type=int, default=DEFAULT_NEAR_SEC)
     ap.add_argument("--out", help="결과 JSON 파일(숫자만)")
     ap.add_argument("--quick", action="store_true", help="기본 + 켜고 끄기 판만")
     ap.add_argument("--json", action="store_true", help="표 대신 JSON 을 표준 출력으로")
+    ap.add_argument("--final-set", help="손라벨 대신 사람 최종 세트: export_final_set zip · auto · 1차 세션 ID "
+                                        "(시범은 이 길로만, 시범 세션이 모두 잠긴 뒤)")
+    ap.add_argument("--final-eval", choices=FINAL_EVALS, default="lenient",
+                    help="최종 세트에서 반응받음으로 볼 행: eval.lenient(참고, 기본) · eval.strict(엄격)")
+    ap.add_argument("--run-id", help="맥락(주제 흐름·전사 낱말)을 읽을 해제된 run (기본: 전사 낱말 짝이 있는 가장 늦은 해제)")
+    ap.add_argument("--ai-root", help="AI 결과 폴더(기본 app.seal 규칙)")
     a = ap.parse_args(argv)
     if not 0 < a.near_sec <= 600:
         print("--near-sec 는 1~600", file=sys.stderr)
         return 2
-    grades = tuple(g.strip() for g in a.grades.split(",") if g.strip())
+    grades = None
+    if a.grades is not None:
+        grades = tuple(g.strip() for g in a.grades.split(",") if g.strip()) or None
     try:
         rep = calibrate(a.project, topics_path=a.topics, labels_path=a.labels, grades=grades,
-                        near_sec=a.near_sec, quick=a.quick)
+                        near_sec=a.near_sec, quick=a.quick, final_set=a.final_set, final_eval=a.final_eval,
+                        run_id=a.run_id, ai_root=a.ai_root)
     except CalibError as e:
         print(f"거부: {e}", file=sys.stderr)
         return e.code
@@ -697,7 +1167,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = ["Chat", "LabelRow", "CalibError", "CalibScorer", "VARIANTS", "QUICK", "TOGGLES", "CANDIDATE_MIN_RECALL",
            "parse_messages", "parse_manual_csv", "build_groups", "distribution", "compare", "good_lift",
            "good_precision", "changed", "fisher_two_sided", "settings_for", "run_variants", "candidates",
-           "topics_zone", "calibrate", "main"]
+           "topics_zone", "calibrate", "main",
+           "FinalInput", "final_from_export", "final_from_zip", "labels_from_final", "load_final_set",
+           "words_code", "unsealed_context", "row_compares", "pool_reports", "ALL_GROUPS", "G_NONE",
+           "FINAL_GRADES", "FINAL_EVALS"]
 
 if __name__ == "__main__":
     raise SystemExit(main())

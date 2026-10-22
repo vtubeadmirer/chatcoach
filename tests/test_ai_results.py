@@ -303,6 +303,38 @@ def test_engine_to_ai_v03_fallback_refuses_seal_and_reports_meta(project, tmp_pa
     assert line["engine_fallback"] is False and line["engine_version"] == "0.1.0"
 
 
+def test_engine_to_ai_words_vectors_seal_with_real_sealer(tmp_path, capsys, monkeypatch):
+    """--words --vectors --seal 이 거부 없이 app.seal 의 짝 봉인 함수로 간다(23 5-2 의 2). 짝 하나가 검사에서 거부되면
+    종료 1 이고 출력에는 코드만 — 판정 봉인은 남는다(해제 때 그 짝만 빠진다). 엔진은 합성 문서로 바꾼다."""
+    from app import seal
+    from tests.test_seal import engine_doc, vectors_doc, words_doc
+    from tests.test_agreement import NOW, PID, SALT
+    from app import jsonl, project as P
+    p = P.create(str(tmp_path / "chatcoach-data" / "projects"), "합성 방송", 777, "시험용", "L01", "0.0.1", NOW, PID,
+                 SALT, machine4="m3fa")
+    root = p.root
+    jsonl.write_all(os.path.join(root, "chat", "messages.jsonl"), [{"chat_id": cid(1), "t_ms": 1000, "text": "합성"}])
+    assert e2a._words_sealer() is seal.seal_words_bytes and e2a._vectors_sealer() is seal.seal_vectors_bytes
+    monkeypatch.setattr(e2a, "_run_engine", lambda project_dir, ns, topics_out=None: engine_doc())
+    monkeypatch.setattr(e2a, "_run_words", lambda project_dir, ns: words_doc(project_id=PID))
+    bad = vectors_doc(project_id=PID, video_no="999")                     # 다른 방송의 벡터
+    monkeypatch.setattr(e2a, "_run_vectors", lambda project_dir, ns: bad)
+    args = ["--from-project", root, "--seal", "--by", "L01", "--engine", "v0.3", "--words", "--vectors"]
+    assert e2a.main(args) == 1
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["check"] == "valid" and out["words_check"] == "valid"
+    assert out["vectors_check"] == "rejected" and out["vectors_reject_reasons"] == ["vectors_video_mismatch"]
+    st = seal.seal_status(root)
+    assert st.sealed_count == 1 and st.entries[0].words_sha256 == out["words_sealed"]
+    assert st.entries[0].vectors_sha256 is None                         # 거부된 벡터는 짝으로 치지 않는다
+    # 같은 판정에 맞는 벡터를 다시 주면 짝이 된다(판정 봉인은 같은 바이트라 새 줄이 없다)
+    monkeypatch.setattr(e2a, "_run_vectors", lambda project_dir, ns: vectors_doc(project_id=PID))
+    assert e2a.main(args) == 0
+    out2 = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out2["sealed"] == out["sealed"] and out2["new"] is False and out2["vectors_check"] == "valid"
+    assert seal.seal_status(root).entries[0].vectors_sha256 == out2["vectors_sealed"]
+
+
 def test_engine_to_ai_real_engine_output_shape(project):
     """engine.link 가 합성 프로젝트(tests/test_engine_link 의 장면)에서 메모리로 낸 결과를 변환하면 1판 검사를 통과한다."""
     import argparse

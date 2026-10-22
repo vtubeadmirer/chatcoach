@@ -101,7 +101,7 @@
 ├─ labelers.json                     라벨러 표시 이름 — 실명은 프로젝트에 넣지 않는다
 ├─ cache\<partial_fp 앞 16자>\       waveform.json · silence.json · thumbs\       [파생 · 버려도 됨]
 ├─ cache\<project_id>\               chat_index.bin(채팅 병렬 배열) · index.sqlite(v1)   [파생 · 버려도 됨]
-├─ ai\<project_id>\                  AI 결과(v1): sealed\<sha256>.bin(봉인 원본) · seal.jsonl(봉인·해제 기록) · runs\<run_id>.json · topics\<run_id>.json(해제 뒤, 짝 주제 흐름이 있을 때)   [6-14]
+├─ ai\<project_id>\                  AI 결과(v1): sealed\<sha256>.bin(봉인 원본 — 판정·짝 모두) · seal.jsonl(봉인·해제 기록) · runs\<run_id>.json · 해제 뒤 짝이 있을 때만 topics\<run_id>.json(주제 흐름)·words\<run_id>.json(시각별 전사 낱말)·vectors\<run_id>.json(창별 주제 벡터)   [6-14 · words·vectors 는 ★전사문 등급]
 ├─ reports\<project_id>\<report_id>\ 일치도·AI 비교 보고서: report.json · report.md (AI 비교 때 tables\*.csv · manifest.json 추가 예정)   [6-14]
 └─ disposal_log.jsonl                프로젝트 파기 기록
 ```
@@ -633,7 +633,7 @@ flowchart LR
 
 ### 6-14. 잠금 · 재라벨 계획 · 가상 채팅 생성 기록 · AI 봉인 · 보고서
 
-잠금·재라벨 계획·보고서는 C단계 넷째 묶음에서 만들었다(스키마 `session-lock`·`relabel-plan`, 19장). 가상 채팅 생성 기록·AI 봉인은 아직 v1 이다. 아래 잠금·계획 표는 구현과 스키마를 따른다(D-12 1, 13 4-1 1·5번). 어긋나면 스키마가 맞다.
+잠금·재라벨 계획·보고서는 C단계 넷째 묶음에서 만들었다(스키마 `session-lock`·`relabel-plan`, 19장). AI 봉인은 E 첫 묶음에서 만들고 짝(주제 흐름 E 둘째, 전사 낱말 G 둘째, 창별 주제 벡터·해제 기록의 엔진 판 '시범 해제 준비' 묶음 D-22)을 더했다. 가상 채팅 생성 기록은 아직 v1 이다. 아래 잠금·계획 표는 구현과 스키마를 따른다(D-12 1, 13 4-1 1·5번). 어긋나면 스키마가 맞다.
 
 **잠금 `locks/<session_id>.json`** ([스키마](../../schemas/session-lock.schema.json))
 
@@ -680,16 +680,38 @@ flowchart LR
 
 **AI 봉인 기록 `<앱>\data\ai\<project_id>\seal.jsonl`** (v1)
 
-봉인 절차와 조건은 [06](06-evaluation-and-agreement.md) 7-1·7-2 가 정한다. 여기서는 기록 모양만 정한다. 추가 전용 JSONL 이고 쓰기 규칙은 8-1 과 같다. 프로젝트 폴더 밖이라 라벨러 패키지와 재라벨 세션에 닿지 않는다.
+봉인 절차와 조건은 [06](06-evaluation-and-agreement.md) 7-1·7-2 가 정한다. 여기서는 기록 모양만 정한다. 추가 전용 JSONL 이고 쓰기 규칙은 8-1 과 같다. 프로젝트 폴더 밖이라 라벨러 패키지와 재라벨 세션에 닿지 않는다. 구현은 `app/seal.py` 이고, 어긋나면 그 파일 머리말이 맞다.
+
+봉인 종류는 넷이다: 판정 결과(`ai.sealed`) 하나와, 그 판정 봉인 하나에 붙는 **짝 셋**(`topics.sealed`·`words.sealed`·`vectors.sealed`). 짝 셋은 모두 같은 규칙이다(`seal._PairSpec` 한 표, 06 7-2 '봉인 짝 네 종류'). 짝은 따로 풀지 않고, 판정을 풀 때 **같은 해제 안에서 한 번에** 푼다. 짝 하나가 깨져도 판정 해제는 막지 않는다 — 그 짝만 풀지 않고 코드를 남긴다. '봉인됨 n건' 은 판정 결과만 센다(D-18 3).
 
 | kind | 필드 | 뜻 |
 |---|---|---|
-| (공통) | `v`, `seq`, `kind`, `at`, `by`(검토자 `role = reviewer` 의 labeler_id), `app_version`, `sha256` | `sha256` = 받은 파일 바이트의 SHA-256. 원본은 `sealed\<sha256>.bin` 으로 둔다. |
-| `ai.sealed` | `size`, `check`(`valid`·`rejected`), `reject_reasons[]` | 받을 때 06 6-2 검사 결과만 남긴다. `run_id`·엔진 이름처럼 내용을 해석한 값은 적지 않는다(06 7-2 '해석 결과도 저장하지 않는다'). |
-| `ai.unsealed` | `run_id`, `locks[]`(`session_id`, 잠금 파일 `sha256`, `locked_at`), `conditions_met`, `reason`, (짝 주제 흐름이 있을 때) `topics`(`sha256`·`file_sha256` 또는 null)·`topics_error`(문제 코드 또는 null) | 풀면서 `runs\<run_id>.json` 으로 옮긴다. 06 7-1 조건(계획된 세션 모두 잠김 + 표본 재현 검증 통과) 전에 열면 `conditions_met = false` 와 사유(필수)를 남긴다. 그 뒤 만든 재라벨 세션은 `ai_exposed` 로 표시된다. 짝 주제 흐름은 같은 해제에서 `topics\<run_id>.json` 으로 같이 푼다. 주제 흐름 문제(`topics_unreadable`·`topics_bin_mismatch`·`topics_json`·`topics_format`)는 판정 해제를 막지 않고 코드만 남긴다. |
-| `topics.sealed` | `size`, `source`(`engine_topics`·`file`), `pair`(짝 ai-result 의 `sha256`), `check`, `reject_reasons[]` | 엔진 주제 흐름(topic-flow, [스키마](../../schemas/topic-flow.schema.json))을 ai-result 봉인 하나의 **짝으로** 봉인한다(08 D-17 5, `seal.seal_topics_bytes`). 원본은 같은 `sealed\<sha256>.bin`. 짝 봉인이 없거나 이미 풀렸으면 받지 않는다. 따로 풀지 않는다. '봉인됨 n건' 은 ai-result 만 센다(D-18 3). 18 5-2 16번 몫 |
+| (공통) | `v`, `seq`, `kind`, `at`, `by`(검토자 `role = reviewer` 의 labeler_id), `app_version`, `sha256` | `sha256` = 받은 파일 바이트의 SHA-256. 원본은 판정·짝 모두 `sealed\<sha256>.bin` 으로 둔다. |
+| `ai.sealed` | `size`, `source`(`engine_link`·`file`), `check`(`valid`·`rejected`), `reject_reasons[]` | 받을 때 06 6-2 검사 결과만 남긴다. `run_id`·엔진 이름·판처럼 내용을 해석한 값은 적지 않는다(06 7-2 '해석 결과도 저장하지 않는다'). |
+| `topics.sealed` | `size`, `source`(`engine_topics`·`file`), `pair`(짝 ai-result 의 `sha256`), `check`, `reject_reasons[]` | 엔진 주제 흐름(topic-flow, [스키마](../../schemas/topic-flow.schema.json))을 판정 봉인 하나의 **짝으로** 봉인한다(08 D-17 5, `seal.seal_topics_bytes`). 짝 판정 봉인이 없거나 이미 풀렸으면 받지 않는다(풀린 결과에 나중에 붙이면 봉인 없이 보이게 되므로). 같은 바이트·같은 짝이면 새 줄을 쓰지 않는다. 상한 4 MiB. 검사 `app.core.topics`, 거부 코드 `topics_json`·`topics_format`·`topics_video_mismatch`. 18 5-2 16번 몫 |
+| `words.sealed` | `topics.sealed` 와 같은 칸. `source` 는 `engine_words`·`file` | 시각별 전사 낱말(transcript-words, [스키마](../../schemas/transcript-words.schema.json), D-20 3, `seal.seal_words_bytes`). **전사문과 같은 등급**이다 — 기록·오류·화면에 낱말을 넣지 않는다(해시·크기·코드만). 상한 16 MiB. 검사 `app.core.words_doc`, 거부 코드 `words_json`·`words_format`·`words_video_mismatch`·`words_project_mismatch` (22 5-2 의 7, 23 3-3) |
+| `vectors.sealed` | `topics.sealed` 와 같은 칸. `source` 는 `engine_vectors`·`file` | 창별 주제 벡터(topic-vectors, [스키마](../../schemas/topic-vectors.schema.json), 23 5-2 의 2, `seal.seal_vectors_bytes`). 벡터는 어느 정도 거꾸로 풀 수 있어 **전사문과 같은 등급**이다(2-1 의 `derived/asr*` 와 같은 까닭) — 기록·오류에 수를 넣지 않는다. 상한 64 MiB. 검사 `seal.vectors_check`(앱 쪽 규칙: 칸 모양·target·벡터 해시·`app.core.viewer_score.vectors_from_doc` 이 모든 창을 읽는지 — 앱은 엔진을 import 하지 않는다, D-06), 거부 코드 `vectors_json`·`vectors_format`·`vectors_video_mismatch`·`vectors_project_mismatch` |
+| `ai.unsealed` | 아래 '해제 기록 칸' 표 | 풀면서 `runs\<run_id>.json` 으로 옮기고, 짝이 있으면 `topics\`·`words\`·`vectors\<run_id>.json` 으로 같이 푼다. 06 7-1 조건(계획된 세션 모두 잠김 + 표본 재현 검증 통과) 전에 열면 `conditions_met = false` 와 사유(필수)를 남긴다. 그 뒤 만든 재라벨 세션은 `ai_exposed` 로 표시된다. |
 
-'사전 봉인'(봉인 시각 < 1차 세션 잠금 시각) 여부는 저장하지 않는다. 이 기록과 잠금 파일의 시각에서 계산한다(D12 와 같은 이유).
+**해제 기록 칸 (`ai.unsealed`)** — seal.jsonl 형식은 하위 호환이다(`v` = 1 그대로, 칸만 더함). 옛 기록에 없는 칸은 '모름' 으로 읽는다.
+
+| 칸 | 뜻 | 언제부터 |
+|---|---|---|
+| `run_id`, `run_sha256` | 해제한 결과의 실행 ID 와 `runs\<run_id>.json` 바이트의 SHA-256. 읽을 때(`read_run`) 대조한다 | E 첫 |
+| `locks[]` | 그 시점의 잠금 파일마다 `session_id`·`sha256`·`locked_at`. AI 비교 보고서가 지금 잠금과 대조한다 | E 첫 |
+| `conditions_met`, `reason`, `unmet[]` | 06 7-1 조건이 됐는지, 앞당겨 연 사유(조건 전에만, 1~500자), 그때 모자랐던 조건 문장(세션·계획 ID 와 건수만) | E 첫 |
+| `gate_warnings` | `comparison_gate` 경고 건수(문장은 남기지 않음) | E 첫 |
+| `presealed`, `first_primary_lock_at` | 사전 봉인 여부와 그 계산에 쓴 가장 이른 1차 잠금 시각(아래 문단) | E 첫 |
+| `time_axis_in`, `calibration_rev` | 받은 결과의 시각 축과, `media_ms` 였을 때 쓴 보정 판 | E 첫 |
+| `warnings[]`, `dropped_unknown`, `dropped_duplicate` | 해제 때 다시 돌린 검사의 경고 코드, 프로젝트 채팅에 없는 chat_id·겹친 판정으로 뺀 건수(종류별 숫자) | E 첫 |
+| `engine_version` | 해제한 결과의 `engine.version`(없으면 null). 분석 화면의 '판 A 기본'·고르기 글이 이 값을 읽는다(`SealEntry.engine_version` → `RunChoice`). 옛 기록에는 없다 = '판 모름' | D-22 (23 5-2 의 10) |
+| `pairs[]` | 짝마다 `kind`(`topics`·`words`·`vectors`)·`sha256`(짝 봉인)·`file_sha256`(풀어 쓴 파일, 못 풀었으면 null)·`error`(문제 코드 또는 null). 짝이 없으면 빈 목록. 옛 기록에는 없다 | D-22 |
+| `topics`·`topics_error`, `words`·`words_error`, `vectors`·`vectors_error` | **짝이 있을 때만** 쓰는 칸. `<짝>` = `{sha256, file_sha256}` 또는 null, `<짝>_error` = 문제 코드 또는 null. 코드: `<짝>_unreadable`(봉인 파일을 못 읽음)·`<짝>_bin_mismatch`(해시·크기가 기록과 다름)·`<짝>_json`·`<짝>_format`. `read_topics`·`read_words`·`read_vectors` 는 이 칸의 `file_sha256` 과 파일을 대조한다 | topics E 둘째, words G 둘째, vectors D-22 |
+
+- **해제 전 읽기 없음.** `read_run`·`read_topics`·`read_words`·`read_vectors` 는 `ai.unsealed` 기록이 없으면 파일을 열기 전에 `SealNotUnsealedError`(= `SealBlindError`)를 낸다. 분석 세션은 해제된 것만 읽는다(12-1, 06 7-3).
+- **시범 프로젝트(`pilot-*`)의 전사 낱말·벡터는 이 해제 길로만 만든다**(`tools/engine_to_ai.py --from-project … --words --vectors --seal`). `derived\asr-words.json`·`asr-topic-vectors.json` 을 시범 프로젝트에 쓰지 않는다(2-1).
+
+'사전 봉인'(봉인 시각 < 1차 세션 잠금 시각) 여부는 봉인 줄에 저장하지 않는다. 이 기록과 잠금 파일의 시각에서 계산하고, 해제 때의 계산값만 `ai.unsealed.presealed` 에 남긴다(D12 와 같은 이유).
 
 **보고서 `<보고서 폴더>\<project_id>\<report_id>\report.json`** (일치도는 넷째 묶음, AI 비교·시범 점검은 v1)
 
@@ -1040,7 +1062,7 @@ flowchart TD
 | `derived/asr*` | 토글(기록) | 토글 | 토글 | 읽기 | 열지 않음 | 읽기 |
 | 엔진 결과(`derived/link-*`) | 열지 않음 | 열지 않음 | 열지 않음 | 열지 않음 | 열지 않음 | 읽기 ('분석 보기') |
 | `origin/`, 출처 라벨 | 열지 않음 | 열지 않음 | 열지 않음 | 읽기 · **대상 파일만 쓰기**(1차 매니페스트 표본으로, D-13 5. `FileScope.origin` 값은 읽기이고 `ProjectStore.write_origin_targets` 가 조정 세션에만 따로 허용 — D-14 1·2, 15 5-3 2번) | 대상 파일 읽기 · 출처 라벨 쓰기 | 읽기 |
-| `<앱>\data\ai\` | 열지 않음 | 열지 않음 | 열지 않음 | 봉인·봉인 해제 뒤 읽기(6-14) | 열지 않음 | **해제된 것만**: `seal.jsonl`(건수·해제 여부)과 해제 뒤 `runs\`·`topics\` 읽기. `sealed\` 는 열지 않고 봉인·해제는 못 함(`visibility` 의 `UNSEALED_ONLY`, 08 D-15 7, 18 5-2 16번) |
+| `<앱>\data\ai\` | 열지 않음 | 열지 않음 | 열지 않음 | 봉인·봉인 해제 뒤 읽기(6-14) | 열지 않음 | **해제된 것만**: `seal.jsonl`(건수·해제 여부)과 해제 뒤 `runs\`·`topics\`·`words\`·`vectors\` 읽기(`read_run`·`read_topics`·`read_words`·`read_vectors`). `sealed\` 는 열지 않고 봉인·해제는 못 함(`visibility` 의 `UNSEALED_ONLY`, 08 D-15 7, 18 5-2 16번) |
 | `<앱>\data\reports\` | 열지 않음 | 열지 않음 | 열지 않음 | 읽기·쓰기 | 열지 않음 | 읽기 |
 
 '잡기' 는 프로젝트를 열 때 `locks/open.lock` 을 잡고, 못 잡으면 프로젝트 전체를 읽기 전용으로 연다는 뜻이다(13-5). 이미 잠긴 세션(`locks/<session_id>.json` 이 있음)을 다시 열면 쓰지 않으므로 `open.lock` 을 잡지 않고 읽기 전용으로 연다(D-12 1, 13 4-1 4번). '토글' 은 기본 숨김이고, 켜면 `view.exposed` 줄이 남는다. 블라인드 해제를 막지는 않지만, 일치도 계산에서 노출된 세션을 따로 볼 수 있다.
@@ -1414,7 +1436,7 @@ MVP 에는 4단계(`missed_candidate`) 입력 화면이 없다(v1). 그래서 �
 | 규칙 | 내용 |
 |---|---|
 | 언제 | 받기(봉인)는 언제든 검토자가 한다. 내용은 보이지 않는다. 열기(봉인 해제)는 [06](06-evaluation-and-agreement.md) 7-1 조건이 된 뒤 조정(검토자) 세션에서만 한다. 라벨링 세션에서는 메뉴 자체가 없다(안내서 원칙 3). |
-| 어디에 | `<앱>\data\ai\<project_id>\sealed\<sha256>.bin` 에 봉인하고, 해제하면 `runs\<run_id>.json` 으로 푼다. 기록은 `seal.jsonl`(6-14). 프로젝트 폴더에 두지 않아 패키지·동기화에 섞이지 않는다. |
+| 어디에 | `<앱>\data\ai\<project_id>\sealed\<sha256>.bin` 에 봉인하고, 해제하면 `runs\<run_id>.json` 으로 푼다. 짝(주제 흐름·전사 낱말·주제 벡터)도 같은 폴더에 봉인하고 같은 해제에서 `topics\`·`words\`·`vectors\` 로 푼다. 기록은 `seal.jsonl`(6-14). 프로젝트 폴더에 두지 않아 패키지·동기화에 섞이지 않는다. |
 | 채팅 맞추기 | `chat_id`(`sl-chat-id-v1`). 엔진은 같은 공개 규칙으로 직접 계산할 수 있다. 프로젝트에 없는 chat_id 는 건수로 보고한다. |
 | 채팅 집합 | `target.messages_sha256` 이 있고 프로젝트 값과 다르면 경고한다. |
 | 시각 | `time_axis = vod_ms` 권장. `media_ms` 면 `media.partial_fp` 가 프로젝트 영상과 같아야 하고, 가져올 때 활성 보정으로 바꾼다. |
@@ -1462,6 +1484,8 @@ MVP 에는 4단계(`missed_candidate`) 입력 화면이 없다(v1). 그래서 �
 | [`schemas/session-lock.schema.json`](../../schemas/session-lock.schema.json) | `locks/<session_id>.json` (6-14 '잠금', 넷째 묶음) |
 | [`schemas/relabel-plan.schema.json`](../../schemas/relabel-plan.schema.json) | `relabel/<plan_id>.json` (6-14 '재라벨 계획', [06](06-evaluation-and-agreement.md) 3장, 넷째 묶음) |
 | [`schemas/topic-flow.schema.json`](../../schemas/topic-flow.schema.json) | 엔진 주제 흐름 `<이름>.topics.json` (AI 결과와 짝으로 봉인, 6-14 'AI 봉인 기록', 08 D-17 5) |
+| [`schemas/transcript-words.schema.json`](../../schemas/transcript-words.schema.json) | 시각별 전사 낱말 `derived/asr-words.json`·`<이름>.words.json` (2-1, 시범은 짝 봉인 `words.sealed`, 08 D-20 3) |
+| [`schemas/topic-vectors.schema.json`](../../schemas/topic-vectors.schema.json) | 창별 주제 벡터 `derived/asr-topic-vectors.json`·`<이름>.vectors.json` (2-1, 시범은 짝 봉인 `vectors.sealed`, 08 D-22) |
 | [`schemas/training-event.schema.json`](../../schemas/training-event.schema.json) | `training/<session_id>.jsonl` 한 줄 (6-16, 08 D-18 8) |
 | [`schemas/scenario.schema.json`](../../schemas/scenario.schema.json) | `scenarios/SC-*.jsonl` 가상 채팅 시나리오 (H-1, [20](20-plan-virtual-chat.md) 3장) |
 | [`schemas/viewer-event.schema.json`](../../schemas/viewer-event.schema.json) | `viewer/<session_id>.jsonl` 한 줄 (6-18, 08 D-20 4) |

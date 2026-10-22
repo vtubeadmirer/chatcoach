@@ -1333,8 +1333,8 @@ class MainWindow(QMainWindow):
             wb.detach_status_bar()
         if show:
             view.input.setFocus()
-        note = vf.WORDS_NOTE_KO.get(w_code)
-        if note:                                    # 보정 전·보정 없음: 전사 낱말을 쓰지 않았다는 것을 한 줄로(숫자·코드만)
+        note = vf.words_note(w_code, info.get("sealed_count"))
+        if note:                                    # 보정 전·보정 없음·시범 봉인됨 n건: 전사 낱말을 쓰지 않았다는 것을 한 줄로(숫자·코드만)
             self.statusBar().showMessage(tr(note), 8000)
         LOG.info("시청자 훈련 열기: 구간 %s %d ms · 가상 채팅 %d줄 · 주제 덩어리 %d(%s) · 전사 창 %d(%s, 보정 %s) · "
                  "벡터 창 %d(%s) · 동의어 %s · 문턱 %s", seg_src,
@@ -1551,11 +1551,13 @@ class MainWindow(QMainWindow):
             old.deleteLater()
         dlg = QDialog(self)
         src = {"final_set": tr("반응: 사람 최종 세트"), "engine": tr("반응: 엔진 판정")}.get(data.reaction_source or "", "")
-        dlg.setWindowTitle(" — ".join(x for x in (title, f"run {data.topic_run_id}" if data.topic_run_id else "", src)
-                                      if x))
+        # run 옆에 해제 기록의 엔진 판('판 X' · '판 모름', 23 5-2 의 10)
+        run_txt = f"run {data.topic_run_id} · {af.version_text(data.topic_engine_version)}" if data.topic_run_id else ""
+        dlg.setWindowTitle(" — ".join(x for x in (title, run_txt, src) if x))
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(0, 0, 0, 0)
-        view = SummaryView(data.rows, sealed=data.sealed, parent=dlg)
+        # 봉인 표시는 '봉인됨 n건'(D-18 3) — 나란히 보기·상태 줄과 같은 말
+        view = SummaryView(data.rows, sealed=data.sealed, sealed_count=data.sealed_count, parent=dlg)
         lay.addWidget(view)
         if wb is not None:
             view.seekRequested.connect(wb.seek_vod)
@@ -1701,7 +1703,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 0)
         view = AnalysisView(dlg, run=data.run, final_rows=data.final_rows, sealed_count=data.sealed_count,
                             scores=data.scores, chat_times=chat_times, duration_ms=dur,
-                            runs=data.choices, run_loader=data.load_run, run_id=data.run_id)
+                            runs=data.choices, run_loader=data.load_run, run_id=data.run_id, title_base=title)
         lay.addWidget(view)
         if wb is not None:
             view.seekRequested.connect(wb.seek_vod)

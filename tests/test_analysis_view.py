@@ -570,6 +570,66 @@ def test_default_pick_opens_no_files(qapp, monkeypatch):
     assert v.current_run_id() == "run-old" and opened == []
 
 
+# ---------------------------------------------------------------------------- 창 제목·판 표시 (23 5-2 의 10)
+def test_window_title_follows_run_and_version(qapp):
+    """담은 대화상자 제목 = '<기본> — run <판 A> · 판 …' (해제 기록의 판, 없으면 '판 모름'). 판을 바꾸거나 판끼리 견주면
+    따라 바뀐다. 해제 전이면 '봉인됨 n건'. 파일은 열지 않는다."""
+    from PySide6.QtWidgets import QDialog, QVBoxLayout
+    new, old, rows = runs_fixture()
+    choices = [{**CHOICES[0], "engine_version": "0.1.0"}, {**CHOICES[1]}]          # run-old 는 판 모름
+    dlg = QDialog()
+    dlg.setWindowTitle("엔진과 나란히 보기 — run run-new")                        # 메인 창이 넣는 모양(넘긴 run)
+    lay = QVBoxLayout(dlg)
+    titles = []
+    v = av.AnalysisView(dlg, run=new, final_rows=rows, runs=choices, run_loader=FakeLoader({"run-old": old}))
+    v.titleChanged.connect(titles.append)
+    lay.addWidget(v)
+    assert v.current_run_id() == "run-new"
+    assert dlg.windowTitle() == "엔진과 나란히 보기 — run run-new · 판 0.1.0" == v.window_title()
+    assert v.run_box.itemText(v.run_box.findData("run-new")).endswith("판 0.1.0")     # 고르기 글도 해제 기록의 판
+    assert v.run_box.itemText(v.run_box.findData("run-old")).endswith("판 모름")
+    assert v.select_run("run-old")
+    assert dlg.windowTitle() == "엔진과 나란히 보기 — run run-old · 판 모름" and titles[-1] == dlg.windowTitle()
+    # 해제 기록에 판이 없고 읽은 판이면 결과 파일의 엔진 판을 참고로 덧붙인다
+    assert v.run_box.itemText(v.run_box.findData("run-old")).endswith("판 모름 · chatcoach-link 0.2.0")
+    assert v.compare_with("run-new")
+    assert dlg.windowTitle() == "엔진과 나란히 보기 — run run-old · 판 모름 ↔ run run-new · 판 0.1.0"
+    v.set_data(run=None, sealed_count=3)
+    assert dlg.windowTitle() == "엔진과 나란히 보기 — 봉인됨 3건" and not any("run-" in t for t in v.all_texts())
+    assert v.window_title("다른 제목") == "다른 제목 — 봉인됨 3건"
+    dlg.deleteLater()
+
+
+def test_window_title_leaves_other_windows_alone(qapp):
+    """부모 없는 화면·대화상자가 아닌 창에 담긴 화면은 남의 창 제목을 바꾸지 않는다(글은 window_title·titleChanged 로)."""
+    from PySide6.QtWidgets import QMainWindow
+    new, _old, rows = runs_fixture()
+    mw = QMainWindow()
+    mw.setWindowTitle("챗코치 0.0.0")
+    v = av.AnalysisView(mw, run=new, final_rows=rows, title_base="나란히")
+    mw.setCentralWidget(v)
+    assert mw.windowTitle() == "챗코치 0.0.0" and v.window_title() == "나란히 — run run-new · 판 모름"
+    solo = av.AnalysisView(run=new, final_rows=rows)
+    assert solo.windowTitle() == "" and solo.window_title() == "엔진과 나란히 보기 — run run-new · 판 모름"
+    mw.deleteLater()
+
+
+def test_summary_view_sealed_shows_count(qapp):
+    """방송 요약의 봉인 표시도 '봉인됨 n건'(D-18 3). 건수를 넘기지 않은 옛 부르는 쪽만 '봉인됨'. 봉인 중에는 읽지 않는다."""
+    from app.ui import summary_view as sv
+
+    class Boom:
+        def __iter__(self):
+            raise AssertionError("봉인 중에 읽었다")
+    v = sv.SummaryView(Boom(), sealed=True, sealed_count=2)
+    assert v.is_sealed() and v.sealed_label.text() == "봉인됨 2건" and v.sealed_count() == 2
+    v.set_data(Boom(), sealed=True)
+    assert v.sealed_label.text() == "봉인됨" and v.sealed_count() is None
+    v.set_data([], sealed=False, sealed_count=5)
+    assert not v.is_sealed() and v.sealed_count() is None
+    assert sv.sealed_text(0) == "봉인됨 0건"
+
+
 def test_view_is_freed_when_dropped(qapp):
     """부모 없는 화면은 이름이 사라지면 바로 지워진다(D-18 10). 자기를 잡은 람다 연결이 있으면 남아 프로세스 끝에
     QApplication 보다 늦게 지워지며 접근 위반(0xC0000005·0xC0000409)이 났다."""

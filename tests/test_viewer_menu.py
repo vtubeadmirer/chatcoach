@@ -121,28 +121,227 @@ def test_words_status_codes(tmp_path, proj):  # noqa: F811
     assert doc["engine"]["textnorm"] == TN.VERSION
 
 
-def test_pilot_name_opens_nothing(tmp_path, monkeypatch):
-    """시범 이름(pilot-*) 폴더는 이름만 보고 돌아간다 — 파일 열기·목록 읽기·존재 확인 0회."""
-    pilot = str(tmp_path / "projects" / "pilot-합성")
-    os.makedirs(os.path.join(pilot, "derived"))
+def _derived_watch(monkeypatch, roots, *, also=()):
+    """roots 아래 derived\\ (그리고 also 의 경로) 를 여는·목록 읽는·있는지 보는 호출을 센다."""
     seen = []
-    real_open, real_isfile, real_listdir = builtins.open, os.path.isfile, os.listdir
+    needles = [os.path.normcase(os.path.join(os.path.abspath(r), "derived")) for r in roots]
+    needles += [os.path.normcase(os.path.abspath(a)) for a in also]
+    real = {"open": builtins.open, "isfile": os.path.isfile, "exists": os.path.exists, "isdir": os.path.isdir,
+            "listdir": os.listdir, "scandir": os.scandir, "os_open": os.open}
 
-    def watch(fn):
+    def watch(name):
+        fn = real[name]
+
         def inner(p, *a, **k):
-            if "pilot-" in str(p):
-                seen.append(fn.__name__)
+            try:
+                s = os.path.normcase(os.path.abspath(os.fspath(p)))
+            except TypeError:
+                s = ""
+            if any(s == n or s.startswith(n + os.sep) for n in needles):
+                seen.append((name, s))
             return fn(p, *a, **k)
         return inner
-    monkeypatch.setattr(builtins, "open", watch(real_open))
-    monkeypatch.setattr(os.path, "isfile", watch(real_isfile))
-    monkeypatch.setattr(os, "listdir", watch(real_listdir))
+    monkeypatch.setattr(builtins, "open", watch("open"))
+    monkeypatch.setattr(os.path, "isfile", watch("isfile"))
+    monkeypatch.setattr(os.path, "exists", watch("exists"))
+    monkeypatch.setattr(os.path, "isdir", watch("isdir"))
+    monkeypatch.setattr(os, "listdir", watch("listdir"))
+    monkeypatch.setattr(os, "scandir", watch("scandir"))
+    monkeypatch.setattr(os, "open", watch("os_open"))
+    return seen
+
+
+def test_pilot_name_opens_no_derived(tmp_path, monkeypatch):
+    """시범 이름(pilot-*) 폴더는 derived\\ 를 열지도 보지도 않는다(23 5-2 의 3). project.json 이 없어 봉인 기록을 못 읽으면
+    W_PILOT — 전사 낱말·주제 흐름·벡터 모두 없음. 엔진 명령도 만들지 않는다."""
+    pilot = str(tmp_path / "projects" / "pilot-합성")
+    os.makedirs(os.path.join(pilot, "derived"))
+    seen = _derived_watch(monkeypatch, [pilot])
     assert vf.words_status(pilot) == (vf.W_PILOT, None)
+    assert vf.pilot_words(pilot) == (vf.W_PILOT, None, None)
     assert vf.topic_blocks(pilot) == ([], None)
     assert vf.words_command(pilot) is None
+    assert vf.read_topic_vectors(pilot, None) == (vf.F_NO_WORDS, None)
+    assert vf.derived_topic_blocks(pilot) == (vf.F_PILOT, [])
     ctx_, info = vf.build_context(pilot)
     assert ctx_["transcript"] == [] and ctx_["topic_blocks"] == [] and info["words"] == vf.W_PILOT
+    assert info["pilot"] == 1 and info["sealed_count"] == 0 and info["topic_derived"] == vf.F_PILOT
     assert seen == []
+    assert vf.W_SEALED not in vf.REBUILD and vf.W_RUN_STALE not in vf.REBUILD and vf.W_RUN_NO_WORDS not in vf.REBUILD
+    assert all(vf.WORDS_NOTE_KO[c] for c in (vf.W_SEALED, vf.W_RUN_STALE, vf.W_RUN_NO_WORDS))
+
+
+# ----------------------------------------------------------------------------- 23 5-2 의 3: 시범은 해제된 run 폴더에서
+SEALED_AT = "2026-10-23T09:00:00+09:00"
+
+
+def _vec_doc(words_doc, windows=((100_000, 110_000, (1.0, 0.0, 0.0)),)):
+    """합성 창별 주제 벡터(round4, 3차원) — 전사 낱말 문서와 asr 해시·보정이 같다."""
+    from app.core import viewer_score as vsc
+    return {"schema": vsc.TOPIC_VECTORS_SCHEMA, "schema_version": vsc.TOPIC_VECTORS_SCHEMA_VERSION,
+            "time_axis": "vod_ms", "encoding": "round4", "dim": 3,
+            "target": dict(words_doc["target"]), "calibration": dict(words_doc["calibration"]),
+            "windows": [{"start_ms": a, "end_ms": b, "v": list(v)} for a, b, v in windows]}
+
+
+def _synthetic_pilot(proj, tmp_path):
+    """합성 시범 프로젝트(tmp 아래 'pilot-합성'): 합성 프로젝트에 합성 asr 로 전사 낱말을 만든 뒤 복사한다(엔진은 시범 이름을
+    거부하므로). 복사본의 derived\\ 에도 전사 낱말이 남아 있다 — 시범 길이 그것을 읽지 않는지 본다. → (경로, 전사 낱말 바이트)."""
+    root = proj["root"]
+    _write_asr(root)
+    _build_words_inprocess(["--project", root], None)
+    wbytes = open(vf.words_path(root), "rb").read()
+    dst = str(tmp_path / "data" / "projects" / "pilot-합성")
+    shutil.copytree(root, dst)
+    return dst, wbytes
+
+
+def _seal_pilot(dst, wbytes, monkeypatch):
+    """시범 봉인: 합성 엔진 결과 + 짝 전사 낱말·주제 흐름(seal 담당 공개 API). → 판정 봉인 SealEntry."""
+    from datetime import datetime
+    from app import seal
+    from tests.test_ai_compare import _engine_bytes
+    from tests.test_topics_integration import tbytes
+    at = datetime.fromisoformat(SEALED_AT)
+    e = seal.seal_bytes(dst, _engine_bytes(), source="file", by="L01", now=at)
+    assert seal.seal_words_bytes(dst, wbytes, pair_sha256=e.sha256, by="L01", now=at).check == "valid"
+    assert seal.seal_topics_bytes(dst, tbytes(), pair_sha256=e.sha256, by="L01", now=at).check == "valid"
+    return e
+
+
+def test_pilot_reads_words_vectors_topics_from_unsealed_run(proj, tmp_path, monkeypatch):  # noqa: F811
+    """해제 전: '봉인됨 1건' 만(run 파일·derived\\ 를 열지 않음). 해제 뒤: 전사 낱말·벡터·주제 흐름을 해제된 run 폴더에서만
+    읽는다. 보정이 바뀌면 W_RUN_STALE(다시 만들지 않음). 합성 시범 프로젝트(tmp)만 쓴다."""
+    from app import project as pm
+    from app import seal
+    dst, wbytes = _synthetic_pilot(proj, tmp_path)
+    try:
+        e = _seal_pilot(dst, wbytes, monkeypatch)
+        pdata = pm.open_project(dst).data
+        pid = pdata["project_id"]
+        run_dirs = [os.path.join(seal.default_ai_root(dst), pid, d) for d in ("sealed", "runs", "words", "vectors",
+                                                                             "topics")]
+        vec_calls = []
+
+        def fake_read_vectors(root, run_id, *, ai_root=None, reader_kind=None):
+            """seal.read_vectors 자리(벡터 짝은 seal 담당 몫 — 여기서는 '해제된 run 에서만 부른다' 만 본다)."""
+            vec_calls.append(run_id)
+            u = [x for x in seal.unseal_events(root)[0] if x["run_id"] == run_id]
+            assert u, "해제 전 run 의 벡터를 읽으려 했다"
+            return _vec_doc(json.loads(wbytes))
+        monkeypatch.setattr(seal, "read_vectors", fake_read_vectors, raising=False)
+
+        # 1) 해제 전: 봉인됨 1건, run·derived 0회
+        seen = _derived_watch(monkeypatch, [dst], also=run_dirs)
+        assert vf.unsealed_runs(dst) == ([], 1)
+        assert vf.words_status(dst, pdata) == (vf.W_SEALED, None)
+        ctx_, info = vf.build_context(dst, pdata)
+        assert ctx_["transcript"] == [] and ctx_["topic_blocks"] == [] and ctx_["topic_vectors"] is None
+        assert (info["words"], info["sealed_count"], info["topic_run"], info["vectors"]) == (vf.W_SEALED, 1, 0,
+                                                                                            vf.F_NO_WORDS)
+        assert seen == [] and vec_calls == []
+        monkeypatch.undo()
+        monkeypatch.setattr(seal, "read_vectors", fake_read_vectors, raising=False)
+
+        # 2) 해제(합성 리허설: 계획 없이 사유를 적어 연다 — 사용자 클릭 0, Claude 가 도구로)
+        monkeypatch.setattr(seal, "_now_iso", lambda now=None: "2026-10-30T09:00:00.000+09:00")
+        res = seal.unseal(dst, e.sha256, by="L01", early_reason="합성 리허설: 시범 해제 길")
+        assert res.record.get("words") and res.record.get("topics")
+
+        # 3) 해제 뒤: run 폴더에서만, derived\ 는 0회
+        seen = _derived_watch(monkeypatch, [dst])
+        runs, n = vf.unsealed_runs(dst)
+        assert runs == [res.run_id] and n == 0
+        code, doc, rid = vf.pilot_words(dst, pdata)
+        assert (code, rid) == (vf.W_OK, res.run_id) and WD.validate(doc) == []
+        assert vf.words_status(dst, pdata)[0] == vf.W_OK
+        ctx_, info = vf.build_context(dst, pdata)
+        assert info["words"] == vf.W_OK and info["transcript_windows"] >= 1 and ctx_["transcript"]
+        assert info["topic_run"] == 1 and info["topic_source"] == "run" and len(ctx_["topic_blocks"]) == 2
+        assert info["vectors"] == vf.F_OK and info["vector_windows"] == 1 and vec_calls == [res.run_id]
+        assert info["sealed_count"] == 0 and info["pilot"] == 1
+        assert seen == []
+        blob = json.dumps(info, ensure_ascii=False)
+        assert "보스" not in blob and "공략" not in blob                    # info 에는 숫자·코드만
+
+        # 4) 보정이 바뀌면 다시 만들 수 없으므로 W_RUN_STALE, 확인 전이면 W_UNVERIFIED_CAL
+        import copy
+        moved = copy.deepcopy(pdata)
+        for r in moved["calibration"]["revs"]:
+            r["offset_ms"] = r.get("offset_ms", 0) + 1000
+        assert vf.words_status(dst, moved) == (vf.W_RUN_STALE, None)       # 오프셋이 다르면 오래됨
+        bumped = copy.deepcopy(pdata)
+        bumped["calibration"]["active_rev"] = 99                            # 활성 판을 못 찾음 → 오래됨
+        assert vf.words_status(dst, bumped) == (vf.W_RUN_STALE, None)
+        unv = copy.deepcopy(pdata)
+        for r in unv["calibration"]["revs"]:
+            r["status"] = "unverified"
+        assert vf.words_status(dst, unv) == (vf.W_UNVERIFIED_CAL, None)
+        assert vf.words_command(dst) is None                                # 시범은 엔진 명령도 만들지 않는다
+        assert not seen
+    finally:
+        shutil.rmtree(dst)
+
+
+def test_menu_pilot_after_unseal_uses_run_words(win, proj, tmp_path, monkeypatch):  # noqa: F811
+    """메인 창: 시범 세션이 모두 잠기고 해제된 뒤 '훈련 → 시청자 훈련'(메뉴 2클릭)이 해제된 run 의 전사 낱말·주제 흐름으로
+    채점 맥락을 만든다. 엔진(전사 낱말 만들기)은 띄우지 않고 derived\\asr* 는 열지 않는다. 사용자 클릭: 메뉴 2 + 닫기 1."""
+    from app import reference_set as rsm
+    from app import seal
+    dst, wbytes = _synthetic_pilot(proj, tmp_path)
+    try:
+        e = _seal_pilot(dst, wbytes, monkeypatch)
+        monkeypatch.setattr(seal, "_now_iso", lambda now=None: "2026-10-30T09:00:00.000+09:00")
+        seal.unseal(dst, e.sha256, by="L01", early_reason="합성 리허설: 시범 해제 길")
+        monkeypatch.setattr(rsm, "pilot_sessions_locked", lambda root: (True, []))
+        built = []
+        win.words_runner = lambda c, cancelled: built.append(1) or {}
+        _open(win, dst, None)
+        assert win.a_viewer_training.isEnabled(), win.a_viewer_reason.text()
+        seen = _derived_watch(monkeypatch, [dst])
+        win.a_viewer_training.trigger()                                     # 메뉴 한 번
+        view = win.viewer_view
+        assert view is not None and built == []
+        assert view._context["transcript"] and len(view._context["topic_blocks"]) == 2
+        assert not [s for s in seen if os.sep + "asr" in s[1]], seen
+        win.close_viewer_training()
+        win.show_home()
+    finally:
+        shutil.rmtree(dst)
+
+
+def test_words_note_sealed_shows_count():
+    """상태 줄 안내: 시범 봉인 중이면 '봉인됨 n건'(D-18 3). 건수를 모르면 고정 글, 안내 없는 코드는 None."""
+    assert "봉인됨 2건" in vf.words_note(vf.W_SEALED, 2)
+    assert vf.words_note(vf.W_SEALED, None) == vf.WORDS_NOTE_KO[vf.W_SEALED]
+    assert vf.words_note(vf.W_SEALED, 0) == vf.WORDS_NOTE_KO[vf.W_SEALED]
+    assert vf.words_note(vf.W_UNVERIFIED_CAL, 3) == vf.WORDS_NOTE_KO[vf.W_UNVERIFIED_CAL]
+    assert vf.words_note(vf.W_OK, 1) is None and vf.words_note(None) is None
+
+
+def test_pilot_run_order_prefers_engine_version(proj, tmp_path, monkeypatch):  # noqa: F811
+    """해제된 run 이 둘이면 해제 기록의 엔진 판이 높은 run 의 짝을 먼저 본다(analysis_flow.run_order). 판이 없으면 늦게 푼 것."""
+    from types import SimpleNamespace
+    from app import analysis_flow as af
+    from app import seal
+    entries = [SimpleNamespace(run_id="run-a", unsealed_at="2026-10-30T09:00", engine_version="link-v0.3"),
+               SimpleNamespace(run_id="run-b", unsealed_at="2026-10-30T10:00", engine_version="0.1.0")]
+    st = SimpleNamespace(entries=entries, sealed_count=0)
+    monkeypatch.setattr(seal, "seal_status", lambda root, **k: st)
+    asked = []
+
+    def fake_words(root, rid, **k):
+        asked.append(rid)
+        return None
+    monkeypatch.setattr(seal, "read_words", fake_words)
+    pilot = str(tmp_path / "projects" / "pilot-합성")
+    assert vf.unsealed_runs(pilot) == (["run-a", "run-b"], 0)
+    assert vf.pilot_words(pilot, {}) == (vf.W_RUN_NO_WORDS, None, None) and asked == ["run-a", "run-b"]
+    entries[0].engine_version = None                                       # 판을 모르면 늦게 푼 것 먼저
+    assert af.run_order(st) == ["run-b", "run-a"]
+    for e in entries:
+        e.engine_version = None
+    assert af.run_order(st) == ["run-b", "run-a"]
 
 
 def test_words_command_runs_engine(tmp_path, proj):  # noqa: F811

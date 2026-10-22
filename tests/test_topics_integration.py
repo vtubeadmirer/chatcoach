@@ -214,6 +214,8 @@ def test_menu_seals_sibling_topics_then_track_and_summary(win, proj, tmp_path, m
     dlg = win.broadcast_summary_view(show=False)
     assert dlg is not None and dlg.view.row_count() == 2 and not dlg.view.is_sealed()
     assert dlg.data.reaction_source == "final_set" and "run-synth-a" in dlg.windowTitle()
+    # 창 제목의 run 옆에 해제 기록의 엔진 판(23 5-2 의 10) — '판 X' 또는 '판 모름'
+    assert f"run run-synth-a · {af.version_text(dlg.data.topic_engine_version)}" in dlg.windowTitle()
     assert [r["chat_count"] for r in dlg.view.export_rows()] == [3, 3]
     jumps = []
     dlg.view.seekRequested.connect(jumps.append)
