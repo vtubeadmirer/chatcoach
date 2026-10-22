@@ -728,6 +728,25 @@ def reopen_refusal(entry: ExistingSession, labeler_id: str | None, survey: Proje
     return None
 
 
+def auto_resume_candidate(project_root: str, project_data: dict | None, labeler_id: str,
+                          this_machine4: str | None = None) -> ExistingSession | None:
+    """시작할 때 '마지막 작업 이어서 열기'(08 D-16 메모: 한 번 누르기)로 세션 화면 없이 바로 열 세션. 없으면 None.
+
+    그 라벨러 자기 세션 가운데 이어 쓸 수 있는(잠기지 않은) 세션이 **딱 하나**이고 그것이 라벨링 세션(1차·재라벨 2종)일
+    때만. 조정·출처 판정·분석 세션은 자동으로 열지 않는다(열면 기록·노출이 남거나 검토자 일이다). 둘 이상이면 사람이
+    고르게 세션 화면을 띄운다. 읽는 것은 세션 화면과 같다(폴더 이름 + 자기 세션 파일 첫 줄)."""
+    check_labeler_id(labeler_id)
+    sv = survey_project(project_root, project_data)
+    mine = existing_sessions(project_root, labeler_id, sv, this_machine4)
+    resumable = [e for e in mine if e.resumable]
+    if len(resumable) != 1:
+        return None
+    e = resumable[0]
+    if e.session_kind not in vis.LABELING_SESSIONS or reopen_refusal(e, labeler_id, sv, mine):
+        return None
+    return e
+
+
 def exposure_notes(survey: ProjectSurvey, labeler_id: str, session_kind: str) -> list[str]:
     """고른 세션에 대한 노출 안내(D-09 5). 엔진 결과·라벨 내용은 말하지 않는다 — 기록이 남는다는 사실만."""
     notes: list[str] = []

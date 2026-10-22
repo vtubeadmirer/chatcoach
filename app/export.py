@@ -102,13 +102,17 @@ NOTES = ("CSV 는 참고용이며 다시 가져올 수 없음. 정답 원본은 
          "agreement_below_gate 는 아직 세지 않음. in_boundary_buffer 는 그 세션의 현재 구간표 경계로 셈). origin·adjudication 기록은 이 판에서 행으로 내보내지 않는다.")
 
 # 06 6-6 의 순서. 계단 집계는 이 순서에서 처음 걸린 사유 하나로만 센다.
+# recheck_incomplete 는 참고 점수에 넣으므로(08 D-16 6b) 참고 점수 대상이 갈리는 human_disagreement 다음에 센다 —
+# 참고에서도 빠지는 사유가 같이 걸린 행은 그 사유로 세어 계단표의 '참고 점수 대상' 줄이 참고 n 과 맞는다.
 EXCLUDE_ORDER = (
     "non_text_message", "in_boundary_buffer", "origin_virtual", "origin_undeterminable", "conflict_unresolved",
-    "out_of_media", "calibration_unverified", "view_exposed", "audio_not_heard", "recheck_incomplete",
+    "out_of_media", "calibration_unverified", "view_exposed", "audio_not_heard",
     "confidence_undeterminable", "grade_unclear", "adjudicated_exclude", "human_disagreement",
-    "confidence_probably", "agreement_below_gate",
+    "recheck_incomplete", "confidence_probably", "agreement_below_gate",
 )
-LENIENT_OK = frozenset({"confidence_probably", "agreement_below_gate"})
+# 참고 점수(eval.lenient)에 남겨도 되는 사유. 엄격(eval.strict)은 사유가 하나라도 있으면 뺀다.
+# recheck_incomplete: 7-2 두 번 듣기를 시범에서 권장으로 낮춰(D-16 4) 참고 점수에는 넣는다(D-16 6b)
+LENIENT_OK = frozenset({"recheck_incomplete", "confidence_probably", "agreement_below_gate"})
 EXPOSED_BLIND_WHAT = frozenset({"other_session_labels", "ai_results", "origin_info"})   # 06 6-6 view_exposed
 
 # export-row 의 키 목록(허용 목록). 행은 이 순서로 이 키만 갖는다.

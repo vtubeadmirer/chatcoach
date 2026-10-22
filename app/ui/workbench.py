@@ -104,6 +104,31 @@ PATCH_MAX_MARKERS = 64
 # 조정 모드의 hsplit 오른쪽 몫(14 4-2 의 1). 1366 창에서 오른쪽 약 790px — 영상·타임라인 칸은 약 570px 남는다
 ADJ_RIGHT_SHARE = 0.58
 ADJ_RIGHT_MIN_PX = 760
+# 칸 나누기 크기를 남기는 settings.ini 키 (값은 '왼쪽,오른쪽' 픽셀 — 되살릴 때는 비율만 쓴다)
+SPLIT_KEYS = (("hsplit", "layout/workbench_hsplit"), ("vsplit", "layout/workbench_vsplit"))
+
+
+def parse_split_sizes(value, count: int) -> list[int] | None:
+    """settings 값 '700,500'(또는 목록) → [700, 500]. 칸 수가 다르거나 음수·합 0·형식 밖이면 None."""
+    if isinstance(value, (list, tuple)):
+        value = ",".join(str(x) for x in value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        sizes = [int(x) for x in value.split(",")]
+    except ValueError:
+        return None
+    if len(sizes) != count or any(x < 0 for x in sizes) or sum(sizes) <= 0:
+        return None
+    return sizes
+
+
+def scale_split_sizes(sizes: list[int], total: int) -> list[int]:
+    """남긴 크기의 비율을 지금 폭(total)에 맞춘다. 합은 total 과 같다."""
+    s = sum(sizes)
+    out = [int(round(x * total / s)) for x in sizes[:-1]]
+    out.append(max(0, total - sum(out)))
+    return out
 # missed_candidate(④)·origin(출처 판정)·adjudication(조정)은 타임라인에 그리지 않고 그 화면에만 넘긴다.
 HEAD_KINDS = ("segment", "utterance", "reaction", "continuation", "video_check", "missed_candidate", "origin",
               "adjudication")
@@ -1029,6 +1054,8 @@ class Workbench(QWidget):
         self._label_marks_now: list[tuple[int, str]] | None = None   # 타임라인 'labels' 트랙에 지금 그린 것(부분 갱신용)
         self.timeline_patches = 0                                    # 부분 갱신으로 처리한 저장 수(시험·점검용)
         self._split_before: list[int] | None = None                  # 조정 모드에서 넓히기 전 hsplit 크기
+        # 메인 창의 settings.ini(QSettings). 칸 나누기 크기·파일 대화상자 시작 폴더를 남긴다. None 이면 남기지 않는다(시험)
+        self.settings = None
 
         # 바탕을 늘 칠한다: 작업대를 바꿀 때(다른 프로젝트·사본 열기) 닫힌 플레이어의 네이티브 창 자리에 옛 영상 그림이
         # 남아 보이던 것(실제 창 스모크 화면)을 막는다
@@ -1903,11 +1930,23 @@ class Workbench(QWidget):
             self.review.set_frame_info(self._fps, self._vfr)
 
     def choose_media_file(self) -> str | None:
-        """영상 고르기 대화상자. 시험에서는 바꿔 끼운다."""
-        start = os.path.dirname(self.media_path) if self.media_path else os.path.expanduser("~")
-        p, _ = QFileDialog.getOpenFileName(self, tr("영상 파일 고르기"), start,
+        """영상 고르기 대화상자. 시험에서는 바꿔 끼운다.
+        시작 폴더: 지금 연결된 영상의 폴더 → 마지막으로 고른 영상의 폴더(settings) → 홈."""
+        from .project_view import DIR_MEDIA, remember_dir
+        p, _ = QFileDialog.getOpenFileName(self, tr("영상 파일 고르기"), self.media_start_dir(),
                                            tr("영상 (*.mp4 *.mkv *.ts *.flv *.mov *.webm);;모든 파일 (*)"))
-        return os.path.normpath(p) if p else None
+        if not p:
+            return None
+        p = os.path.normpath(p)
+        remember_dir(self.settings, DIR_MEDIA, os.path.dirname(p))
+        return p
+
+    def media_start_dir(self) -> str:
+        from .project_view import DIR_MEDIA, last_dir
+        cur = os.path.dirname(self.media_path) if self.media_path else None
+        if cur and os.path.isdir(cur):
+            return cur
+        return last_dir(self.settings, DIR_MEDIA)
 
     def ask_replace_reason(self) -> str | None:
         txt, ok = QInputDialog.getText(self, tr("미디어 교체"),
@@ -2448,6 +2487,54 @@ class Workbench(QWidget):
         elif self._split_before is not None:
             self.hsplit.setSizes(self._split_before)
             self._split_before = None
+
+    # ---- 칸 나누기 크기 기억 (settings.ini [layout], 사용자 PC 마다)
+    def restore_splits(self) -> None:
+        """settings 에 남은 hsplit·vsplit 크기를 되살린다. 창 폭이 바뀌었을 수 있어 비율로 맞춘다.
+        아직 화면에 배치되지 않아 폭이 0 이면 이벤트 루프 뒤에 다시 본다(최대 20번)."""
+        self._split_restore_left = 20
+        self._apply_saved_splits()
+
+    def _apply_saved_splits(self) -> None:
+        s = self.settings
+        if s is None or self._closed:
+            return
+        pending = False
+        for name, key in SPLIT_KEYS:
+            sp = getattr(self, name)
+            want = parse_split_sizes(s.value(key, ""), sp.count())
+            if want is None:
+                continue
+            total = sum(sp.sizes())
+            if total <= 0:
+                pending = True
+                continue
+            sizes = scale_split_sizes(want, total)
+            if name == "hsplit" and self._split_before is not None:
+                # 조정 모드로 넓혀 둔 동안에는 넓힌 크기를 건드리지 않고, 모드를 나갈 때 돌아갈 크기만 바꾼다
+                self._split_before = sizes
+            else:
+                sp.setSizes(sizes)
+        if pending and getattr(self, "_split_restore_left", 0) > 0:
+            self._split_restore_left -= 1
+            QTimer.singleShot(50, self, self._apply_saved_splits)
+
+    def save_splits(self) -> None:
+        """지금 hsplit·vsplit 크기를 settings 에 남긴다. 조정 모드로 넓힌 동안이면 넓히기 전 크기(_split_before)를 남긴다."""
+        s = self.settings
+        if s is None:
+            return
+        wrote = False
+        for name, key in SPLIT_KEYS:
+            sp = getattr(self, name)
+            sizes = list(self._split_before) if (name == "hsplit" and self._split_before is not None) \
+                else list(sp.sizes())
+            if len(sizes) != sp.count() or sum(sizes) <= 0:
+                continue                      # 한 번도 배치되지 않은 작업대(시험 등)는 남기지 않는다
+            s.setValue(key, ",".join(str(int(x)) for x in sizes))
+            wrote = True
+        if wrote:
+            s.sync()
 
     def _sync_mode_buttons(self) -> None:
         for m, b in self.mode_buttons.items():
@@ -3528,10 +3615,12 @@ class Workbench(QWidget):
     def choose_and_export(self) -> None:
         if self.project is None or self.session is None:
             return
-        start = os.path.join(os.path.expanduser("~"), f"labels-{self.session.session_id}.zip")
+        from .project_view import DIR_EXPORT, last_dir, remember_dir
+        start = os.path.join(last_dir(self.settings, DIR_EXPORT), f"labels-{self.session.session_id}.zip")
         p, _ = QFileDialog.getSaveFileName(self, tr("라벨 내보내기"), start, tr("zip (*.zip)"))
         if not p:
             return
+        remember_dir(self.settings, DIR_EXPORT, os.path.dirname(os.path.abspath(p)))
         try:
             res = self.export_labels(os.path.normpath(p), overwrite=os.path.exists(p))
         except Exception as e:  # noqa: BLE001
@@ -3664,6 +3753,10 @@ class Workbench(QWidget):
             if self._closed:
                 return
             self._closed = True
+        try:
+            self.save_splits()               # 칸 나누기 크기를 settings.ini 에 남긴다(다음에 열 때 되살림)
+        except Exception:  # noqa: BLE001 — 닫는 길은 막지 않는다
+            LOG.exception("칸 나누기 크기 저장 실패")
         self._end_busy()                     # 바쁨 커서가 남지 않게(0ms 타이머가 오기 전에 닫힐 수 있다)
         self.detach_status_bar()
         self._filter_timer.stop()

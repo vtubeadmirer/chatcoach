@@ -166,6 +166,8 @@ def main() -> int:
         return 1
     install_error_dialog(win)
     win.session_backup = True
+    # 인자 없이 켠 실행(바탕 화면 바로 가기)만: 마지막 프로젝트·세션을 이어서 연다(설정으로 끌 수 있음, 08 D-16 메모)
+    win.resume_on_start = not args["flags"]
     win.show()
     LOG.info("창 표시: 시작 후 %.0f ms", (time.perf_counter() - _T0) * 1000)
     win.start_background_backups()

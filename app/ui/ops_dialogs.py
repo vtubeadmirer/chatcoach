@@ -31,12 +31,14 @@ KIND_KO = {
 class BackupDialog(QDialog):
     """'파일 → 프로젝트 백업…'. Accepted 면 include_chat · include_protected · out_dir(None = 기본 위치)."""
 
-    def __init__(self, parent=None, *, project_title: str = "", default_dir: str = ""):
+    def __init__(self, parent=None, *, project_title: str = "", default_dir: str = "", start_dir: str = ""):
+        """start_dir: [다른 폴더…] 대화상자가 처음 열릴 폴더(메인 창이 마지막으로 쓴 백업 폴더를 넘긴다)."""
         super().__init__(parent)
         self.setWindowTitle(tr("프로젝트 백업"))
         self.setMinimumWidth(460)
         self.out_dir: str | None = None
         self.default_dir = default_dir
+        self.start_dir = start_dir
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel(tr("백업할 프로젝트: {0}").format(project_title or "-")))
         self.cb_chat = QCheckBox(tr("채팅 원문 포함 (chat\\messages.jsonl)"))
@@ -83,7 +85,8 @@ class BackupDialog(QDialog):
         self.where.setText(tr("저장 위치: {0}").format(self.out_dir or (self.default_dir or tr("기본 위치"))))
 
     def _choose_dir(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, tr("백업 저장 폴더"), self.out_dir or "")
+        d = QFileDialog.getExistingDirectory(self, tr("백업 저장 폴더"),
+                                             self.out_dir or self.start_dir or self.default_dir or "")
         if d:
             self.set_out_dir(os.path.normpath(d))
 

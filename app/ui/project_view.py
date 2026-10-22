@@ -70,6 +70,47 @@ def remove_recent(settings: QSettings, path: str) -> list[str]:
     return items
 
 
+# --------------------------------------------------------------------------- 파일 대화상자의 시작 폴더
+# settings.ini [dialogs] 에 마지막으로 쓴 폴더를 남긴다(경로 문자열만). 대화상자는 그 폴더에서 연다.
+DIR_PROJECT = "dialogs/project_dir"     # 프로젝트 폴더 고르기: 고른 프로젝트의 상위 폴더(프로젝트들이 있는 곳)
+DIR_MEDIA = "dialogs/media_dir"         # 영상 파일 연결
+DIR_EXPORT = "dialogs/export_dir"       # 라벨 내보내기 저장
+DIR_BACKUP = "dialogs/backup_dir"       # 백업 저장 폴더 · 되살릴 백업 zip
+
+
+def last_dir(settings, key: str, fallback: str | None = None) -> str:
+    """settings 에 남은 폴더(지금도 있는 것만). 없으면 fallback, 그것도 없으면 홈 폴더."""
+    v = settings.value(key, "") if settings is not None else ""
+    if isinstance(v, str) and v and os.path.isdir(v):
+        return v
+    if fallback and os.path.isdir(fallback):
+        return fallback
+    return os.path.expanduser("~")
+
+
+def remember_dir(settings, key: str, folder: str | None) -> None:
+    """고른 폴더를 남긴다. 폴더가 아니면(빈 값·없는 경로) 남기지 않는다."""
+    if settings is None or not folder or not os.path.isdir(folder):
+        return
+    settings.setValue(key, os.path.normpath(folder))
+    settings.sync()
+
+
+def default_projects_dir(data_root: str | None = None) -> str:
+    """기억한 폴더가 없을 때 프로젝트 폴더 고르기의 시작 위치.
+
+    ① <앱 폴더의 상위>\\chatcoach-data\\projects (소스 실행이면 저장소 옆, 시범 프로젝트 자리)
+    ② <데이터 폴더>\\projects (paths.projects_root 와 같은 자리)  ③ 홈 폴더. 있는 폴더만 고른다(만들거나 열지 않는다)."""
+    from .. import paths
+    cands = [os.path.join(os.path.dirname(paths.install_root()), "chatcoach-data", "projects")]
+    if data_root:
+        cands.append(os.path.join(data_root, "projects"))
+    for c in cands:
+        if os.path.isdir(c):
+            return c
+    return os.path.expanduser("~")
+
+
 # --------------------------------------------------------------------------- 열기
 @dataclass
 class OpenOutcome:
@@ -146,6 +187,7 @@ class ProjectView(QWidget):
         self.settings = settings
         self.lock_factory = lock_factory
         self.before_open: Callable[[str], None] | None = None   # open_checked 직전에 부른다(창이 같은 프로젝트를 닫게)
+        self.data_root: str | None = None     # 메인 창이 준다: 기억한 폴더가 없을 때 시작 위치 후보(<data>\projects)
         lay = QVBoxLayout(self)
         title = QLabel(tr("최근 프로젝트"))
         title.setObjectName("panelTitle")
@@ -205,15 +247,24 @@ class ProjectView(QWidget):
             self.refresh()
 
     # ------------------------------------------------------------ 열기
+    def start_folder(self) -> str:
+        """프로젝트 폴더 고르기의 시작 위치: 마지막으로 연 프로젝트들의 상위 폴더 → 기본 위치(default_projects_dir)."""
+        return last_dir(self.settings, DIR_PROJECT, default_projects_dir(self.data_root))
+
     def choose_folder(self) -> str | None:
         """폴더 고르기 대화상자. 시험에서는 이 메서드를 바꿔 끼운다."""
-        start = self._selected_path() or os.path.expanduser("~")
-        d = QFileDialog.getExistingDirectory(self, tr("프로젝트 폴더 고르기"), start)
+        d = QFileDialog.getExistingDirectory(self, tr("프로젝트 폴더 고르기"), self.start_folder())
         return d or None
 
     def choose_and_open(self) -> OpenOutcome | None:
         d = self.choose_folder()
-        return self.open_path(d) if d else None
+        if not d:
+            return None
+        outcome = self.open_path(d)
+        if outcome is not None and outcome.ok:
+            # 다음에는 이 프로젝트가 든 폴더에서 연다(프로젝트 폴더 자체가 아니라 그 상위 — 다른 프로젝트도 바로 보이게)
+            remember_dir(self.settings, DIR_PROJECT, os.path.dirname(os.path.abspath(outcome.project.root)))
+        return outcome
 
     def open_path(self, path: str | None) -> OpenOutcome | None:
         if not path:

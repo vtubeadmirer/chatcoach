@@ -108,6 +108,42 @@ def clean_line(s: str) -> str:
     return _CTRL.sub(" ", s) if _CTRL.search(s) else s
 
 
+# 치지직 이모티콘 코드 ({:101:} · {:x_12:} · {:10A:}). 화면 표시에서만 짧은 표시로 바꾼다 —
+# 저장된 본문·원문 검색·내보내기는 그대로 둔다. 공백만 사이에 둔 연속 코드는 하나로 묶는다(×개수).
+EMOTE_TOKEN = "이모티콘"
+_EMOTE_CODE = r"\{:[0-9A-Za-z_\-]{1,40}:\}"
+_EMOTE_RUN = re.compile(_EMOTE_CODE + r"(?:\s*" + _EMOTE_CODE + r")*")
+_EMOTE_ONE = re.compile(_EMOTE_CODE)
+
+
+def _emote_token(m: re.Match) -> str:
+    n = len(_EMOTE_ONE.findall(m.group(0)))
+    name = tr(EMOTE_TOKEN)
+    return f"[{name}]" if n == 1 else f"[{name}×{n}]"
+
+
+def collapse_emotes(s: str) -> str:
+    """'{:101:}{:x_12:} 안녕 {:10A:}' → '[이모티콘×2] 안녕 [이모티콘]'. 코드가 없으면 그대로(빠른 길)."""
+    if "{:" not in s:
+        return s
+    return _EMOTE_RUN.sub(_emote_token, s)
+
+
+def display_text(s: str) -> str:
+    """채팅 본문의 화면 표시(한 줄): 이모티콘 코드를 짧게 + 제어 문자를 공백으로. 저장 값은 바꾸지 않는다."""
+    return clean_line(collapse_emotes(s))
+
+
+def search_key(s: str) -> str:
+    """검색용 본문: 원문 그대로(casefold) — 이모티콘 코드가 있으면 화면 표시 글자도 뒤에 붙여 '이모티콘' 으로도 찾게 한다.
+    둘 사이는 NUL 로 나눠 검색어가 두 쪽에 걸쳐 맞지 않게 한다(검색어의 제어 문자는 입력 칸이 받지 않는다)."""
+    f = s.casefold()
+    if "{:" not in s:
+        return f
+    shown = collapse_emotes(s)
+    return f if shown == s else f + "\x00" + shown.casefold()
+
+
 class ChatData:
     """messages.jsonl 줄 묶음 → (t_ms, chat_id) 순 병렬 배열. Qt 를 쓰지 않는다(워커에서 만들어 넘겨도 된다)."""
 
@@ -148,7 +184,7 @@ class ChatData:
             s = r.get("text")
             s = s if isinstance(s, str) else ""
             texts[j] = s
-            folded[j] = s.casefold()
+            folded[j] = search_key(s)
             nk = r.get("nickname_masked")
             if isinstance(nk, str):
                 nicks[j] = nick_pool.setdefault(nk, nk)
@@ -262,7 +298,7 @@ class ChatTableModel(QAbstractTableModel):
         c = index.column()
         if role == _R_DISPLAY:
             if c == COL_TEXT:
-                return clean_line(d.texts[src])
+                return display_text(d.texts[src])
             if c == COL_TIME:
                 t = d.times[src]
                 return "—" if t == NULL_T else _fmt_hms(t)
@@ -307,7 +343,9 @@ class ChatTableModel(QAbstractTableModel):
             if c != COL_TEXT:
                 return None
             s = d.texts[src]
-            return s if len(s) > 40 or _CTRL.search(s) else None
+            if not (len(s) > 40 or _CTRL.search(s)):
+                return None
+            return collapse_emotes(s)
         if role == _R_USER:
             return d.chat_ids[src]
         return None

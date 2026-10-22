@@ -369,7 +369,7 @@ class ContinuationEditor(QWidget):
                 return
             b = e if (e is not None and e > a) else a + 120_000
             lo, hi = bisect_left(d.times, int(a)), bisect_right(d.times, int(b))
-            from ..chat_panel import KIND_CODES, clean_line, fmt_viewer_no   # 지연 import: 순환 피함
+            from ..chat_panel import KIND_CODES, display_text, fmt_viewer_no   # 지연 import: 순환 피함
             text_code = KIND_CODES["text"]
             shown = 0
             for i in range(lo, hi):
@@ -379,7 +379,7 @@ class ContinuationEditor(QWidget):
                 if shown >= RELATED_MAX_ROWS:
                     break
                 line = f"{fmt_time(d.times[i], frac_digits=0, always_hours=True)}  {fmt_viewer_no(d.vnos[i])}  " \
-                       f"{clean_line(d.texts[i])[:60]}"
+                       f"{display_text(d.texts[i])[:60]}"
                 it = QListWidgetItem(line)
                 it.setData(Qt.UserRole, cid)
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)

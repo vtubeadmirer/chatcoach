@@ -658,7 +658,7 @@ E 첫 묶음의 경계 (D-14 8, D-15 7·8): 이 장은 E단계 방송 분석 모
 | 9 | calibration_unverified | 라벨을 매길 때의 보정 판이 verified 가 아니거나, 그 뒤 보정이 크게 바뀌어 '보정 변경 후 미확인' 인 라벨 (03 4-2). `skipped` 판을 참고 점수에 넣을지는 확인 필요 | 제외 | 제외 | 행 |
 | 10 | view_exposed | 그 라벨을 만든 세션에 블라인드 대상 자료를 연 `view.exposed` 기록이 있음 (3-4). 7-1 의 봉인 조기 해제 뒤 만든 세션도 여기에 든다 | 제외 | 제외 | 행 |
 | 11 | audio_not_heard | 확인 범위를 소리로 듣지 않고 저장함 (경고 `audio_not_heard` 를 넘김, 안내서 7-2) | 제외 | 제외 | 행 |
-| 12 | recheck_incomplete | 직접·높음인데 '들었다고 인정된 회차 수' 가 recheck.min_views_direct_likely(2회) 에 못 미침. 한 회차는 소리를 켜고 확인 범위를 `heard_min_coverage`(0.9) 이상 덮어야 인정된다. 확인 기록 줄 수로 세지 않는다 (안내서 7-2, D-10 10) | 제외 | 제외 | 행 |
+| 12 | recheck_incomplete | 직접·높음인데 '들었다고 인정된 회차 수' 가 recheck.min_views_direct_likely(2회) 에 못 미침. 한 회차는 소리를 켜고 확인 범위를 `heard_min_coverage`(0.9) 이상 덮어야 인정된다. 확인 기록 줄 수로 세지 않는다 (안내서 7-2, D-10 10). 시범에서 7-2 를 권장으로 낮춰(08 D-16 4) **참고 점수에는 넣는다**(D-16 6b). 그래서 계단표에서는 16 human_disagreement 다음, 17 앞에서 센다(참고에서도 빠지는 사유가 같이 걸리면 그 사유로 셈) | 제외 | 포함 | 행 |
 | 13 | confidence_undeterminable | 확신도 '판단 불가' (안내서 1장 2) | 제외 | 제외 | 행 |
 | 14 | grade_unclear | 등급 '불명확' (D8) | 제외 | 제외 | 행 |
 | 15 | adjudicated_exclude | 조정에서 '평가 제외'(decision = exclude_from_eval) 로 정함 | 제외 | 제외 | 행 |

@@ -81,7 +81,7 @@ from ...core import rules
 from ...core import visibility as vis
 from ...core.timecode import fmt_time, parse_time, parse_timestamps
 from ...i18n import tr
-from ..chat_panel import KIND_CODES, ChatData, clean_line, fmt_viewer_no
+from ..chat_panel import KIND_CODES, ChatData, display_text, fmt_viewer_no
 from ..review_player import POST_ROLL_MS, PRE_ROLL_MS, merge_ranges, review_window
 from .continuation_editor import ContinuationEditor
 from .evidence_widget import EvidenceWidget, normalize_evidence
@@ -673,7 +673,11 @@ class ReactionEditor(QWidget):
         Ctrl+Enter 가 저장). 글자 칸은 Enter 를 부모로 넘기므로 여기서 초점 위치를 본다."""
         if (ev.key() in (Qt.Key_Return, Qt.Key_Enter) and self._open
                 and not (ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier))):
-            fw = QApplication.focusWidget() or self.focusWidget()
+            # 이 편집기 안의 초점 칸을 먼저 본다(앱 전체 초점은 다른 창의 칸일 수 있다)
+            fw = self.focusWidget()
+            if fw is None:
+                afw = QApplication.focusWidget()
+                fw = afw if (afw is not None and self.isAncestorOf(afw)) else None
             if fw is None or not (fw is self.detail or self.detail.isAncestorOf(fw)):
                 ev.accept()
                 self.quick_input(QUICK_DEFAULT)
@@ -977,7 +981,7 @@ class ReactionEditor(QWidget):
                     continue
                 cid = d.chat_ids[i]
                 line = f"{fmt_time(d.times[i], frac_digits=0, always_hours=True)}  {fmt_viewer_no(d.vnos[i])}  " \
-                       f"{clean_line(d.texts[i])[:70]}"
+                       f"{display_text(d.texts[i])[:70]}"
                 it = QListWidgetItem(line)
                 it.setData(Qt.UserRole, cid)
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
@@ -1017,7 +1021,7 @@ class ReactionEditor(QWidget):
         if i is not None:
             self.quick_target.setText(tr("채팅: {0}  {1}  {2}").format(
                 fmt_time(d.times[i], frac_digits=0, always_hours=True), fmt_viewer_no(d.vnos[i]),
-                clean_line(d.texts[i])[:80]))
+                display_text(d.texts[i])[:80]))
         else:
             self.quick_target.setText(tr("채팅: 아직 고르지 않음 ('자세히 입력' 의 목록에서 고르세요)"))
 

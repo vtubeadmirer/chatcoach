@@ -53,14 +53,18 @@ RUN_MAX_BYTES = 64 << 20
 SEAL_MAX_BYTES = 16 << 20
 
 # 06 6-6 순서 + 보고서 사유. 같은 채팅은 처음 걸린 사유 하나로만 센다.
+# recheck_incomplete 는 참고 점수에 넣으므로(08 D-16 6b) LENIENT_MARK(human_disagreement) 다음에 센다 —
+# 그래야 계단표의 '참고 점수 대상' 남은 건수가 참고 n 과 같다(app.export.EXCLUDE_ORDER 와 같은 자리).
 ORDER = (
     "non_text_message", "in_boundary_buffer", "origin_virtual", "origin_undeterminable", "ai_unevaluated",
     "conflict_unresolved", "out_of_media", "calibration_unverified", "view_exposed", "audio_not_heard",
-    "recheck_incomplete", "confidence_undeterminable", "grade_unclear", "adjudicated_exclude", "adjudicated_ambiguous",
-    "human_disagreement", "adjudicated_disagreement", "confidence_probably", "agreement_below_gate",
+    "confidence_undeterminable", "grade_unclear", "adjudicated_exclude", "adjudicated_ambiguous",
+    "human_disagreement", "recheck_incomplete", "adjudicated_disagreement", "confidence_probably",
+    "agreement_below_gate",
 )
 REPORT_ONLY = frozenset({"ai_unevaluated", "adjudicated_ambiguous", "adjudicated_disagreement"})
-LENIENT_OK = frozenset({"adjudicated_disagreement", "confidence_probably", "agreement_below_gate"})
+LENIENT_OK = frozenset({"recheck_incomplete", "adjudicated_disagreement", "confidence_probably",
+                        "agreement_below_gate"})
 LENIENT_MARK = "human_disagreement"     # 이 단계 뒤에 남은 것 = 참고 점수 대상
 GRADES_SHOWN = ("direct", "likely", "related_only", "unconfirmed")   # 표 순서 (06 4-2 예와 같음)
 AI_COLS = GRADES_SHOWN + ("unclear",)

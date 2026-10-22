@@ -64,6 +64,10 @@ AUTO_UPDATE_ENV = "CHATCOACH_AUTO_UPDATE"
 # (tools/update_roundtrip.py --rollback, 04 12-5). release 채널은 읽지 않는다.
 AUTO_ROLLBACK_ENV = "CHATCOACH_AUTO_ROLLBACK"
 UPDATE_CHANNEL_KEY = "update/channel"        # 숨은 설정 (04 6-2): stable | beta
+# [파일 → 시작할 때 마지막 작업 이어서 열기] (기본 켬, 08 D-16 메모 '한 번 누르기'): 인자 없이 켜면 마지막 프로젝트를 바로
+# 열고, 같은 라벨러의 이어 쓸 라벨링 세션이 하나뿐이면 세션 화면 없이 그 세션으로 연다(session.auto_resume_candidate)
+RESUME_KEY = "startup/resume_last"
+LAST_LABELER_KEY = "session/last_labeler"
 BACKGROUND_JOBS = frozenset({"waveform", "media_check", "media_ref", "engine", "chat_index"})   # 세션 메뉴를 막지 않는 작업대 일
 PATH_ACK_GROUP = "path_ack"                 # 앱·데이터·백업 폴더 경고(confirm)를 '그래도 계속' 한 기록
 MANUAL_GUIDE =("수동 업데이트: 앱을 끄고 릴리스 페이지에서 전체 zip 을 받아 새 폴더에 푼 뒤, 옛 폴더의 data\\ 를 "
@@ -94,6 +98,12 @@ class MainWindow(QMainWindow):
         self._stage_worker: UpdateStageWorker | None = None
         self._result: updater.CheckResult | None = None
         self._rolling_back = False
+        self._manual_check = False       # 사용자가 [업데이트 → 지금 확인] 을 눌렀나 (그때만 결과 문장을 보인다)
+        self.update_status = tr("업데이트: 아직 확인하지 않음")   # 문제 보고에 넣는 마지막 확인 상태(상태 줄에는 필요할 때만)
+        # 시작할 때 마지막 작업 이어서 열기: main.py 가 인자 없이 켠 실행에서만 True 로 둔다(시험·업데이트 뒤 실행은 끔)
+        self.resume_on_start = False
+        self._auto_resume = False        # 이어서 열기 중(choose_session 이 세션 화면 없이 고를 수 있음)
+        self._resume_note: str | None = None
         self.setWindowTitle(f"{spec.name} {__version__}")
         self.resize(760, 480)
 
@@ -116,6 +126,7 @@ class MainWindow(QMainWindow):
         self.project_view = ProjectView(self.settings, self)
         self.project_view.projectOpened.connect(self.show_workbench)
         self.project_view.before_open = self._before_open
+        self.project_view.data_root = data_root
         lay.addWidget(self.project_view, 1)
         self.stack = QStackedWidget()
         self.stack.addWidget(central)
@@ -146,6 +157,12 @@ class MainWindow(QMainWindow):
         m_file = self.menuBar().addMenu(tr("파일(&F)"))
         self._build_project_menu(m_file)
         self._build_ops_menu(m_file)
+        self.a_resume = QAction(tr("시작할 때 마지막 작업 이어서 열기"), self)
+        self.a_resume.setCheckable(True)
+        self.a_resume.setChecked(self.resume_enabled())
+        self.a_resume.toggled.connect(self.set_resume_enabled)
+        m_file.addAction(self.a_resume)
+        m_file.addSeparator()
         a_quit = QAction(tr("종료(&X)"), self)
         a_quit.setShortcut("Ctrl+Q")
         a_quit.triggered.connect(self.close)
@@ -156,7 +173,7 @@ class MainWindow(QMainWindow):
         # 니모닉은 &D: Alt+U 는 구간 폼의 '판단 불가' 단축키라 메뉴와 겹치면 둘 다 동작하지 않는다(애매한 단축키)
         m_upd = self.menuBar().addMenu(tr("업데이트(&D)"))
         a_check = QAction(tr("지금 확인(&C)"), self)
-        a_check.triggered.connect(lambda: self.check_updates(force=True))
+        a_check.triggered.connect(lambda: self.manual_check_updates())
         m_upd.addAction(a_check)
         a_manual = QAction(tr("수동 업데이트 안내(&M)"), self)
         a_manual.triggered.connect(lambda: QMessageBox.information(self, tr("수동 업데이트"), tr(MANUAL_GUIDE)))
@@ -175,8 +192,11 @@ class MainWindow(QMainWindow):
         a_about.triggered.connect(self.about)
         m_help.addAction(a_about)
 
-        self.status_chip = QLabel(tr("업데이트: 아직 확인하지 않음"))
+        # 업데이트 칩은 할 일이 있을 때만 보인다(새 버전·서명 실패·수동 업데이트 필요·지금 확인 중). 404·네트워크 실패나
+        # '최신' 은 칩을 숨겨 작업대 상태 문장(예: '구간 경계 추가(B)는 …')이 가려지지 않게 한다
+        self.status_chip = QLabel("")
         self.status_chip.setObjectName("statusChip")
+        self.status_chip.setVisible(False)
         self.statusBar().addPermanentWidget(self.status_chip)
         self.update_btn = QPushButton("")
         self.update_btn.setObjectName("updateBtn")
@@ -208,13 +228,95 @@ class MainWindow(QMainWindow):
             self.check_updates(force=False)
 
     def startup_dialogs(self) -> None:
-        """시작 알림을 차례로(겹치지 않게): 시작 인자 알림 → 경로 확인(confirm) → 업데이트 실패 뒤 되돌리기 제안."""
+        """시작 알림을 차례로(겹치지 않게): 시작 인자 알림 → 경로 확인(confirm) → 업데이트 실패 뒤 되돌리기 제안 →
+        (인자 없이 켠 실행이면) 마지막 작업 이어서 열기."""
         for flag in sorted(self.flags):
             self.notify_startup_flag(flag)
         if not self.confirm_startup_paths():
             QTimer.singleShot(0, self.close)
             return
-        self.maybe_suggest_rollback()
+        if self.maybe_suggest_rollback():
+            return                                   # 되돌리기 교체가 시작됨 — 앱이 곧 끝난다
+        if self.resume_on_start and not self.flags:
+            try:
+                self.auto_resume()
+            except Exception:  # noqa: BLE001 — 이어서 열기가 실패해도 프로젝트 화면은 그대로 쓴다
+                LOG.exception("마지막 작업 이어서 열기 실패")
+
+    # ---------------------------------------------------------------- 시작할 때 마지막 작업 이어서 열기
+    def resume_enabled(self) -> bool:
+        """설정 '시작할 때 마지막 작업 이어서 열기' (기본 켬). ini 에는 'true'·'false' 글자로 남는다."""
+        v = self.settings.value(RESUME_KEY, True)
+        return str(v).strip().lower() not in ("false", "0", "no", "off")
+
+    def set_resume_enabled(self, on: bool) -> None:
+        self.settings.setValue(RESUME_KEY, bool(on))
+        self.settings.sync()
+        if getattr(self, "a_resume", None) is not None and self.a_resume.isChecked() != bool(on):
+            self.a_resume.setChecked(bool(on))
+
+    def auto_resume(self) -> bool:
+        """최근 목록 맨 앞(마지막으로 연) 프로젝트를 연다. 세션은 choose_session 이 정한다: 마지막 라벨러의 이어 쓸 라벨링
+        세션이 하나뿐이고 프로젝트를 쓸 수 있으면 세션 화면 없이 그 세션, 아니면 지금처럼 세션 화면.
+        설정이 꺼졌거나·이미 작업대가 있거나·최근 프로젝트가 없으면(폴더가 사라짐 포함) 아무것도 하지 않는다. 열었으면 True."""
+        if not self.resume_enabled() or self.workbench is not None:
+            return False
+        recent = load_recent(self.settings)
+        if not recent:
+            return False
+        path = recent[0]
+        if not os.path.isfile(os.path.join(path, "project.json")):
+            LOG.info("마지막 프로젝트를 찾을 수 없어 이어서 열지 않습니다")
+            return False
+        self._auto_resume, self._resume_note = True, None
+        try:
+            outcome = self.project_view.open_path(path)
+        finally:
+            self._auto_resume = False
+        if outcome is None or not outcome.ok or self.workbench is None:
+            return False
+        note = self._resume_note or tr("이어서 엽니다: {0}").format(self._project_name(outcome))
+        self.statusBar().showMessage(note, 10_000)
+        return True
+
+    @staticmethod
+    def _project_name(outcome) -> str:
+        proj = outcome.project
+        data = proj.data or {}
+        return (data.get("broadcast") or {}).get("title") or data.get("slug") \
+            or os.path.basename(str(proj.root).rstrip("\\/"))
+
+    def auto_resume_session(self, outcome):
+        """이어서 열기에서 세션 화면 없이 고를 세션(SessionContext) 또는 None(→ 세션 화면).
+
+        - 프로젝트가 읽기 전용(잠금 실패·검증 실패)이거나 '업데이트 필요' 로 라벨 저장이 막혔으면 None.
+        - 마지막 라벨러(settings)가 이 PC 명부에 있고, 그 라벨러의 이어 쓸 세션이 라벨링 세션 하나뿐일 때만
+          (app.session.auto_resume_candidate — 조정·출처 판정·분석 세션은 자동으로 열지 않는다)."""
+        from .. import session as sess
+        proj = getattr(outcome, "project", None)
+        if proj is None or getattr(outcome, "read_only", True) or proj.read_only:
+            LOG.info("이어서 열기: 읽기 전용 프로젝트라 세션 화면을 띄웁니다")
+            return None
+        if updater.label_save_block_reason(self.state_path, __version__):
+            return None
+        last = self.settings.value(LAST_LABELER_KEY, "")
+        if not isinstance(last, str) or not last:
+            return None
+        try:
+            sess.check_labeler_id(last)
+            if sess.load_labelers(self.data_root).get(last) is None:
+                return None
+            mid = sess.machine_id(self.data_root)
+            e = sess.auto_resume_candidate(proj.root, proj.data, last, sess.machine4(mid))
+            if e is None:
+                return None
+            ctx = sess.resume_session(e.session_id, machine_id_value=mid)
+        except (OSError, ValueError) as ex:
+            LOG.info("이어서 열기: 세션을 고르지 못해 세션 화면을 띄웁니다 (%s)", type(ex).__name__)
+            return None
+        LOG.info("이어서 열기: 세션 %s (세션 화면 없이)", e.session_id)
+        self._resume_note = tr("이어서 엽니다: {0} · {1}").format(self._project_name(outcome), e.session_id)
+        return ctx
 
     # ---------------------------------------------------------------- 프로젝트 · 화면 전환
     def _build_project_menu(self, m_file) -> None:
@@ -261,13 +363,16 @@ class MainWindow(QMainWindow):
         return proj.root if proj is not None else None
 
     def _choose_project_dir(self, title: str) -> str | None:
-        d = QFileDialog.getExistingDirectory(self, title, os.path.join(self.data_root, "projects"))
+        """프로젝트 폴더 고르기(백업·지우기). 프로젝트 열기와 같은 시작 폴더(마지막으로 쓴 폴더 → 기본 위치)."""
+        from .project_view import DIR_PROJECT, remember_dir
+        d = QFileDialog.getExistingDirectory(self, title, self.project_view.start_folder())
         if not d:
             return None
         d = os.path.normpath(d)
         if not os.path.isfile(os.path.join(d, "project.json")):
             self.warn(title, tr("고른 폴더에 project.json 이 없습니다."))
             return None
+        remember_dir(self.settings, DIR_PROJECT, os.path.dirname(d))
         return d
 
     def _project_title(self, root: str) -> str:
@@ -316,7 +421,9 @@ class MainWindow(QMainWindow):
         except (backup.BackupError, OSError, ValueError) as e:
             self.warn(tr("프로젝트 백업"), tr("백업할 수 없습니다: {0}").format(e))
             return None
-        dlg = BackupDialog(self, project_title=self._project_title(root), default_dir=default_dir)
+        from .project_view import DIR_BACKUP, last_dir, remember_dir
+        dlg = BackupDialog(self, project_title=self._project_title(root), default_dir=default_dir,
+                           start_dir=last_dir(self.settings, DIR_BACKUP, default_dir))
         try:
             rc = (run or (lambda d: d.exec()))(dlg)
             if rc != BackupDialog.Accepted:
@@ -324,6 +431,8 @@ class MainWindow(QMainWindow):
             opts = {"include_chat": dlg.include_chat, "include_protected": dlg.include_protected, "out_dir": dlg.out_dir}
         finally:
             dlg.deleteLater()
+        if opts["out_dir"]:
+            remember_dir(self.settings, DIR_BACKUP, opts["out_dir"])   # [다른 폴더…] 로 고른 곳에서 다음에 연다
         box: dict = {}
 
         def job(_ctx):
@@ -347,11 +456,13 @@ class MainWindow(QMainWindow):
     def restore_backup_dialog(self, *, zip_path: str | None = None, dest_parent: str | None = None):
         """'파일 → 백업에서 되살리기…'. 새 폴더로만 푼다(있는 폴더를 덮지 않는다). backup.RestoreResult 또는 None."""
         from .. import backup, paths
+        from .project_view import DIR_BACKUP, last_dir, remember_dir
         if zip_path is None:
-            start = paths.backup_root()
+            start = last_dir(self.settings, DIR_BACKUP, paths.backup_root())
             zip_path, _f = QFileDialog.getOpenFileName(self, tr("되살릴 백업 zip"), start, tr("백업 (*.zip)"))
             if not zip_path:
                 return None
+            remember_dir(self.settings, DIR_BACKUP, os.path.dirname(os.path.abspath(zip_path)))
         problems = backup.verify_backup(zip_path)
         if problems:
             self.warn(tr("백업에서 되살리기"),
@@ -359,7 +470,7 @@ class MainWindow(QMainWindow):
             return None
         if dest_parent is None:
             dest_parent = QFileDialog.getExistingDirectory(self, tr("되살릴 위치(이 아래에 새 폴더를 만듭니다)"),
-                                                           os.path.join(self.data_root, "projects"))
+                                                           self.project_view.start_folder())
             if not dest_parent:
                 return None
         try:
@@ -1066,7 +1177,12 @@ class MainWindow(QMainWindow):
             a.setEnabled(False)
 
     def choose_session(self, outcome):
-        """세션 선택 화면(08 D-09 1). 고른 SessionContext, 보기 전용·취소면 None. session_chooser 가 있으면 그것을 쓴다."""
+        """세션 선택 화면(08 D-09 1). 고른 SessionContext, 보기 전용·취소면 None. session_chooser 가 있으면 그것을 쓴다.
+        시작할 때 이어서 열기(auto_resume) 중이면 먼저 auto_resume_session 으로 화면 없이 고를 수 있는지 본다."""
+        if self._auto_resume:
+            ctx = self.auto_resume_session(outcome)
+            if ctx is not None:
+                return ctx
         if self.session_chooser is not None:
             return self.session_chooser(outcome)
         from .session_dialog import SessionDialog
@@ -1111,6 +1227,7 @@ class MainWindow(QMainWindow):
         opts = {"save_block": tr(block)} if block and self.session is not None else None
         wb = Workbench(self, session=self.session, store_options=opts)   # 세션이 있으면 작업대가 app.store 로 라벨 기록을 연다
         wb.data_root = self.data_root                # 채팅 색인 캐시 자리(<data>\cache\<project_id>, 프로젝트 밖)
+        wb.settings = self.settings                  # 칸 나누기 크기 · 파일 대화상자 시작 폴더를 남길 자리
         self.workbench = wb
         wb.jobsBusyChanged.connect(self.update_session_actions)
         self.stack.addWidget(wb)
@@ -1139,6 +1256,7 @@ class MainWindow(QMainWindow):
             if avail is not None and not avail.contains(self.frameGeometry()):
                 self.move(avail.topLeft())
         wb.open_project(outcome)
+        wb.restore_splits()                          # 지난번 칸 나누기 크기(비율). 조정 모드 넓히기와 함께 돈다
         wb.setFocus()
         self.update_session_actions()
         self._note_retention(outcome)
@@ -1261,42 +1379,72 @@ class MainWindow(QMainWindow):
         """숨은 설정 [update] channel (stable | beta, 04 6-2). 모르는 값은 stable."""
         return updater.normalize_channel(self.settings.value(UPDATE_CHANNEL_KEY, "stable"))
 
+    def manual_check_updates(self) -> None:
+        """[업데이트 → 지금 확인]: 결과를 쉬운 문장으로 상태 줄에 보인다(자동 확인은 할 일이 있을 때만 보인다)."""
+        self._manual_check = True
+        self.check_updates(force=True)
+
+    def _set_chip(self, text: str, tip: str = "") -> None:
+        """업데이트 칩: 글자가 있을 때만 보인다(빈 칩이 상태 줄 자리를 차지하지 않게). 문제 보고용 상태도 같이 남긴다."""
+        self.status_chip.setText(text)
+        self.status_chip.setToolTip(tip)
+        self.status_chip.setVisible(bool(text))
+        if text:
+            self.update_status = text
+
     def check_updates(self, force: bool, on_start: bool = False) -> None:
         if self._check_worker is not None and self._check_worker.isRunning():
             return
-        self.status_chip.setText(tr("업데이트 확인 중…"))
+        if self._manual_check:
+            self._set_chip(tr("업데이트 확인 중…"))
         self._check_worker = UpdateCheckWorker(self.spec, self.installed, self.state_path, force, self.base_url, self,
                                                channel=self.update_channel(), on_start=on_start)
         self._check_worker.result.connect(self._on_check)
         self._check_worker.start()
 
+    @staticmethod
+    def quiet_failure_text(res: updater.CheckResult) -> str:
+        """조용히 넘기는 확인 실패(릴리스 없음 404·인터넷 끊김)의 쉬운 문장 — 사용자가 직접 확인했을 때만 보인다."""
+        if "404" in (res.reason or ""):
+            return tr("아직 받을 수 있는 업데이트가 없습니다")
+        return tr("지금은 업데이트를 확인할 수 없습니다. 인터넷 연결을 확인한 뒤 다시 해 보세요")
+
     def _on_check(self, res: updater.CheckResult | None) -> None:
         self._result = res
+        manual, self._manual_check = self._manual_check, False
         self.refresh_support_banner()           # 확인 결과로 min_supported·mandatory 가 바뀌었을 수 있다
         now = datetime.now().strftime("%H:%M")
         if res is None:
-            self.status_chip.setText(tr("업데이트: 아직 확인할 때가 아님 ({0})").format(now))
+            self._set_chip("")
+            self.update_status = tr("업데이트: 아직 확인할 때가 아님 ({0})").format(now)
             return
         if res.state == "failed":
-            if res.kind == "signature":
-                self.status_chip.setText(tr("서명 검증 실패 — 개발자에게 알려 주세요"))
-                self.status_chip.setToolTip(res.reason)
-            elif res.kind == "manual":
-                self.status_chip.setText(tr("수동 업데이트 필요"))
-                self.status_chip.setToolTip(res.reason + "\n" + MANUAL_GUIDE)
-            else:
-                self.status_chip.setText(tr("업데이트 확인 실패 — {0}").format(res.reason[:80]))
-                self.status_chip.setToolTip(res.reason)
             self.update_btn.setVisible(False)
+            if res.kind == "signature":
+                self._set_chip(tr("서명 검증 실패 — 개발자에게 알려 주세요"), res.reason)
+            elif res.kind == "manual":
+                self._set_chip(tr("수동 업데이트 필요"), res.reason + "\n" + MANUAL_GUIDE)
+            elif res.kind == "network":
+                # 릴리스가 아직 없음(404)·인터넷 끊김: 상태 줄에는 아무것도 띄우지 않는다(로그는 updater 가 INFO 로 남김).
+                # 사용자가 직접 [지금 확인] 을 눌렀을 때만 쉬운 문장 한 줄
+                self._set_chip("")
+                self.update_status = tr("업데이트 확인 못 함 ({0}): {1}").format(now, res.reason[:120])
+                LOG.info("업데이트 확인: 받을 수 없음 (네트워크·릴리스 없음) — 상태 줄에는 표시하지 않음")
+                if manual:
+                    self.statusBar().showMessage(self.quiet_failure_text(res), 8000)
+            else:
+                self._set_chip(tr("업데이트 확인 실패 — {0}").format(res.reason[:80]), res.reason)
             return
         if res.state == "latest":
-            self.status_chip.setText(tr("최신 (마지막 확인 {0})").format(now))
-            self.status_chip.setToolTip(res.reason)
+            self._set_chip("")
+            self.update_status = tr("최신 (마지막 확인 {0})").format(now)
             self.update_btn.setVisible(False)
+            if manual:
+                self.statusBar().showMessage(tr("지금 쓰는 버전이 최신입니다 (v{0})").format(__version__), 8000)
             return
         rel = res.release
         assert rel is not None
-        self.status_chip.setText(tr("새 버전 있음 ({0})").format(now))
+        self._set_chip(tr("새 버전 있음 ({0})").format(now))
         self.update_btn.setText(tr("새 버전 v{0}").format(rel.version))
         self.update_btn.setVisible(not res.skipped or rel.manifest.mandatory)
         if self.auto:
@@ -1538,7 +1686,7 @@ class MainWindow(QMainWindow):
         if self._result is not None and self._result.release is not None:
             self.offer_update()
         else:
-            self.check_updates(force=True)
+            self.manual_check_updates()
 
     def refresh_path_banner(self) -> None:
         """경로 경고(confirm·error·warn)와 보존 기한 한 줄. info(한글 경로 등)는 로그에만."""
@@ -1650,7 +1798,7 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- 도움말
     def copy_report(self) -> None:
         from ..report import build_report
-        text = build_report(self.log_file, {"업데이트": self.status_chip.text()})
+        text = build_report(self.log_file, {"업데이트": self.update_status})
         QGuiApplication.clipboard().setText(text)
         self.statusBar().showMessage(tr("문제 보고를 클립보드에 복사했습니다"), 4000)
 
