@@ -962,7 +962,198 @@ def render_markdown(rep: Mapping) -> str:
     return "\n".join(L)
 
 
+# ---------------------------------------------------------------------------------------------- 엔진 판끼리 견주기
+# 17 6-1 4번: 두 엔진 판(예: link v0.2 ↔ v0.3)의 다른 곳만 본다 — 같은 채팅에 다른 등급, 또는 한쪽만 반응 있음.
+# 파일을 열지 않는다. 숫자·분류·등급·chat_id·시각·run_id 만 돌려준다(근거·본문 없음).
+RUN_DIFF_VALUES = ("direct", "likely", "related_only", "unclear", "unconfirmed", "absent")
+RD_SAME = "same"
+RD_GRADE_DIFF = "grade_diff"      # 두 판 모두 등급이 있는데 다르다
+RD_A_ONLY = "a_only"              # A 는 등급(반응 있음 쪽), B 는 반응 미확인이거나 그 채팅을 내지 않음
+RD_B_ONLY = "b_only"
+RD_KINDS = (RD_GRADE_DIFF, RD_A_ONLY, RD_B_ONLY)
+_RD_GRADES = ("direct", "likely", "related_only", "unclear")
+
+
+def _run_values(result: Mapping) -> tuple[dict[str, tuple[str, int | None]], dict]:
+    """ai-result(1판 또는 engine/link 2판 초안) → chat_id → (값, 채팅 시각). 같은 chat_id 는 첫 줄만(06 6-2).
+    graded 인데 등급이 없는 줄은 비교에서 뺀다(08 D-17 1). 값은 RUN_DIFF_VALUES 의 'absent' 밖 다섯 개."""
+    out: dict[str, tuple[str, int | None]] = {}
+    st = {"rows": 0, "duplicates": 0, "invalid": 0, "graded_no_grade": 0}
+    rows = result.get("reactions") if isinstance(result, Mapping) else None
+    for r in rows if isinstance(rows, list) else ():
+        if not isinstance(r, Mapping) or not isinstance(r.get("chat_id"), str) or not r["chat_id"]:
+            st["invalid"] += 1
+            continue
+        cid = r["chat_id"]
+        if cid in out:
+            st["duplicates"] += 1
+            continue
+        res, g = r.get("result"), r.get("grade")
+        if res == "unconfirmed":
+            v = "unconfirmed"
+        elif res == "graded" and g in _RD_GRADES:
+            v = g
+        elif res == "graded":
+            st["graded_no_grade"] += 1
+            out[cid] = ("", None)              # 첫 줄 자리는 차지한다(뒤 중복이 대신 들어오지 않게)
+            continue
+        else:
+            st["invalid"] += 1
+            continue
+        t = r.get("chat_t_ms")
+        out[cid] = (v, t if _is_int(t) else None)
+        st["rows"] += 1
+    return {k: v for k, v in out.items() if v[0]}, st
+
+
+def _human_values(rows: Iterable | None) -> dict[str, str]:
+    """사람 최종 세트 행(export-row 모양) → chat_id → 값. 반응 행만, effective=false·conflict=true 는 뺀다.
+    같은 chat_id 가 둘 이상이면 조정 값(source=adjudication)이 앞선다. 등급 없는 graded 는 뺀다."""
+    out: dict[str, str] = {}
+    adj: set[str] = set()
+    for row in rows or ():
+        if not isinstance(row, Mapping) or row.get("label_kind") != "reaction":
+            continue
+        if row.get("effective") is False or row.get("conflict") is True:
+            continue
+        cid = row.get("chat_id")
+        if not isinstance(cid, str) or not cid:
+            continue
+        res, g = row.get("result"), row.get("grade")
+        v = "unconfirmed" if res == "unconfirmed" else g if res == "graded" and g in _RD_GRADES else None
+        if v is None:
+            continue
+        is_adj = row.get("source") == "adjudication"
+        if cid in out and not (is_adj and cid not in adj):
+            continue
+        out[cid] = v
+        if is_adj:
+            adj.add(cid)
+    return out
+
+
+def _rd_kind(a: str, b: str) -> str | None:
+    """두 판의 값 → 다른 곳 종류. 같으면 RD_SAME, 둘 다 반응 없음(미확인·없음)이면 None(다른 곳이 아님)."""
+    if a == b:
+        return RD_SAME
+    ga, gb = a in _RD_GRADES, b in _RD_GRADES
+    if ga and gb:
+        return RD_GRADE_DIFF
+    if ga:
+        return RD_A_ONLY
+    if gb:
+        return RD_B_ONLY
+    return None
+
+
+def _engine_of(result: Mapping) -> dict:
+    e = result.get("engine") if isinstance(result.get("engine"), Mapping) else {}
+    return {"name": e.get("name") if isinstance(e.get("name"), str) else None,
+            "version": e.get("version") if isinstance(e.get("version"), str) else None}
+
+
+def diff_results(result_a: Mapping, result_b: Mapping, *, human: Iterable | Mapping | None = None,
+                 chat_times: Mapping[str, int] | None = None) -> dict:
+    """두 엔진 판의 판정을 chat_id 로 맞춰 다른 곳만 뽑는다 (17 6-1 4번). 파일을 열지 않는다.
+
+    result_a·result_b: ai-result dict(봉인 해제된 것 — 해제 확인은 부르는 쪽 몫, compare_runs 는 직접 확인한다).
+    human: 사람 최종 세트 행 목록(export-row 모양) 또는 chat_id → 값 dict. 주면 다른 곳마다 어느 판이 사람과 같은지 센다.
+    chat_times: chat_id → 채팅 VOD 시각(ms). 없으면 각 판의 chat_t_ms.
+
+    돌려주는 것:
+      a·b: {run_id, engine{name,version}, rows, duplicates, invalid, graded_no_grade}
+      counts: both · same · grade_diff · a_only · b_only · unpaired_no_reaction(한쪽 미확인·다른 쪽 없음 등) ·
+              only_in_a · only_in_b(그 판에만 있는 채팅 수)
+      table: A 값 → B 값 → 건수 (RUN_DIFF_VALUES, absent 끼리는 0)
+      human: None 또는 {a_matches, b_matches, neither, no_human} — 다른 곳 가운데서만 센다
+      items: 다른 곳 목록 [{chat_id, t_ms, kind, a, b, human, closer}] (시각 순, 시각 없는 것은 뒤).
+             closer = 'a' · 'b' · 'neither'(둘 다 사람과 다름) · None(사람 판정 없음)
+    두 판의 대상 영상(target.video_no)이 다르면 AICompareError.
+    """
+    if not isinstance(result_a, Mapping) or not isinstance(result_b, Mapping):
+        raise AICompareError("견줄 두 판이 dict 가 아닙니다")
+    va = (result_a.get("target") or {}).get("video_no") if isinstance(result_a.get("target"), Mapping) else None
+    vb = (result_b.get("target") or {}).get("video_no") if isinstance(result_b.get("target"), Mapping) else None
+    if va is not None and vb is not None and va != vb:
+        raise AICompareError("두 판의 대상 영상(target.video_no)이 다릅니다")
+    a, sa = _run_values(result_a)
+    b, sb = _run_values(result_b)
+    hv: dict[str, str] | None
+    if human is None:
+        hv = None
+    elif isinstance(human, Mapping):
+        hv = {k: v for k, v in human.items() if isinstance(k, str) and v in RUN_DIFF_VALUES and v != "absent"}
+    else:
+        hv = _human_values(human)
+    table = {x: {y: 0 for y in RUN_DIFF_VALUES} for x in RUN_DIFF_VALUES}
+    counts = {"both": 0, RD_SAME: 0, RD_GRADE_DIFF: 0, RD_A_ONLY: 0, RD_B_ONLY: 0, "unpaired_no_reaction": 0,
+              "only_in_a": 0, "only_in_b": 0}
+    hc = {"a_matches": 0, "b_matches": 0, "neither": 0, "no_human": 0} if hv is not None else None
+    items: list[dict] = []
+    for cid in set(a) | set(b):
+        av_, at = a.get(cid, ("absent", None))
+        bv_, bt = b.get(cid, ("absent", None))
+        if cid in a and cid in b:
+            counts["both"] += 1
+        elif cid in a:
+            counts["only_in_a"] += 1
+        else:
+            counts["only_in_b"] += 1
+        table[av_][bv_] += 1
+        kind = _rd_kind(av_, bv_)
+        if kind is None:
+            counts["unpaired_no_reaction"] += 1
+            continue
+        counts[kind] += 1
+        if kind == RD_SAME:
+            continue
+        t = chat_times.get(cid) if chat_times is not None and _is_int(chat_times.get(cid)) else (at if at is not None else bt)
+        h = hv.get(cid) if hv is not None else None
+        closer = None
+        if hc is not None:
+            if h is None:
+                hc["no_human"] += 1
+            elif h == av_:
+                closer = "a"
+                hc["a_matches"] += 1
+            elif h == bv_:
+                closer = "b"
+                hc["b_matches"] += 1
+            else:
+                closer = "neither"
+                hc["neither"] += 1
+        items.append({"chat_id": cid, "t_ms": t, "kind": kind, "a": av_, "b": bv_, "human": h, "closer": closer})
+    items.sort(key=lambda it: (it["t_ms"] is None, it["t_ms"] if it["t_ms"] is not None else 0, it["chat_id"]))
+    side = lambda res, st: {"run_id": res.get("run_id") if isinstance(res.get("run_id"), str) else None,  # noqa: E731
+                            "engine": _engine_of(res), **st}
+    return {"a": side(result_a, sa), "b": side(result_b, sb), "counts": counts, "table": table, "human": hc,
+            "items": items}
+
+
+def compare_runs(run_a: Mapping, run_b: Mapping, *, final=None, chat_times: Mapping[str, int] | None = None) -> dict:
+    """봉인 해제된 두 run({result, sha256, sealed, unsealed} — load_unsealed_run 결과)의 다른 곳 (17 6-1 4번).
+
+    두 run 모두 check_run(해제 기록·해시·06 6-2 형식)을 통과해야 한다. 아니면 RunNotUnsealedError·RunInvalidError —
+    다른 쪽 내용을 보기 전에 멈춘다. 같은 run 둘이면 AICompareError.
+    final: export.build_final_set 결과(또는 {items} dict). 주면 set=final 이고 eval.lenient 인 행을 사람 판정으로 쓴다
+    (나란히 보기·참고 점수와 같은 모집단). 돌려주는 것: diff_results 결과 + a·b 에 sha256 앞 8자·해제 시각."""
+    ia, ib = check_run(run_a), check_run(run_b)
+    if ia["sha256"] == ib["sha256"] or ia["run_id"] == ib["run_id"]:
+        raise AICompareError("같은 run 끼리는 견주지 않습니다")
+    human = None
+    if final is not None:
+        items, _seg, _conf = _items_of(final)
+        human = [it["row"] for it in items if it.get("set") == "final" and isinstance(it.get("row"), Mapping)
+                 and ((it["row"].get("eval") or {}).get("lenient") is True)]
+    out = diff_results(run_a["result"], run_b["result"], human=human, chat_times=chat_times)
+    for key, info in (("a", ia), ("b", ib)):
+        out[key].update({"sha8": info["sha256"][:8], "unsealed_at": info["unsealed_at"],
+                         "presealed": info["presealed"]})
+    return out
+
+
 __all__ = [
+    "RUN_DIFF_VALUES", "RD_SAME", "RD_GRADE_DIFF", "RD_A_ONLY", "RD_B_ONLY", "RD_KINDS", "diff_results", "compare_runs",
     "AICompareError", "RunNotUnsealedError", "RunInvalidError", "AICompareBlindError", "ReportResult",
     "check_run", "validate_result", "compare", "reaction_metrics", "segment_metrics", "cascade",
     "load_unsealed_run", "reader_block_reason", "build_report", "write_report", "make_report",

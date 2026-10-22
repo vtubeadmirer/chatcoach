@@ -281,6 +281,15 @@ def test_run_writes_report_without_note(tmp_path):
     assert "재현율" in txt and "혼동표" in txt and NOTE_SECRET not in txt
 
 
+def test_format_report_states_scope(tmp_path):
+    """보고서 첫 줄은 쓴 범위와 출처를 밝힌다 — 범위가 없으면 '파일 전체' 라고 쓴다(link-v03 측정 고침)."""
+    rep = S.run(write_labels(tmp_path / "l.csv"), _write_link(tmp_path))
+    whole = S.format_report({**rep, "scope": {"start_ms": None, "end_ms": None, "source": "none"}}).splitlines()[0]
+    assert whole.startswith("범위: 없음") and "파일 전체" in whole
+    part = S.format_report({**rep, "scope": {"start_ms": 1000, "end_ms": 2000, "source": "cli"}}).splitlines()[0]
+    assert part.startswith("범위: 1000 ~ 2000") and "(cli)" in part
+
+
 def _run_cli(*args):
     return subprocess.run([sys.executable, "-m", "engine", *args], cwd=ROOT, capture_output=True, timeout=60)
 

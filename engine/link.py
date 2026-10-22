@@ -9,8 +9,17 @@
   ai-result 형식 schema_version 2 초안(측정 문서 2장에 정의). schemas/ai-result.schema.json(v1)은 고치지 않았다.
   to_v1() 로 v1 스키마에 맞는 부분만 뽑을 수 있다.
 
-실행(저장소 루트에서. 무거운 의존성이 없어 앱 .venv 로도 돈다)
+실행(저장소 루트에서. v0.2 는 무거운 의존성이 없어 앱 .venv 로도 돈다)
   python -m engine.link --project <폴더> --out <결과.json> [--start-ms 0] [--end-ms 300000] [--review-csv <csv>]
+      [--engine v0.3|v0.2] [--semantic-backend onnx|lmstudio|off] [--models-dir D]
+
+판(版)
+  v0.2 (engine.version '0.1.0')  글자 겹침·시간 창 위주. link(..., semantic=None) — 2026-10-21 판 그대로.
+  v0.3 (engine.version 'link-v0.3')  v0.2 에 의미 비교(engine/semantic.py, 로컬 임베딩)를 더한다(08 D-17 6).
+        의미 점수는 기존 증거 키(답의 형태·고유 내용·같은 주제)로만 매핑한다. rules 의 키 7종은 그대로.
+        등급을 못 고른 graded 줄은 엔진이 직접 '반응 미확인' 으로 정한다(D-17 1).
+        모델·실행기가 없으면 v0.2 로 물러나고 결과의 semantic 칸에 그렇게 적는다(오프라인에서도 돈다).
+  CLI 기본은 v0.3, 파이썬 API(run·build_doc) 기본은 v0.2 다.
 
 결과·표준 출력에 채팅 본문·닉네임·전사문을 넣지 않는다. 근거 한 줄은 시각과 증거 이름만 쓴다.
 """
@@ -33,9 +42,12 @@ from app.core.rules import EVIDENCE_KEYS, RuleConfig
 from app.core.timecode import Calibration, calibration_from_json, chat_to_video_ms, fmt_display, video_to_chat_ms
 
 from . import features as F
+from . import semantic as S      # 표준 라이브러리만 쓴다. 무거운 실행기(onnxruntime)는 load_default 안에서만 부른다
 
 ENGINE_NAME = "chatcoach-link"
-ENGINE_VERSION = "0.1.0"
+ENGINE_VERSION = "0.1.0"           # v0.2 규칙까지(판 번호를 올리지 않았다)
+ENGINE_VERSION_V03 = "link-v0.3"   # 의미 비교가 실제로 돈 결과만 이 값을 쓴다
+ENGINES = ("v0.2", "v0.3")
 RESULT_SCHEMA_VERSION = 2          # 초안. 스키마 파일은 v1 그대로(측정 문서 2장)
 
 EVIDENCE_LABEL = {
@@ -330,9 +342,53 @@ def _confidence(grade: str | None, gc: rules.GradeConditions) -> tuple[str | Non
     return "undeterminable", margin
 
 
+SEMANTIC_KEYS = ("answer_form", "unique_content", "same_topic")   # 의미 점수가 켤 수 있는 기존 증거 키
+
+
+def _merged_text(utts: Sequence[Utterance], i: int, cfg: LinkConfig) -> str:
+    """i 번 조각과, 그 시작부터 merge_follow_ms 안에 시작하는 뒤 조각들을 이어 붙인 글(v0.2 와 같은 규칙)."""
+    u = utts[i]
+    if cfg.merge_follow_ms <= 0:
+        return u.text
+    parts, j = [u.text], i + 1
+    while j < len(utts) and utts[j].start_ms <= u.start_ms + cfg.merge_follow_ms:
+        parts.append(utts[j].text)
+        j += 1
+    return " ".join(parts)
+
+
+def _semantic_pick(grade: str | None, gc: rules.GradeConditions, sem: Sequence,
+                   scfg) -> tuple[str | None, int | None, str | None]:
+    """v0.3: 의미 점수로 후보 고르기를 돕는다. (등급, 고른 후보 index 또는 None, 사유 또는 None).
+
+    1. '높음' 후보가 여럿이라 불명확(후보 여럿)이면, 의미 유사도 1·2위 차가 tie_margin 이상일 때 1위를 '높음' 으로 정한다.
+       비슷한 채팅 때문에 불명확한 것은 건드리지 않는다(어느 채팅인지의 문제라 발화 뜻으로 가릴 수 없다).
+    2. 그 밖에는 같은 단계·같은 점수 후보 가운데 의미 유사도가 가장 높은 후보를 대표로 고른다(점수·근거용).
+    """
+    def s(i):
+        v = sem[i].sim if i < len(sem) else None
+        return -1.0 if v is None else v
+    if grade == "unclear" and gc.tied and "similar_chat_nearby" not in gc.reasons:
+        likes = sorted((c for c in gc.per_candidate if c.tier == "likely"), key=lambda c: -s(c.index))
+        if len(likes) >= 2 and s(likes[0].index) >= 0 and s(likes[0].index) - s(likes[1].index) >= scfg.tie_margin:
+            return "likely", likes[0].index, "semantic_tie_resolved"
+        return grade, None, None
+    b = gc.best()
+    if grade is None or b is None:
+        return grade, None, None
+    same = [c for c in gc.per_candidate if c.tier == b.tier and c.score == b.score]
+    if len(same) >= 2:
+        top = max(same, key=lambda c: (s(c.index), -c.index))
+        if top.index != b.index:
+            return grade, top.index, "semantic_best"
+    return grade, None, None
+
+
 def link(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms: int | None = None,
-         end_ms: int | None = None) -> tuple[list[dict], dict]:
-    """채팅마다 반응 초안 1줄. (reactions, stats) 를 돌려준다. 순수 계산(입력은 Inputs 로 받는다)."""
+         end_ms: int | None = None, semantic=None) -> tuple[list[dict], dict]:
+    """채팅마다 반응 초안 1줄. (reactions, stats) 를 돌려준다. 순수 계산(입력은 Inputs 로 받는다).
+
+    semantic: engine.semantic.SemanticScorer 이면 v0.3(의미 비교), None 이면 v0.2 그대로."""
     cal, fs = inp.calibration, inp.file_start_in_vod_ms
     utts = inp.utterances
     u_starts = [u.start_ms for u in utts]
@@ -350,6 +406,14 @@ def link(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms: int | None = 
           "chats_with_window_utterance": 0, "chats_with_candidate": 0, "window_truncated_by_audio_end": 0,
           "nickname_unknown": 0, "similar_chat_flagged": 0, "on_topic_flagged": 0,
           "evidence_present": {k: 0 for k in EVIDENCE_KEYS}}
+    if semantic is not None:
+        # 한 번에 묶어 encode 한다(채팅마다 몇 개씩 부르면 실행기 호출이 수천 번이 된다)
+        semantic.index.prefetch([c.text for c in chats if (start_ms is None or c.t_ms >= start_ms)
+                                 and (end_ms is None or c.t_ms < end_ms) and semantic.usable_chat(c.text)]
+                                + [u.text for u in utts] + [_merged_text(utts, i, cfg) for i in range(len(utts))])
+        st["semantic"] = {"chats_scored": 0, "pairs_scored": 0, "candidates_added": 0,
+                          "mapped_only": {k: 0 for k in SEMANTIC_KEYS}, "tie_resolved": 0, "best_reordered": 0,
+                          "graded_none_to_unconfirmed": 0}
     for ci, ch in enumerate(chats):
         if start_ms is not None and ch.t_ms < start_ms:
             continue
@@ -399,22 +463,39 @@ def link(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms: int | None = 
 
         cands, cand_meta = [], []
         prior_texts = [u.text for u in prior]
+        merged_list = [_merged_text(utts, lo + k_off, cfg) for k_off in range(len(window))]
+        sem_rows: list = []
+        if semantic is not None and window:
+            # 맥락 = 채팅 앞 prior_lookback ~ 시간 창 끝의 발화(조각 글). base(중앙값)를 잰다.
+            ctx_texts = prior_texts + [u.text for u in window]
+            sem_rows = semantic.score_chat(ch.text, merged_list, [u.text for u in window], ctx_texts, prior_texts)
+            scored = sum(1 for r in sem_rows if r.sim is not None)
+            st["semantic"]["chats_scored"] += bool(scored)
+            st["semantic"]["pairs_scored"] += scored
+        cand_sem = []
         for k_off, u in enumerate(window):
             uv = video_to_chat_ms(u.start_ms, cal, fs)
-            merged = u.text
-            if cfg.merge_follow_ms > 0:
-                parts, j = [u.text], lo + k_off + 1
-                while j < len(utts) and utts[j].start_ms <= u.start_ms + cfg.merge_follow_ms:
-                    parts.append(utts[j].text)
-                    j += 1
-                merged = " ".join(parts)
+            merged = merged_list[k_off]
             ev = evidence_for(ch, u, v, nicknames=nick_list, prior_texts=prior_texts, cfg=cfg, utt_vod_ms=uv,
                               merged_text=merged)
+            sem_only: list[str] = []
+            if sem_rows:
+                had_other = any(ev[k]["present"] for k in EVIDENCE_KEYS if k != "within_time_window")
+                for k, on in sem_rows[k_off].mapped().items():
+                    if on and not ev[k]["present"]:
+                        ev[k] = {"present": True, "at_ms": uv}
+                        sem_only.append(k)
+                if sem_only and not had_other:
+                    st["semantic"]["candidates_added"] += 1
             # 시간 창 말고 다른 증거가 하나도 없는 발화는 후보로 올리지 않는다(시간 근접만으로 연결하지 않음)
             if not any(ev[k]["present"] for k in EVIDENCE_KEYS if k != "within_time_window"):
                 continue
+            for k in sem_only:
+                st["semantic"]["mapped_only"][k] += 1
             cands.append({"evidence": ev})
             cand_meta.append((u, uv, merged))
+            if semantic is not None:
+                cand_sem.append((sem_rows[k_off] if sem_rows else None, sem_only))
         st["window_utterances_total"] += len(window)
         st["candidates_total"] += len(cands)
         st["chats_with_window_utterance"] += bool(window)
@@ -435,36 +516,63 @@ def link(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms: int | None = 
             bmerged = cand_meta[gb.index][2]
             strong_unique = not any(repeated_in(chats[j].text, bmerged, cfg) for j in similar_idx)
         grade = _pick_grade(gc, strong_unique=strong_unique)
+        result = gc.result
+        reasons = list(gc.reasons)
+        pick = None
+        if semantic is not None:
+            sems = [r if r is not None else S.SKIPPED for r, _ in cand_sem]
+            grade, pick, why = _semantic_pick(grade, gc, sems, semantic.cfg)
+            if why == "semantic_tie_resolved":
+                st["semantic"]["tie_resolved"] += 1
+            elif why == "semantic_best":
+                st["semantic"]["best_reordered"] += 1
+            if why:
+                reasons.append(f"{why}:{pick}")
         conf, margin = _confidence(grade, gc)
-        best = gc.best() if grade else None
+        best = (gc.per_candidate[pick] if pick is not None else gc.best()) if grade else None
         cand_out = []
-        for cg, (u, uv, _m), cd in zip(gc.per_candidate, cand_meta, cands):
+        for i, (cg, (u, uv, _m), cd) in enumerate(zip(gc.per_candidate, cand_meta, cands)):
             for k in EVIDENCE_KEYS:
                 if cd["evidence"][k]["present"]:
                     st["evidence_present"][k] += 1
-            cand_out.append({
+            row = {
                 "asr_segment_id": u.seg_id,
                 "utterance_start_ms": uv,
                 "utterance_end_ms": video_to_chat_ms(u.end_ms, cal, fs),
                 "tier": cg.tier, "score": cg.score, "strong": cg.strong, "medium": cg.medium, "weak": cg.weak,
                 "evidence": cd["evidence"],
-            })
+            }
+            if semantic is not None:
+                sr, sem_only = cand_sem[i]
+                row["semantic"] = (sr or S.SKIPPED).to_json()
+                row["semantic_only"] = sem_only        # 의미 점수만으로 켜진 증거 키(글자 증거로는 꺼져 있던 것)
+            cand_out.append(row)
         react = _reaction_candidate(grade, gc)
+        if pick is not None and grade != "direct":
+            react = best
+        if semantic is not None and result == "graded" and grade is None:
+            # D-17 1: v0.3 부터 엔진이 직접 정한다. 후보는 있으나 어느 등급 조건도 못 채운 줄 → 반응 미확인.
+            result, best, react, cand_out = "unconfirmed", None, None, []
+            reasons.append("no_grade_to_unconfirmed")
+            st["semantic"]["graded_none_to_unconfirmed"] += 1
         if best is not None:
             bu, buv, _bm = cand_meta[best.index]
             rationale = _rationale(buv, best, cfg.rule, grade, gc)
+            if semantic is not None and cand_sem[best.index][1]:
+                rationale += " · 의미 비교"
             # 반응 시각은 첫 반응 후보(직접일 때 가장 앞 직접 후보), 점수·근거는 점수 최댓값 후보
             ru, ruv, _rm = cand_meta[react.index]
             r_time, u_start, u_end = ruv, ruv, video_to_chat_ms(ru.end_ms, cal, fs)
             score = best.score
         else:
+            why_none = ("등급 조건 못 채움" if "no_grade_to_unconfirmed" in reasons else "시간 외 증거 없음")
             rationale = (f"{fmt_display(ch.t_ms)} 채팅 뒤 {W // 1000}초 안 발화 {len(window)}개, "
-                         "시간 외 증거 없음 → 반응 미확인")
+                         f"{why_none} → 반응 미확인")
             r_time = u_start = u_end = None
             score = None
         reactions.append({
             "chat_id": ch.chat_id,
-            "result": gc.result,
+            "result": result,
             "grade": grade,
             "reaction_time_ms": r_time,
             "utterance_start_ms": u_start,
@@ -482,7 +590,7 @@ def link(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms: int | None = 
             "window_utterances": len(window),
             "linked_candidate": react.index if react is not None else None,
             "candidates": cand_out,
-            "reasons": list(gc.reasons),
+            "reasons": reasons,
             "rationale": rationale,
         })
     return reactions, st
@@ -501,9 +609,18 @@ def _rationale(at_vod_ms: int, cg: rules.CandidateGrade, rc: RuleConfig, grade: 
 
 # ── 결과 문서 ────────────────────────────────────────────────────────────
 
+def _combined_sha256(cfg: LinkConfig, semantic: Mapping) -> str:
+    """v0.3 설정 해시 = link 설정 + 의미 설정 + 모델 해시. 같은 설정·같은 모델이면 같은 값."""
+    m = semantic.get("model") or {}
+    b = json.dumps({"link": cfg.sha256(), "semantic": semantic.get("config_sha256"),
+                    "model": [m.get("backend"), m.get("name"), m.get("revision"), m.get("model_sha256")]},
+                   sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(b.encode("utf-8")).hexdigest()
+
+
 def build_result(inp: Inputs, reactions: list[dict], stats: dict, cfg: LinkConfig, *, start_ms, end_ms,
-                 elapsed_s: float, created_at: str, run_id: str) -> dict:
-    cal = inp.calibration
+                 elapsed_s: float, created_at: str, run_id: str, semantic: Mapping | None = None) -> dict:
+    """결과 문서. semantic 은 engine.semantic.status_doc 모양(v0.3 을 요청했을 때만). None 이면 v0.2 문서 그대로."""
     grades = {}
     for r in reactions:
         g = r["grade"] or ("unconfirmed" if r["result"] == "unconfirmed" else "none")
@@ -514,6 +631,21 @@ def build_result(inp: Inputs, reactions: list[dict], stats: dict, cfg: LinkConfi
             confs[r["confidence"]] = confs.get(r["confidence"], 0) + 1
     stats = dict(stats, grade_counts=grades, confidence_counts=confs, elapsed_s=round(elapsed_s, 3),
                  skipped_non_text=inp.skipped_kinds)
+    doc = _build_doc_v02(inp, reactions, stats, cfg, start_ms=start_ms, end_ms=end_ms, created_at=created_at,
+                         run_id=run_id)
+    if semantic is not None:
+        sem = dict(semantic)
+        doc["semantic"] = sem
+        doc["engine"]["components"]["other"] = S.describe(sem)
+        if sem.get("active"):
+            doc["engine"]["version"] = ENGINE_VERSION_V03
+            doc["engine"]["config_sha256"] = _combined_sha256(cfg, sem)
+            doc["x_draft"] = "link-v0.3 — 측정 문서 2장 + semantic 칸(engine/semantic.py) (스키마 파일은 v1)"
+    return doc
+
+
+def _build_doc_v02(inp: Inputs, reactions, stats, cfg: LinkConfig, *, start_ms, end_ms, created_at, run_id) -> dict:
+    cal = inp.calibration
     return {
         "schema": "chatcoach/ai-result",
         "schema_version": RESULT_SCHEMA_VERSION,
@@ -578,6 +710,12 @@ def validate_result(doc: dict) -> list[str]:
         p.append("run_id 형식")
     if doc["time_axis"] != "vod_ms":
         p.append("time_axis")
+    sem = doc.get("semantic")
+    v03 = (doc.get("engine") or {}).get("version") == ENGINE_VERSION_V03
+    if v03 and not (isinstance(sem, Mapping) and sem.get("active")):
+        p.append("link-v0.3 인데 semantic 이 켜져 있지 않음")
+    if isinstance(sem, Mapping) and sem.get("active") and not (sem.get("model") or {}).get("name"):
+        p.append("semantic.model 이름 없음")
     for i, r in enumerate(doc["reactions"]):
         w = f"$.reactions[{i}]"
         if not cid.match(r.get("chat_id", "")):
@@ -588,6 +726,8 @@ def validate_result(doc: dict) -> list[str]:
             p.append(f"{w}: unconfirmed 인데 등급·후보·시각이 있음")
         if r["result"] == "graded" and not r["candidates"]:
             p.append(f"{w}: graded 인데 후보 없음")
+        if v03 and r["result"] == "graded" and r["grade"] is None:
+            p.append(f"{w}: v0.3 인데 graded 이고 등급 없음(D-17 1)")
         if r["grade"] not in (None, *rules.GRADES):
             p.append(f"{w}.grade")
         if r["grade"] in ("direct", "likely") and r["reaction_time_ms"] is None:
@@ -649,20 +789,51 @@ def write_review_csv(rows: Sequence[dict], path: str) -> None:
             w.writerow(r)
 
 
+def build_doc(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms=None, end_ms=None, engine: str = "v0.2",
+              semantic_backend: str = "onnx", models_dir: str | None = None, scorer=None,
+              semantic_cfg: "S.SemanticConfig | None" = None) -> dict:
+    """입력 → 결과 문서(메모리, 파일을 쓰지 않음). tools/engine_to_ai.py 처럼 봉인 경로로 바로 넘길 때 쓴다.
+
+    engine='v0.3' 이면 의미 비교 실행기를 찾는다(scorer 를 주면 그것을 쓴다 — 시험용 FakeEmbedder 등).
+    찾지 못하면 v0.2 로 돌리고 doc['semantic'] 에 status·fallback 을 적는다."""
+    if engine not in ENGINES:
+        raise ValueError(f"engine 은 {ENGINES} 가운데 하나")
+    status = None
+    if engine == "v0.3":
+        t_s = time.perf_counter()
+        if scorer is None:
+            emb, status = S.load_default(models_dir, backend=semantic_backend)
+            scorer = S.make_scorer(emb, status, semantic_cfg or S.SemanticConfig())
+        if scorer is not None:
+            status = scorer.status
+        load_sem_s = time.perf_counter() - t_s
+    else:
+        scorer = None
+    t1 = time.perf_counter()
+    reactions, stats = link(inp, cfg, start_ms=start_ms, end_ms=end_ms, semantic=scorer)
+    t_link = time.perf_counter() - t1
+    now = datetime.now().astimezone()
+    tag = "link-v0.3" if scorer is not None else "link-v0"
+    run_id = f"{tag}-{now.strftime('%Y%m%dT%H%M%S')}"
+    doc = build_result(inp, reactions, stats, cfg, start_ms=start_ms, end_ms=end_ms,
+                       elapsed_s=t_link, created_at=now.isoformat(timespec="seconds"), run_id=run_id,
+                       semantic=status)
+    if engine == "v0.3":
+        doc["stats"]["semantic_load_s"] = round(load_sem_s, 3)
+    return doc
+
+
 def run(project_dir: str, out_path: str, *, start_ms=None, end_ms=None, use_identities=True, offset_ms=None,
         file_start_ms=None, asr_path=None, review_csv=None, top=20, cfg: LinkConfig = LinkConfig(),
-        v1_out=None) -> dict:
+        v1_out=None, engine: str = "v0.2", semantic_backend: str = "onnx", models_dir: str | None = None,
+        scorer=None) -> dict:
     t0 = time.perf_counter()
     inp = load_project(project_dir, use_identities=use_identities, offset_ms=offset_ms,
                        file_start_ms=file_start_ms, asr_path=asr_path)
     t_load = time.perf_counter() - t0
-    t1 = time.perf_counter()
-    reactions, stats = link(inp, cfg, start_ms=start_ms, end_ms=end_ms)
-    t_link = time.perf_counter() - t1
-    now = datetime.now().astimezone()
-    run_id = f"link-v0-{now.strftime('%Y%m%dT%H%M%S')}"
-    doc = build_result(inp, reactions, stats, cfg, start_ms=start_ms, end_ms=end_ms,
-                       elapsed_s=t_link, created_at=now.isoformat(timespec="seconds"), run_id=run_id)
+    doc = build_doc(inp, cfg, start_ms=start_ms, end_ms=end_ms, engine=engine, semantic_backend=semantic_backend,
+                    models_dir=models_dir, scorer=scorer)
+    reactions = doc["reactions"]
     doc["stats"]["load_s"] = round(t_load, 3)
     probs = validate_result(doc)
     if probs:
@@ -673,6 +844,11 @@ def run(project_dir: str, out_path: str, *, start_ms=None, end_ms=None, use_iden
     if review_csv:
         write_review_csv(review_rows(reactions, top), review_csv)
     return doc
+
+
+def _is_pilot_project(project_dir: str | None) -> bool:
+    """폴더 이름이 pilot- 로 시작하면 시범 프로젝트(tools/engine_to_ai._is_pilot 과 같은 규칙)."""
+    return bool(project_dir) and os.path.basename(os.path.abspath(project_dir)).lower().startswith("pilot-")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -693,15 +869,30 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--review-csv", help="사람 확인용 상위 N건 CSV(저장소 밖에만 둘 것)")
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--v1-out", help="schema_version 1 부분만 따로 저장")
+    ap.add_argument("--engine", choices=ENGINES, default="v0.3",
+                    help="v0.3 = 의미 비교 더함(기본, 모델이 없으면 v0.2 로 물러남) · v0.2 = 글자·시간 규칙만")
+    ap.add_argument("--semantic-backend", choices=("onnx", "lmstudio", "off"), default="onnx",
+                    help="onnx = 로컬 e5-small(기본) · lmstudio = 켜진 LM Studio 의 임베딩 모델(localhost) · off")
+    ap.add_argument("--models-dir", help="모델 폴더(기본 <chatcoach-data>\\models)")
     ns = ap.parse_args(argv)
+    if _is_pilot_project(ns.project):
+        # 시범 판정은 봉인 경로로만(D-15 8) — 평문 --out·--review-csv·--v1-out 을 쓰기 전에 거부한다
+        print(json.dumps({"error": "pilot_needs_seal",
+                          "detail": "시범 프로젝트는 tools/engine_to_ai.py --from-project … --seal 을 쓰세요"},
+                         ensure_ascii=False))
+        return 1
     try:
         doc = run(ns.project, ns.out, start_ms=ns.start_ms, end_ms=ns.end_ms, use_identities=not ns.no_identities,
                   offset_ms=ns.offset_ms, file_start_ms=ns.file_start_ms, asr_path=ns.asr,
-                  review_csv=ns.review_csv, top=ns.top, v1_out=ns.v1_out)
+                  review_csv=ns.review_csv, top=ns.top, v1_out=ns.v1_out, engine=ns.engine,
+                  semantic_backend=ns.semantic_backend, models_dir=ns.models_dir)
     except (OSError, ValueError, KeyError) as e:
         print(json.dumps({"error": type(e).__name__, "detail": str(e)[:300]}, ensure_ascii=False))
         return 1
-    print(json.dumps({"out": ns.out, "calibration": doc["calibration"], "stats": doc["stats"]},
+    sem = doc.get("semantic") or {}
+    print(json.dumps({"out": ns.out, "engine_version": doc["engine"]["version"],
+                      "semantic": {k: sem.get(k) for k in ("active", "status", "fallback")} if sem else None,
+                      "calibration": doc["calibration"], "stats": doc["stats"]},
                      ensure_ascii=False, indent=1))
     return 0
 

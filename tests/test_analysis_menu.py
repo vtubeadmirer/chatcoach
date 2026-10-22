@@ -82,7 +82,7 @@ def test_menu_texts_and_mnemonics(win):
     titles = [a.text() for a in win.menuBar().actions()]
     assert titles.index("분석(&I)") == titles.index("세션(&N)") + 1 and titles.index("보고(&B)") > titles.index("분석(&I)")
     texts = [a.text() for a in win.m_analysis.actions() if a.text()]
-    assert texts == ["AI 결과 가져오기(봉인)(&I)…", "봉인 해제(&U)…", "엔진과 나란히 보기(&S)"]
+    assert texts == ["AI 결과 가져오기(봉인)(&I)…", "봉인 해제(&U)…", "엔진과 나란히 보기(&S)", "방송 요약(&B)"]
     assert "AI 비교 보고서(&I)…" in [a.text() for a in win.m_report.actions()]
     win.update_analysis_actions()                       # 프로젝트 없음: 모두 꺼짐
     assert not win.m_analysis.isEnabled() and not win.a_ai_compare.isEnabled()

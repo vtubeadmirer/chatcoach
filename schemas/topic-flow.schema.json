@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/chatcoach/blob/main/schemas/topic-flow.schema.json",
+  "title": "주제 흐름 (topic-flow)",
+  "description": "엔진(engine/topics.py)이 방송 1편의 전사문과 채팅을 몇 분 단위 창으로 묶어 낸 주제 덩어리. 앱은 보이기만 한다(08 D-17 5). 숫자·키워드만 담고 전사문·채팅 본문은 담지 않는다(D-17 8). 시범 프로젝트의 결과는 봉인 경로로만 둔다(D-15 8). 같은 규칙을 app/core/topics.validate 가 손으로 검사한다.",
+  "type": "object",
+  "required": ["schema", "schema_version", "run_id", "created_at", "engine", "target", "time_axis", "window_ms", "range", "blocks"],
+  "additionalProperties": false,
+  "$defs": {
+    "keyword": {"type": "string", "pattern": "^[0-9a-z가-힣]{2,6}$", "description": "2~6자 키워드(한글 음절·영문 소문자·숫자). 문장을 담을 수 없게 기호·공백을 받지 않는다."}
+  },
+  "properties": {
+    "schema": {"const": "chatcoach/topic-flow"},
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+    "created_at": {"type": "string", "minLength": 1, "description": "ISO 8601 (시간대 포함)."},
+    "engine": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "config_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "embedding": {"type": ["string", "null"], "description": "섞어 쓴 로컬 임베딩 함수 이름. 없으면 null(낱말만)."}
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "video_no": {"type": ["string", "null"]},
+        "messages_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "asr_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "time_axis": {"const": "vod_ms", "description": "모든 시각은 VOD 밀리초(채팅 시각과 같은 축)."},
+    "window_ms": {"type": "integer", "minimum": 1},
+    "range": {
+      "type": "object",
+      "required": ["start_ms", "end_ms"],
+      "additionalProperties": false,
+      "properties": {"start_ms": {"type": "integer"}, "end_ms": {"type": "integer"}}
+    },
+    "stats": {"type": "object", "additionalProperties": {"type": "number"}, "description": "숫자만."},
+    "blocks": {
+      "type": "array",
+      "description": "시간 순, 서로 이어지고(앞 end_ms = 뒤 start_ms) range 를 다 덮는다. [start_ms, end_ms).",
+      "items": {
+        "type": "object",
+        "required": ["index", "start_ms", "end_ms", "keywords", "name_keywords", "top_keyword", "change_ms", "boundary_score", "utterances", "chats"],
+        "additionalProperties": false,
+        "properties": {
+          "index": {"type": "integer", "minimum": 0},
+          "start_ms": {"type": "integer"},
+          "end_ms": {"type": "integer"},
+          "keywords": {"type": "array", "maxItems": 8, "uniqueItems": true, "items": {"$ref": "#/$defs/keyword"}, "description": "점수 순. 첫째가 대표 키워드."},
+          "name_keywords": {"type": "array", "maxItems": 3, "uniqueItems": true, "items": {"$ref": "#/$defs/keyword"}, "description": "주제 이름(keywords 의 앞부분). 화면에는 ' · ' 로 잇는다."},
+          "top_keyword": {"oneOf": [{"$ref": "#/$defs/keyword"}, {"type": "null"}]},
+          "change_ms": {"type": ["integer", "null"], "description": "앞 덩어리에서 바뀐 시각(= start_ms). 첫 덩어리는 null."},
+          "boundary_score": {"type": ["number", "null"], "description": "경계 깊이(TextTiling). 클수록 뚜렷하게 바뀜. 첫 덩어리는 null."},
+          "utterances": {"type": "integer", "minimum": 0},
+          "chats": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "description": "창 사이 틈마다 유사도·깊이(타임라인 '주제' 트랙에 바뀜 세기로 그릴 수 있다). 비교할 낱말이 없으면 null.",
+      "items": {
+        "type": "object",
+        "required": ["at_ms", "similarity", "depth"],
+        "additionalProperties": false,
+        "properties": {
+          "at_ms": {"type": "integer"},
+          "similarity": {"type": ["number", "null"]},
+          "depth": {"type": ["number", "null"]}
+        }
+      }
+    }
+  }
+}

@@ -1141,6 +1141,13 @@ class Workbench(QWidget):
         mrow.addWidget(self.media_info, 1)
         mrow.addWidget(self.btn_media)
         pl.addLayout(mrow)
+        # 주제 트랙 (08 D-01 · D-17 5): 타임라인 바로 위 띠. 분석 세션에서만 보이고(해제 전에는 '봉인됨'), 다른 세션은
+        # 숨긴 채 아무 파일도 읽지 않는다(06 7-3 — 라벨링 세션은 data\ai 를 열지 않는다). 띠를 누르면 그 주제의 시작으로
+        from .topic_track import TopicTrack
+        self.topic_track = TopicTrack()
+        self.topic_track.setVisible(False)
+        self.topic_flow = None                     # analysis_flow.TopicFlowView (분석 세션에서 읽은 뒤)
+        pl.addWidget(self.topic_track)
         self.vsplit.addWidget(pbox)
         self.vsplit.addWidget(self.timeline)
         self.vsplit.setStretchFactor(0, 3)
@@ -1210,6 +1217,9 @@ class Workbench(QWidget):
         # 단축키가 먹게: 타임라인·영상을 누르면 키 입력을 작업대로 되돌린다. 영상 클릭은 재생·일시정지(ClipSlicer 습관).
         # 처음 열 때 글자 칸(채팅 검색)에 커서가 들어가 Space·J·L 이 검색어로 들어가던 문제(시범 1일차)도 같이 막는다.
         self.timeline.seekRequested.connect(lambda _ms: self.take_keys())
+        self.timeline.viewChanged.connect(self.topic_track.set_view)
+        self.topic_track.seekRequested.connect(self.seek_vod)
+        self.topic_track.seekRequested.connect(lambda _ms: self.take_keys())
         if hasattr(self.player, "clicked"):
             self.player.clicked.connect(lambda: (self.toggle_play(), self.take_keys()))
         self.setFocusPolicy(Qt.StrongFocus)
@@ -1411,7 +1421,48 @@ class Workbench(QWidget):
             self._run_job("media_check", lambda cancelled: resolve_media_path(cur, root), self._on_media_checked, sync)
         else:
             self.media_info.setText(tr("영상 파일이 아직 연결되지 않았습니다"))
+        self._load_topic_track(sync)
         self._update_modes()
+
+    # ------------------------------------------------------------ 주제 트랙 (08 D-01 · D-17 5)
+    def _load_topic_track(self, sync: bool = False) -> None:
+        """분석 세션이면 해제된 run 의 짝 주제 흐름을 주제 트랙에 싣는다(analysis_flow.topic_flow — seal.jsonl 과
+        topics\\<run_id>.json 만). 다른 세션(라벨링·재라벨·출처·조정·보기 전용)은 트랙을 숨기고 data\\ai 를 열지 않는다."""
+        from ..core import visibility as vis
+        tt = self.topic_track
+        self.topic_flow = None
+        proj = getattr(self, "project", None)
+        if self.session is None or self.session_kind != vis.ANALYSIS or proj is None or proj.data is None:
+            tt.set_topics(None)
+            tt.setVisible(False)
+            return
+        tt.set_sealed(True)                        # 읽기 전에는 '봉인됨' (내용을 아직 모른다)
+        tt.setVisible(True)
+        root = proj.root
+        from .. import analysis_flow as af
+        self._run_job("topics", lambda cancelled: af.topic_flow(root, reader_kind=vis.ANALYSIS),
+                      self._on_topic_flow, sync)
+
+    def _on_topic_flow(self, res, err: str) -> None:
+        tt = self.topic_track
+        if res is None:
+            LOG.warning("주제 흐름을 읽지 못했습니다: %s", (err or "").split(":", 1)[0])
+            tt.set_topics(None)
+            return
+        self.topic_flow = res
+        if res.sealed:
+            tt.set_sealed(True)
+        elif res.doc is None:
+            tt.set_topics(None)
+        else:
+            tt.set_topics([{"start_ms": b.start_ms, "end_ms": b.end_ms, "name": b.name, "keywords": list(b.keywords)}
+                           for b in res.blocks])
+        tt.set_duration(self._vod_duration)
+        vr = getattr(self.timeline, "view_range", None)
+        if callable(vr):
+            a, b = vr()
+            tt.set_view(a, b)
+        tt.set_position(self._vod_pos)
 
     # ------------------------------------------------------------ 라벨 기록 (app.store)
     def _open_store(self, outcome, proj, sync: bool) -> None:
@@ -1908,7 +1959,9 @@ class Workbench(QWidget):
         if vod_end > self._vod_duration:
             self._vod_duration = int(vod_end)
         self.timeline.set_duration(self._vod_duration)
+        self.topic_track.set_duration(self._vod_duration)
         self.timeline.set_view(0, max(1, self._vod_duration))
+        self.topic_track.set_view(0, max(1, self._vod_duration))
 
     # ------------------------------------------------------------ 영상
     def _load_media(self, path: str) -> None:
@@ -2120,6 +2173,8 @@ class Workbench(QWidget):
         self._vod_pos = int(vod_ms)
         self.chat.set_time_ms(self._vod_pos, True)
         self.timeline.set_position(self._vod_pos)
+        if not self.topic_track.isHidden():
+            self.topic_track.set_position(self._vod_pos)
         if self.mode == ph.SEGMENTS and self.segment_form is not None:
             self.segment_form.set_position(self._vod_pos)
         self._update_status()

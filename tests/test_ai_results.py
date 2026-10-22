@@ -278,6 +278,31 @@ def test_engine_to_ai_cli_file_and_pilot_refusal(tmp_path, capsys):
     assert e2a.main(["--in", str(bad), "--out", str(dst)]) == 1
 
 
+def test_engine_to_ai_v03_fallback_refuses_seal_and_reports_meta(project, tmp_path, capsys, monkeypatch):
+    """--engine v0.3 가 v0.2 로 물러나면 봉인하지 않는다(종료 1). 출력에는 엔진 판·의미 비교 상태만 찍는다."""
+    from types import SimpleNamespace
+    from app import seal
+    calls = []
+
+    def fake_seal(*a, **k):
+        calls.append(1)
+        return SimpleNamespace(sha256="a" * 64, size=1, check="valid", reject_reasons=[], new=True, presealed=False)
+    monkeypatch.setattr(seal, "seal_bytes", fake_seal)
+    base = ["--from-project", project, "--engine", "v0.3", "--semantic-backend", "off"]
+    assert e2a.main(base + ["--seal", "--by", "L01"]) == 1
+    line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert line["error"] == "engine_fallback" and line["engine_version"] == "0.1.0"
+    assert line["semantic"]["active"] is False and line["semantic"]["status"] == "disabled" and not calls
+    assert e2a.main(base + ["--seal", "--by", "L01", "--allow-fallback"]) == 0
+    line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert calls and line["engine_fallback"] is True and line["engine_version"] == "0.1.0"
+    assert set(line) >= {"sealed", "size", "check", "engine_version", "semantic"} and "reactions_out" not in line
+    # v0.2 를 고르면 물러남이 아니다
+    assert e2a.main(["--from-project", project, "--engine", "v0.2", "--out", str(tmp_path / "o.json")]) == 0
+    line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert line["engine_fallback"] is False and line["engine_version"] == "0.1.0"
+
+
 def test_engine_to_ai_real_engine_output_shape(project):
     """engine.link 가 합성 프로젝트(tests/test_engine_link 의 장면)에서 메모리로 낸 결과를 변환하면 1판 검사를 통과한다."""
     import argparse

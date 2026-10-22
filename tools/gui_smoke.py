@@ -59,7 +59,11 @@
   '봉인 해제' 가 조건 미충족으로 거부 → L01 1차·L02 재라벨을 기존 흐름(_flow_primary·_flow_second)으로 잠금(그동안 ai 폴더를
   한 번도 열지 않음, 잠긴 두 세션을 다시 열어도 분석 메뉴가 꺼짐) → L01 분석 세션: 나란히 보기가 '봉인됨 1건' 으로 막힘(봉인
   파일·runs 를 열지 않음) → 보기 전용에서 해제(조건 됨, 사전 봉인) → L01 분석 세션 '엔진과 나란히 보기'(목록·점수 표·
-  다음 다른 곳, --window-size 면 그 크기로, 스크린샷 _an_side) → 보기 전용 '보고 → AI 비교 보고서'(사본 옆 임시 폴더).
+  다음 다른 곳, --window-size 면 그 크기로, 스크린샷 _an_side) → 같은 분석 세션 작업대의 주제 트랙(띠 3개, 띠를 누르면 그
+  주제 시작으로) → '분석 → 방송 요약'(덩어리 3줄, 행 한 번 누름 = 그 주제 시작, 입력 칸 없음, 스크린샷 _an_summary) →
+  보기 전용 '보고 → AI 비교 보고서'(사본 옆 임시 폴더).
+  가져오기 때 같은 폴더의 합성 주제 흐름(engine-out.topics.json, 채팅 시각만으로 3등분)이 짝으로 같이 봉인되고, 해제 때 같이
+  풀리는지, 라벨링 세션에서 주제 트랙이 숨고 요약이 열리지 않는지, 해제 전 분석 세션에서 트랙이 '봉인됨' 인지도 본다(D-17 5).
   끝나면 다 지운다. 단계 이름 앞에 an_.
 
 지키는 것
@@ -199,7 +203,8 @@ STEPS_ADDED = ("agree_copy", "adj_tools", "cache_drop")
 
 # --analysis-flow (E 첫 묶음) 의 단계. 켜면 STEPS_C5 대조 목록 뒤에 붙고, 건너뛴 표시 'analysis_flow' 는 빠진다.
 STEPS_ANALYSIS = ("an_copy", "an_seal", "an_open_a", "an_a_label", "an_a_lock_plan", "an_b_label", "an_b_lock_blind",
-                  "an_labeling_blind", "an_view_sealed", "an_unseal", "an_side_by_side", "an_report", "an_cleanup")
+                  "an_labeling_blind", "an_view_sealed", "an_unseal", "an_side_by_side", "an_topic_track",
+                  "an_summary", "an_report", "an_cleanup")
 
 
 def expected_steps(analysis: bool = False) -> list[str]:
@@ -301,6 +306,40 @@ def synthetic_engine_result(project_root: str, run_id: str = "run-smoke-synth") 
                       "chat_id_algorithm": "sl-chat-id-v1",
                       "messages_sha256": (data.get("chat") or {}).get("messages_sha256")},
            "time_axis": "vod_ms", "reactions": rx}
+    return json.dumps(doc, ensure_ascii=False).encode("utf-8")
+
+
+def synthetic_topic_flow(project_root: str, run_id: str = "topics-smoke-synth", n_blocks: int = 3) -> bytes:
+    """--analysis-flow 의 합성 주제 흐름(topic-flow 1판). 사본 채팅의 시각(t_ms)만 읽고(본문은 읽지 않음) 그 범위를
+    n_blocks 개로 똑같이 나눈다. 키워드는 '주제1'·'합성' 같은 합성 낱말. 엔진 결과가 아니라 화면 시험용."""
+    import json
+    from app import jsonl
+    from app.core import topics as T
+    from app.project import open_project
+    data = open_project(project_root).data or {}
+    res = jsonl.read(os.path.join(project_root, "chat", "messages.jsonl"))
+    ts = sorted(r["t_ms"] for r in res.records if isinstance(r.get("t_ms"), int) and not isinstance(r["t_ms"], bool))
+    lo, hi = (ts[0], ts[-1] + 1) if ts else (0, 60_000)
+    step = max(1, (hi - lo) // n_blocks)
+    edges = [lo + i * step for i in range(n_blocks)] + [hi]
+    blocks = []
+    for i in range(n_blocks):
+        a, b = edges[i], edges[i + 1]
+        kws = [f"주제{i + 1}", "합성"]
+        blocks.append({"index": i, "start_ms": a, "end_ms": b, "keywords": kws, "name_keywords": kws[:1],
+                       "top_keyword": kws[0], "change_ms": a if i else None, "boundary_score": 0.5 if i else None,
+                       "utterances": 0,
+                       "chats": sum(1 for t in ts if a <= t < b or (i == n_blocks - 1 and t == b))})
+    doc = {"schema": T.SCHEMA, "schema_version": T.SCHEMA_VERSION, "run_id": run_id,
+           "created_at": "2026-10-22T09:00:00+09:00",
+           "engine": {"name": "smoke-synthetic-topics", "version": "0.0.0", "config_sha256": None, "embedding": None},
+           "target": {"video_no": str((data.get("broadcast") or {}).get("video_no")), "messages_sha256": None,
+                      "asr_sha256": None},
+           "time_axis": T.TIME_AXIS, "window_ms": 60_000, "range": {"start_ms": lo, "end_ms": hi},
+           "stats": {"blocks": n_blocks}, "blocks": blocks, "gaps": []}
+    probs = T.validate(doc)
+    if probs:
+        raise ValueError(f"합성 주제 흐름 검사 실패 {len(probs)}건")
     return json.dumps(doc, ensure_ascii=False).encode("utf-8")
 
 
@@ -1631,19 +1670,27 @@ class Smoke:
             eng = os.path.join(tmp, "engine-out.json")          # 사본 밖
             with open(eng, "wb") as fh:
                 fh.write(synthetic_engine_result(dst))
+            topics_file = os.path.join(tmp, "engine-out.topics.json")   # 같은 이름의 짝 주제 흐름(D-17 5)
+            with open(topics_file, "wb") as fh:
+                fh.write(synthetic_topic_flow(dst))
             ok = self._open_view_only(dst)
             menu_on = self.win.m_analysis.isEnabled() and self.win.a_seal_import.isEnabled()
             e = self.win.seal_import_dialog(path=eng, by=self.AGREE_A) if ok and menu_on else None
+            te = getattr(self.win, "last_topics_seal", None)
             os.remove(eng)                                       # 봉인 사본만 남긴다
+            os.remove(topics_file)
             self.win.update_analysis_actions()
             refused = self.win.unseal_dialog(by=self.AGREE_A, confirm=lambda _t: False) is None \
                 if self.win.a_unseal.isEnabled() else False
             reasons = list(getattr(self.win, "last_unseal_reasons", []))
             st = seal.seal_status(dst)
+            paired = bool(st.entries) and te is not None and st.entries[0].topics_sha256 == te.sha256
             ok = ok and menu_on and e is not None and e.new and e.check == "valid" and refused and bool(reasons) \
-                and st.sealed_count == 1 and st.unsealed_count == 0
+                and st.sealed_count == 1 and st.unsealed_count == 0 and paired and te.check == "valid"
             self.check(f"{p}_seal", ok, t1, f"sealed={st.sealed_count} sha={e.sha256[:8] if e else '-'} "
                                             f"size={e.size if e else 0} check={e.check if e else '-'} "
+                                            f"topics_sha={te.sha256[:8] if te else '-'} "
+                                            f"topics_check={te.check if te else '-'} paired={paired} "
                                             f"unseal_refused={refused} unmet={len(reasons)}")
             self.win.show_home()
             self.pump(50)
@@ -1664,6 +1711,8 @@ class Smoke:
                     self.win.update_session_actions()
                     self.win.update_analysis_actions()
                     offs.append(okr and not self.win.m_analysis.isEnabled()
+                                and self.wb.topic_track.isHidden()           # 주제 트랙도 숨는다(D-17 5)
+                                and self.win.broadcast_summary_view(show=False) is None
                                 and self.win.seal_import_dialog(path=os.path.join(tmp, "없음.json"), by=lab) is None)
                     self.win.show_home()
                     self.pump(50)
@@ -1679,16 +1728,23 @@ class Smoke:
             stop, watch = self._watch_opens((os.path.join(ai_dir, ""),))
             try:
                 okc, ctx_c = self._flow_open(dst, "new:analysis", self.AGREE_A)
+                okc = okc and self.wait(lambda: "topics" not in self.wb._jobs)
                 self.win.update_analysis_actions()
                 tip = self.win.a_side_by_side.toolTip()
                 closed = self.win.side_by_side_view(show=False) is None
+                track_sealed = (not self.wb.topic_track.isHidden()) and self.wb.topic_track.is_sealed()
+                summary_closed = not self.win.a_summary.isEnabled() and \
+                    self.win.broadcast_summary_view(show=False) is None
             finally:
                 stop()
-            bins = [x for x in watch["bad"] if os.sep + "sealed" + os.sep in x or os.sep + "runs" + os.sep in x]
+            bins = [x for x in watch["bad"] if any(os.sep + d + os.sep in x for d in ("sealed", "runs", "topics"))]
             ok = okc and not self.win.a_side_by_side.isEnabled() and "봉인됨 1건" in tip and closed and not bins \
-                and not self.win.a_seal_import.isEnabled() and not self.win.a_unseal.isEnabled()
+                and not self.win.a_seal_import.isEnabled() and not self.win.a_unseal.isEnabled() \
+                and track_sealed and summary_closed
             self.check(f"{p}_view_sealed", ok, t1, f"side_by_side_off={not self.win.a_side_by_side.isEnabled()} "
-                                                   f"sealed_count_shown={'봉인됨 1건' in tip} bin_or_run_opens={len(bins)}")
+                                                   f"sealed_count_shown={'봉인됨 1건' in tip} "
+                                                   f"topic_track_sealed={track_sealed} summary_off={summary_closed} "
+                                                   f"bin_run_topics_opens={len(bins)}")
             self.win.show_home()
             self.pump(50)
             if not ok:
@@ -1698,9 +1754,12 @@ class Smoke:
             ok = self._open_view_only(dst)
             res = self.win.unseal_dialog(by=self.AGREE_A, confirm=lambda _t: True) if ok else None
             st = seal.seal_status(dst)
-            ok = ok and res is not None and res.conditions_met and st.unsealed_count == 1 and st.sealed_count == 0
+            topics_rec = (res.record.get("topics") or {}) if res else {}
+            ok = ok and res is not None and res.conditions_met and st.unsealed_count == 1 and st.sealed_count == 0 \
+                and bool(topics_rec.get("sha256")) and res.record.get("topics_error") is None
             self.check(f"{p}_unseal", ok, t1, f"conditions_met={res.conditions_met if res else '-'} "
                                               f"presealed={res.presealed if res else '-'} "
+                                              f"topics_unsealed={bool(topics_rec.get('sha256'))} "
                                               f"locks={len(res.record.get('locks') or []) if res else 0}")
             self.win.show_home()
             self.pump(50)
@@ -1735,6 +1794,71 @@ class Smoke:
                        f"human_rows={s.get('human_rows')} same={s.get('same')} grade_diff={s.get('grade_diff')} "
                        f"engine_only={s.get('engine_only')} human_only={s.get('human_only')} "
                        f"score_rows={len(v.score_table_rows()) if v else 0} jump={jumped} fit={fit}")
+            if dlg is not None:
+                dlg.close()
+            if not ok:
+                self.win.show_home()
+                self.pump(50)
+                return False
+            # ---- E2. 같은 분석 세션: 작업대 주제 트랙 (해제된 짝 주제 흐름, 띠를 누르면 그 주제의 시작으로)
+            t1 = time.perf_counter()
+            self.wait(lambda: "topics" not in self.wb._jobs)
+            tt = self.wb.topic_track
+            bands = tt.bands()
+            seeks: list[int] = []
+            tt.seekRequested.connect(seeks.append)
+            jumped_to = None
+            if len(bands) >= 2 and tt.width() > 0:
+                from PySide6.QtCore import QPoint, Qt
+                from PySide6.QtTest import QTest
+                tt.set_view(bands[0].start_ms, bands[-1].end_ms)
+                mid = (bands[1].start_ms + bands[1].end_ms) // 2
+                QTest.mouseClick(tt, Qt.LeftButton, Qt.NoModifier, QPoint(int(tt.t_to_x(mid)), tt.height() // 2))
+                self.pump(100)
+                jumped_to = seeks[-1] if seeks else None
+            ok = (not tt.isHidden()) and not tt.is_sealed() and len(bands) == 3 and jumped_to == bands[1].start_ms \
+                and tt.width() > 0 and tt.height() > 0
+            self.check(f"{p}_topic_track", ok, t1, f"bands={len(bands)} sealed={tt.is_sealed()} "
+                                                   f"size={tt.width()}x{tt.height()} jump_to_band_start="
+                                                   f"{jumped_to == (bands[1].start_ms if len(bands) > 1 else -1)}")
+            if not ok:
+                self.win.show_home()
+                self.pump(50)
+                return False
+            # ---- E3. '분석 → 방송 요약' (주제 덩어리별 채팅·반응률·놓친 질문 — 숫자만, 열면 바로, 행 한 번 누름)
+            t1 = time.perf_counter()
+            self.win.update_analysis_actions()
+            sdlg = self.win.broadcast_summary_view(show=True) if self.win.a_summary.isEnabled() else None
+            sv = sdlg.view if sdlg is not None else None
+            rows = sv.export_rows() if sv is not None else []
+            sjump: list[int] = []
+            fit_s = ""
+            if sv is not None:
+                self.pump(200)
+                fit_s = self._fit(sv)
+                sv.seekRequested.connect(sjump.append)
+                sv.table.setFocus()
+                r1 = sv.table.visualItemRect(sv.table.item(1, 0)) if sv.row_count() > 1 else None
+                if r1 is not None:
+                    from PySide6.QtCore import Qt
+                    from PySide6.QtTest import QTest
+                    QTest.mouseClick(sv.table.viewport(), Qt.LeftButton, Qt.NoModifier, r1.center())
+                    self.pump(100)
+            from PySide6.QtWidgets import QLineEdit, QTextEdit
+            no_inputs = sv is not None and not sv.findChildren(QLineEdit) and not sv.findChildren(QTextEdit)
+            src = getattr(getattr(sdlg, "data", None), "reaction_source", None)
+            ok = sv is not None and not sv.is_sealed() and sv.row_count() == 3 and \
+                sum(r.get("chat_count") or 0 for r in rows) > 0 and sjump == [bands[1].start_ms] and no_inputs \
+                and src in ("final_set", "engine")
+            if sdlg is not None and self.args.screenshot and _inside(self.args.screenshot, SCREENS_DIR):
+                root_, ext = os.path.splitext(self.args.screenshot)
+                sdlg.grab().save(root_ + "_an_summary" + (ext or ".png"), "PNG")
+            self.check(f"{p}_summary", ok, t1, f"rows={sv.row_count() if sv else 0} "
+                                               f"chats={sum(r.get('chat_count') or 0 for r in rows)} "
+                                               f"reaction_source={src} row_click_seek={sjump == [bands[1].start_ms]} "
+                                               f"inputs={0 if no_inputs else 'some'} fit={fit_s}")
+            if sdlg is not None:
+                sdlg.close()
             self.win.show_home()
             self.pump(50)
             if not ok:
@@ -1912,7 +2036,7 @@ class Smoke:
             missing, extra = compare_steps((r[0] for r in self.results), analysis=an)
             steps_ok = not missing
             seen = [s for s in dict.fromkeys(r[0] for r in self.results) if s != "analysis_flow"]
-            print(f"== 단계 목록(14 c5 의 49{' + E 분석 13' if an else ''} 와 대조, 15 5-2 의 16): {len(seen)}"
+            print(f"== 단계 목록(14 c5 의 49{f' + E 분석 {len(STEPS_ANALYSIS)}' if an else ''} 와 대조, 15 5-2 의 16): {len(seen)}"
                   f"/{len(expected_steps(an))} missing={missing} extra={extra}")
         return 0 if not failed and steps_ok else 1
 

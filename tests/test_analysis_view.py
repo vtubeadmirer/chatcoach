@@ -27,6 +27,21 @@ def qapp():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _close_views():
+    """시험마다 만든 최상위 창을 그 자리에서 지운다. 남겨 두면 프로세스가 끝날 때 QApplication 보다 늦게
+    지워지며 접근 위반(0xC0000005)으로 pytest 종료 코드가 깨진다(시험 결과는 통과라도)."""
+    yield
+    app = QApplication.instance()
+    if app is None:
+        return
+    from PySide6.QtCore import QCoreApplication, QEvent
+    for w in app.topLevelWidgets():
+        w.close()
+        w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
 def cid(i):
     return "c%020x" % i
 
@@ -326,4 +341,159 @@ def test_view_opens_no_files(qapp, monkeypatch):
     v.set_data(run=run, final_rows=rows)
     v.next_diff()
     v.set_filter(av.FILTER_DIFF)
+    assert opened == []
+
+
+# ---------------------------------------------------------------------------- 판 고르기 · 판끼리 견주기 (17 6-1 4번)
+def run_named(rid, ver, reactions):
+    r = run_of(reactions)
+    r["run_id"], r["engine"] = rid, {"name": "chatcoach-link", "version": ver}
+    return r
+
+
+def runs_fixture():
+    """새 판(A, v0.3)·옛 판(B, v0.2)·사람 최종. 채팅 1 같음 · 2 등급 다름 · 3 A만 · 5 B만 · 6 B만(A 없음) ·
+    7 A 의 graded+등급 없음(판끼리에서는 뺀다)."""
+    new = run_named("run-new", "0.3.0", [eng(1, "direct", 10_000), eng(2, "direct", 20_000),
+                                         eng(3, "likely", 30_000), eng(5, None, 50_000),
+                                         {**eng(7, "direct", 70_000), "grade": None}])
+    old = run_named("run-old", "0.2.0", [eng(1, "direct", 10_000), eng(2, "likely", 20_000), eng(3, None, 30_000),
+                                         eng(5, "related_only", 50_000), eng(6, "unclear", 60_000),
+                                         eng(7, "likely", 70_000)])
+    rows = [hum(1, "direct", 10_000), hum(2, "direct", 20_000), hum(3, "likely", 30_000), hum(5, "unclear", 50_000)]
+    return new, old, rows
+
+
+class FakeLoader:
+    """analysis_flow.RunLoader 대신(파일 없음). 부른 run_id 를 적어 둔다."""
+
+    def __init__(self, runs, fail=()):
+        self.runs, self.fail, self.calls = runs, set(fail), []
+
+    def __call__(self, rid):
+        self.calls.append(rid)
+        if rid in self.fail:
+            raise RuntimeError("봉인 해제 기록이 없습니다")
+        return {"run": self.runs[rid], "scores": {"strict": {"n": len(rid)}, "lenient": {"n": 9}}}
+
+
+CHOICES = [{"run_id": "run-new", "label": "run-new · 해제 2026-10-30 10:00 · 최신"},
+           {"run_id": "run-old", "label": "run-old · 해제 2026-10-30 09:00"}]
+
+
+def test_run_bar_only_with_two_runs_and_loader(qapp):
+    new, old, rows = runs_fixture()
+    v = av.AnalysisView(run=new, final_rows=rows)
+    assert v.run_bar.isHidden() and v.run_ids() == [] and not v.is_runs_mode()
+    v.set_data(run=new, final_rows=rows, runs=CHOICES[:1], run_loader=FakeLoader({}))
+    assert v.run_bar.isHidden()                               # 고를 것이 하나뿐
+    v.set_data(run=new, final_rows=rows, runs=CHOICES)        # 읽기 함수가 없으면 고를 수 없다
+    assert v.run_bar.isHidden()
+    v.set_data(run=new, final_rows=rows, runs=CHOICES, run_loader=FakeLoader({"run-old": old}))
+    assert not v.run_bar.isHidden() and v.run_ids() == ["run-new", "run-old"]
+    assert v.run_box.currentData() == "run-new" and v.current_run_id() == "run-new"     # 최신이 기본
+    assert v.run_box.itemText(0).endswith("chatcoach-link 0.3.0")                      # 읽은 판은 엔진 판을 붙인다
+    assert [v.against_box.itemData(i) for i in range(v.against_box.count())] == ["", "run-old"]
+    assert v.list.count() > 0 and v.filter_mode() == av.FILTER_ALL                    # 열면 바로 사람과 견준 화면
+
+
+def test_compare_two_runs_shows_only_differences(qapp):
+    new, old, rows = runs_fixture()
+    ld = FakeLoader({"run-old": old})
+    v = av.AnalysisView(run=new, final_rows=rows, runs=CHOICES, run_loader=ld, scores={"strict": {"n": 1}})
+    changed = []
+    v.runChanged.connect(lambda a, b: changed.append((a, b)))
+    v.against_box.setCurrentIndex(v.against_box.findData("run-old"))     # 클릭 한 번
+    assert v.is_runs_mode() and v.against_run_id() == "run-old" and ld.calls == ["run-old"]
+    assert changed[-1] == ("run-new", "run-old")
+    assert v.filter_mode() == av.FILTER_DIFF                            # 다른 곳만
+    st = {it.chat_id: it.status for it in v.visible_items()}
+    assert st == {cid(2): av.GRADE_DIFF, cid(3): av.ENGINE_ONLY, cid(5): av.HUMAN_ONLY, cid(6): av.HUMAN_ONLY,
+                  cid(7): av.HUMAN_ONLY}
+    # 같은 규칙: ai_compare.diff_results 의 다른 곳과 같다
+    from app import ai_compare as ac
+    d = ac.diff_results(new, old, human=rows)
+    kind = {ac.RD_GRADE_DIFF: av.GRADE_DIFF, ac.RD_A_ONLY: av.ENGINE_ONLY, ac.RD_B_ONLY: av.HUMAN_ONLY}
+    assert {it["chat_id"]: kind[it["kind"]] for it in d["items"]} == st
+    s = v.summary()
+    assert (s["ref_a"], s["ref_b"], s["ref_neither"], s["ref_none"]) == \
+        (d["human"]["a_matches"], d["human"]["b_matches"], d["human"]["neither"], d["human"]["no_human"]) == (2, 0, 1, 2)
+    sr = dict(v.summary_rows())
+    assert sr["A만"] == 1 and sr["B만"] == 3 and sr["등급 없는 graded 뺌 (A)"] == 1 and sr["같음"] == 1
+    assert v.confusion()["direct"]["likely"] == 1 and v.confusion_title.text().startswith("판 A(줄)")
+    assert "판 A = run-new" in v.header.text() and "판 B = run-old" in v.header.text()
+    assert any("A만" in t for t in v.all_texts()) and not any(t.endswith("[엔진만]") for t in v.all_texts())
+    names = [n for n, _ in v.timeline.track_rects()]
+    assert names.index("marks:" + av.ENGINE_TRACK) < names.index("marks:" + av.HUMAN_TRACK)
+    # 고른 건: 판 A · 판 B · 사람 최종
+    assert v.select_chat(cid(2))
+    d2 = {r[0]: r[1:] for r in v.detail_rows()}
+    assert d2["판정"] == ("직접", "높음", "직접") and d2["점수 · 사람과"][2] == "A 와 같음"
+    assert sum(1 for k in d2 if "(" in k) == 7 and all(len(r) == 4 for r in v.detail_rows())
+    assert v.select_chat(cid(6))
+    assert {r[0]: r[1:] for r in v.detail_rows()}["판정"] == ("평가 안 함", "불명확", "최종 세트에 없음")
+    # 점수: 두 판을 나란히
+    assert v.score_table.columnCount() == 5
+    assert v.score_table_rows()[0] == ("건수", "1", "—", "7", "9")
+    assert not any(CHAT_TEXT in t for t in v.all_texts())
+    # N 은 판끼리에서도 다른 곳을 건너뛴다
+    v.set_filter(av.FILTER_ALL)
+    assert v.list.count() == 6 and v.current_item().chat_id == cid(6)          # 고른 건은 그대로
+    assert v.next_diff() and v.current_item().chat_id == cid(7)
+    assert v.select_index(0) and v.next_diff() and v.current_item().chat_id == cid(2)   # 같음(1)은 건너뛴다
+    # 사람 최종으로 돌아가기
+    v.against_box.setCurrentIndex(0)
+    assert not v.is_runs_mode() and v.score_table.columnCount() == 3 and v.filter_mode() == av.FILTER_ALL
+    assert v.confusion_title.text().startswith("엔진(줄)") and ld.calls == ["run-old"]   # 다시 읽지 않는다
+
+
+def test_pick_older_run_as_main(qapp):
+    new, old, rows = runs_fixture()
+    ld = FakeLoader({"run-old": old})
+    v = av.AnalysisView(run=new, final_rows=rows, runs=CHOICES, run_loader=ld)
+    v.compare_with("run-old")
+    v.run_box.setCurrentIndex(v.run_box.findData("run-old"))          # A 를 옛 판으로 → 견주던 판과 같아져 사람으로
+    assert v.current_run_id() == "run-old" and not v.is_runs_mode()
+    assert "0.2.0" in v.header.text() and v.filter_mode() == av.FILTER_ALL
+    assert [v.against_box.itemData(i) for i in range(v.against_box.count())] == ["", "run-new"]
+    assert v.compare_with("run-new") and v.summary()["mode"] == "runs"
+    assert v.compare_with("run-old") is False                          # 같은 판끼리는 안 된다
+    assert "같은 판" in v.run_msg.text() and v.against_run_id() == "run-new"
+
+
+def test_loader_failure_and_other_video_keep_current_view(qapp):
+    new, old, rows = runs_fixture()
+    other = run_named("run-other", "0.3.1", [eng(1, "direct", 10_000)])
+    other["target"] = {**other["target"], "video_no": "778"}
+    choices = CHOICES + [{"run_id": "run-other"}, {"run_id": "run-bad"}]
+    v = av.AnalysisView(run=new, final_rows=rows, runs=choices, run_loader=FakeLoader({"run-other": other}, ["run-bad"]))
+    before = [it.chat_id for it in v.items()]
+    assert v.compare_with("run-bad") is False
+    assert "열지 못했습니다" in v.run_msg.text() and v.run_msg.isVisibleTo(v)
+    assert not v.is_runs_mode() and v.against_box.currentData() == "" and [it.chat_id for it in v.items()] == before
+    assert v.select_run("run-bad") is False and v.current_run_id() == "run-new" and v.run_box.currentData() == "run-new"
+    assert v.compare_with("run-other") is False and "대상 영상" in v.run_msg.text()
+    assert not v.is_runs_mode() and v.filter_mode() == av.FILTER_ALL
+    assert v.select_run("run-none") is False                           # 목록 밖
+
+
+def test_sealed_after_runs_mode_clears_choices(qapp):
+    new, old, rows = runs_fixture()
+    v = av.AnalysisView(run=new, final_rows=rows, runs=CHOICES, run_loader=FakeLoader({"run-old": old}))
+    v.compare_with("run-old")
+    v.set_data(run=None, final_rows=rows, sealed_count=2)
+    assert v.is_sealed() and not v.is_runs_mode() and v.run_bar.isHidden() and v.current_run_id() is None
+    assert not any("run-" in t for t in v.all_texts())
+    assert v.compare_with("run-old") is False and v.select_run("run-old") is False
+
+
+def test_runs_mode_opens_no_files(qapp, monkeypatch):
+    opened = []
+    real_open = builtins.open
+    monkeypatch.setattr(builtins, "open", lambda f, *a, **k: opened.append(str(f)) or real_open(f, *a, **k))
+    new, old, rows = runs_fixture()
+    v = av.AnalysisView(run=new, final_rows=rows, runs=CHOICES, run_loader=FakeLoader({"run-old": old}))
+    v.compare_with("run-old")
+    v.next_diff()
+    v.select_run("run-old")
     assert opened == []

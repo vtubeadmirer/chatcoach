@@ -9,6 +9,11 @@
   score --labels <csv> --link <json> [--start-ms N --end-ms N] [--messages F | --project P] [--out report.json]
                                            손라벨 ↔ link 결과 채점 (engine.score)
   link --project <P> --out <json> …        engine.link 의 main 을 그대로 부른다(인자도 그대로)
+                                           기본 --engine v0.3(의미 비교), 모델이 없으면 v0.2 로 물러남
+  topics --project <P> --out <json> …      engine.topics 의 main 을 그대로 부른다(주제 흐름, 숫자만 출력)
+  semantic-info [--models-dir D] [--lmstudio]
+                                           의미 비교 실행기 상태(모델 이름·해시·실행기). 받지 않는다.
+                                           --lmstudio 면 이 PC 의 LM Studio 서버(localhost)도 본다
 
 표준 출력에는 요약 숫자만 낸다. 전사 문장은 --out 파일에만 쓴다.
 """
@@ -32,6 +37,7 @@ _PASSTHROUGH = {
     "transcript": ("transcript", "손 받아쓰기 txt → compare 용 json"),
     "score": ("score", "손라벨 csv ↔ link 결과 채점"),
     "link": ("link", "채팅 ↔ 발화 연결 시험판(engine.link)"),
+    "topics": ("topics", "주제 흐름(topic-flow) 만들기(engine.topics)"),
 }
 
 
@@ -72,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--model", default="large-v3-turbo")
     m.add_argument("--models-dir")
 
+    si = sub.add_parser("semantic-info", help="의미 비교(엔진 v0.3) 실행기·모델 상태")
+    si.add_argument("--models-dir")
+    si.add_argument("--lmstudio", action="store_true", help="LM Studio 로컬 서버(localhost:1234)도 본다")
+
     for name, (_, desc) in _PASSTHROUGH.items():   # 도움말 목록에만 보인다. 실제 처리는 위의 _passthrough
         sub.add_parser(name, help=desc + " (python -m engine " + name + " -h)", add_help=False)
 
@@ -108,6 +118,16 @@ def main(argv: list[str] | None = None) -> int:
         d, repo = resolve_model_dir(ns.model, ns.models_dir)
         print(json.dumps({"model": ns.model, "repo": repo, "dir": d, "model_bin_sha256": model_bin_sha256(d)},
                          ensure_ascii=False, indent=1))
+        return 0
+
+    if ns.cmd == "semantic-info":
+        from . import semantic as S
+        emb, st = S.load_default(ns.models_dir)
+        out = {"status": st["status"], "active": st["active"], "detail": st["detail"], "model": st["model"],
+               "models_dir": ns.models_dir or S.default_models_dir(),
+               "expected": {k: S.E5_SMALL[k] for k in ("name", "repo", "revision", "license", "model_sha256")},
+               "lmstudio": S.probe_lmstudio() if ns.lmstudio else None}
+        print(json.dumps(out, ensure_ascii=False, indent=1))
         return 0
     return 2
 

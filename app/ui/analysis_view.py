@@ -19,6 +19,11 @@
 - 오른쪽 위: 고른 채팅의 두 판정(등급·확신도·반응 시각·근거)과 증거 7종(엔진: 연결 후보의 present·at_ms, 사람: 연결 발화의
   강·중·약 목록).
 - 오른쪽 아래: 합계 표(비교 결과 건수, 엔진 × 사람 등급 혼동표)와 ai_compare 점수 표.
+- 맨 위(해제된 run 이 둘 이상일 때만, 17 6-1 4번): '엔진 판' 고르기(최신이 기본)와 '견줄 것'(사람 최종 세트 · 다른 판).
+  다른 판을 고르면 판끼리 견준다 — 위 트랙 = 판 A, 아래 = 판 B, 필터는 '다름만'(같은 채팅에 다른 등급 · 한쪽만 반응)으로
+  바뀌고, 결과 이름은 A만·B만, 고른 건 칸에는 사람 최종을 참고 열로 더한다. 점수 표는 두 판의 점수(각각 사람과 견준 것)를
+  나란히 둔다. 다른 판은 받은 run_loader 로만 읽는다(이 파일은 디스크를 열지 않는다). 다른 곳 규칙과 대상 영상 검사는
+  app.ai_compare.diff_results 와 같다(graded 인데 등급 없는 줄은 뺀다, 08 D-17 1).
 
 비교 규칙(이 화면의 표시용. 점수는 ai_compare 가 낸다)
 - 같음: 두 쪽 모두 판정이 있고 값(등급, 또는 반응 미확인)이 같다.
@@ -36,7 +41,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
@@ -44,6 +49,7 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QHBoxLayout, QLab
                                QPushButton, QScrollArea, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
+from .. import ai_compare
 from ..core.rules import EVIDENCE_KEYS, V0_1_STRENGTH
 from ..core.timecode import fmt_display
 from ..i18n import tr
@@ -118,11 +124,13 @@ class Side:
 
 @dataclass(frozen=True)
 class CompareItem:
+    """한 채팅의 비교. 판끼리 견줄 때(17 6-1 4번)는 engine = 판 A(위), human = 판 B(아래), ref = 사람 최종(참고)."""
     chat_id: str
     t_ms: int | None
     status: str
     engine: Side
     human: Side
+    ref: Side | None = None
 
 
 # ---------------------------------------------------------------------------- 순수 계산 (Qt 없음)
@@ -293,10 +301,22 @@ class Comparison:
 
 
 def compare(run: Mapping | None, final_rows: Iterable[Mapping] | None,
-            chat_times: Mapping[str, int] | None = None) -> Comparison:
-    """엔진 결과와 최종 세트를 chat_id 로 맞춘다. 목록은 시각 순(시각 없는 것은 뒤, chat_id 순)."""
+            chat_times: Mapping[str, int] | None = None, *, against: Mapping | None = None) -> Comparison:
+    """엔진 결과와 최종 세트를 chat_id 로 맞춘다. 목록은 시각 순(시각 없는 것은 뒤, chat_id 순).
+
+    against: 다른 엔진 판(봉인 해제된 결과 dict). 주면 판끼리 견준다(17 6-1 4번) — 위(engine) = run, 아래(human) = against,
+    ref = 사람 최종(참고). 이때 graded 인데 등급이 없는 줄은 양쪽 모두 뺀다(08 D-17 1, ai_compare.diff_results 와 같은 규칙).
+    summary 의 키는 같고 뜻만 바뀐다(engine_rows = A, human_rows = B, engine_unevaluated = B 에만, human_missing = A 에만)."""
     eng, est = engine_sides(run)
-    hum, hst = human_sides(final_rows)
+    ref: dict[str, Side] | None = None
+    if against is not None:
+        hum, hst = engine_sides(against)
+        eng = {k: v for k, v in eng.items() if v.value != GRADED_NO_GRADE}
+        hum = {k: v for k, v in hum.items() if v.value != GRADED_NO_GRADE}
+        hst = {"duplicates": hst["duplicates"], "skipped": hst["invalid"]}
+        ref, _rst = human_sides(final_rows)
+    else:
+        hum, hst = human_sides(final_rows)
     absent = Side()
     items: list[CompareItem] = []
     conf = {a: {b: 0 for b in CONFUSION_VALUES} for a in CONFUSION_VALUES}
@@ -321,7 +341,9 @@ def compare(run: Mapping | None, final_rows: Iterable[Mapping] | None,
             t = h.t_ms
         elif e.t_ms is not None:
             t = e.t_ms
-        items.append(CompareItem(cid, t, status, e, h))
+        elif ref is not None and cid in ref and ref[cid].t_ms is not None:
+            t = ref[cid].t_ms
+        items.append(CompareItem(cid, t, status, e, h, None if ref is None else ref.get(cid, absent)))
     items.sort(key=lambda it: (it.t_ms is None, it.t_ms if it.t_ms is not None else 0, it.chat_id))
     both = sum(1 for c in eng if c in hum)
     summary = {
@@ -334,6 +356,22 @@ def compare(run: Mapping | None, final_rows: Iterable[Mapping] | None,
         "no_time": sum(1 for it in items if it.t_ms is None),
         **counts,
     }
+    if ref is not None:
+        # 다른 곳 가운데 어느 판이 사람 최종과 같은가 (참고 — 점수는 ai_compare 가 판마다 낸다)
+        rc = {"ref_a": 0, "ref_b": 0, "ref_neither": 0, "ref_none": 0}
+        for it in items:
+            if it.status == SAME:
+                continue
+            r = it.ref
+            if r is None or not r.present or r.value == GRADED_NO_GRADE:
+                rc["ref_none"] += 1
+            elif r.value == it.engine.value:
+                rc["ref_a"] += 1
+            elif r.value == it.human.value:
+                rc["ref_b"] += 1
+            else:
+                rc["ref_neither"] += 1
+        summary.update(rc, mode="runs")
     return Comparison(items, summary, conf)
 
 
@@ -359,31 +397,42 @@ def next_diff_index(items: Sequence[CompareItem], current: int | None, step: int
     return None
 
 
+def _ev_name(k: str) -> str:
+    return f"{EVIDENCE_KO[k]} ({STRENGTH_KO.get(V0_1_STRENGTH[k], '')})"
+
+
+def _engine_ev_text(side: Side, k: str) -> str:
+    """엔진 쪽 증거 한 칸: 연결 후보의 present(at_ms)."""
+    if not side.present:
+        return "—"
+    if side.evidence is None:
+        return tr("증거 없음")
+    e = side.evidence.get(k) or {}
+    p = e.get("present")
+    if p is True:
+        return tr("있음") + (f" {_t(e.get('at_ms'))}" if _is_int(e.get("at_ms")) else "")
+    return tr("없음") if p is False else tr("판단 불가")
+
+
+def _human_ev_text(side: Side | None, k: str) -> str:
+    """사람 쪽 증거 한 칸: 연결 발화의 강·중·약."""
+    if side is None or not side.present:
+        return "—"
+    if side.evidence is None:
+        return tr("증거 없음")
+    s = side.evidence.get(k)
+    return f"{tr('있음')}({STRENGTH_KO.get(s, s)})" if s else tr("없음")
+
+
 def evidence_rows(item: CompareItem) -> list[tuple[str, str, str]]:
     """증거 7종: (표시명, 엔진, 사람). 엔진 = 연결 후보의 present(at_ms), 사람 = 연결 발화의 강·중·약."""
-    out = []
-    for k in EVIDENCE_KEYS:
-        name = f"{EVIDENCE_KO[k]} ({STRENGTH_KO.get(V0_1_STRENGTH[k], '')})"
-        ee = item.engine.evidence
-        if not item.engine.present:
-            et = "—"
-        elif ee is None:
-            et = tr("증거 없음")
-        else:
-            e = ee.get(k) or {}
-            p = e.get("present")
-            et = (tr("있음") + (f" {_t(e.get('at_ms'))}" if _is_int(e.get("at_ms")) else "")) if p is True \
-                else tr("없음") if p is False else tr("판단 불가")
-        he = item.human.evidence
-        if not item.human.present:
-            ht = "—"
-        elif he is None:
-            ht = tr("증거 없음")
-        else:
-            s = he.get(k)
-            ht = f"{tr('있음')}({STRENGTH_KO.get(s, s)})" if s else tr("없음")
-        out.append((name, et, ht))
-    return out
+    return [(_ev_name(k), _engine_ev_text(item.engine, k), _human_ev_text(item.human, k)) for k in EVIDENCE_KEYS]
+
+
+def evidence_rows_runs(item: CompareItem) -> list[tuple[str, str, str, str]]:
+    """판끼리 견줄 때 증거 7종: (표시명, 판 A, 판 B, 사람 최종)."""
+    return [(_ev_name(k), _engine_ev_text(item.engine, k), _engine_ev_text(item.human, k), _human_ev_text(item.ref, k))
+            for k in EVIDENCE_KEYS]
 
 
 def _fmt_score(v) -> str:
@@ -423,15 +472,48 @@ def score_rows(scores: Mapping | None) -> list[tuple[str, str, str]]:
     return rows
 
 
+def score_rows_pair(scores_a: Mapping | None, scores_b: Mapping | None) -> list[tuple[str, str, str, str, str]]:
+    """판끼리 견줄 때 점수 표: (지표, A 엄격, A 참고, B 엄격, B 참고). 지표 순서는 A 먼저, B 에만 있는 것은 뒤."""
+    ra = {r[0]: r for r in score_rows(scores_a)}
+    rb = {r[0]: r for r in score_rows(scores_b)}
+    keys = list(ra) + [k for k in rb if k not in ra]
+    out = []
+    for k in keys:
+        a, b = ra.get(k, (k, "—", "—")), rb.get(k, (k, "—", "—"))
+        out.append((k, a[1], a[2], b[1], b[2]))
+    return out
+
+
+def _run_entries(runs) -> list[tuple[str, str]]:
+    """고르기 목록 → [(run_id, 표시 글)]. str · {run_id, label} · .run_id/.label 객체를 받는다. 순서는 받은 대로(최신 먼저)."""
+    out: list[tuple[str, str]] = []
+    for r in runs or ():
+        if isinstance(r, str):
+            rid, label = r, r
+        elif isinstance(r, Mapping):
+            rid, label = r.get("run_id"), r.get("label") or r.get("run_id")
+        else:
+            rid, label = getattr(r, "run_id", None), getattr(r, "label", None) or getattr(r, "run_id", None)
+        if isinstance(rid, str) and rid and rid not in (x[0] for x in out):
+            out.append((rid, label if isinstance(label, str) else rid))
+    return out
+
+
 # ---------------------------------------------------------------------------- 화면
 class AnalysisView(QWidget):
-    """나란히 보기. 해제 전(run=None)이면 '봉인됨 n건' 만 보인다."""
+    """나란히 보기. 해제 전(run=None)이면 '봉인됨 n건' 만 보인다.
+
+    해제된 run 이 여럿이면(runs 2개 이상 + run_loader) 맨 위에 '엔진 판' 과 '견줄 것' 고르기가 보인다(17 6-1 4번).
+    열면 최신 판 ↔ 사람 최종이 바로 보이고, '견줄 것' 에서 다른 판을 고르면 두 판의 다른 곳만(같은 채팅에 다른 등급 ·
+    한쪽만 반응) 보인다. run_loader(run_id) 는 부르는 쪽(app.analysis_flow.RunLoader)이 준다 — 이 화면은 파일을 열지 않는다."""
     chatSelected = Signal(str)       # 고른 chat_id
     seekRequested = Signal(int)      # 고른 채팅의 VOD 시각 (플레이어를 옮길 때)
+    runChanged = Signal(str, str)    # (판 A run_id, 견줄 것: run_id 또는 '' = 사람 최종)
 
     def __init__(self, parent=None, *, run: Mapping | None = None, final_rows: Iterable[Mapping] | None = None,
                  sealed_count: int = 0, scores: Mapping | None = None, chat_times: Mapping[str, int] | None = None,
-                 duration_ms: int | None = None):
+                 duration_ms: int | None = None, runs: Sequence | None = None,
+                 run_loader: Callable[[str], Mapping] | None = None, run_id: str | None = None):
         super().__init__(parent)
         self._cmp = Comparison([], {}, {})
         self._visible: list[CompareItem] = []
@@ -439,10 +521,18 @@ class AnalysisView(QWidget):
         self._current: CompareItem | None = None
         self._sealed = True
         self._sealed_count = 0
+        self._runs: list[tuple[str, str]] = []
+        self._loader: Callable[[str], Mapping] | None = None
+        self._loaded: dict[str, dict] = {}          # run_id → {run, scores}
+        self._run_id: str | None = None             # 판 A (위)
+        self._against: str | None = None            # 판 B (아래). None = 사람 최종
+        self._final_rows: list = []
+        self._chat_times: Mapping[str, int] | None = None
+        self._duration: int | None = None
         self._build()
         self._install_shortcuts()
         self.set_data(run=run, final_rows=final_rows, sealed_count=sealed_count, scores=scores,
-                      chat_times=chat_times, duration_ms=duration_ms)
+                      chat_times=chat_times, duration_ms=duration_ms, runs=runs, run_loader=run_loader, run_id=run_id)
 
     # ------------------------------------------------------------------ 만들기
     def _build(self) -> None:
@@ -471,6 +561,28 @@ class AnalysisView(QWidget):
         self.content = QWidget()
         cl = QVBoxLayout(self.content)
         cl.setContentsMargins(0, 0, 0, 0)
+        # 판 고르기 (17 6-1 4번) — 해제된 run 이 둘 이상일 때만 보인다
+        self.run_bar = QWidget()
+        rb = QHBoxLayout(self.run_bar)
+        rb.setContentsMargins(0, 0, 0, 0)
+        rb.addWidget(QLabel(tr("엔진 판")))
+        self.run_box = QComboBox()
+        self.run_box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.run_box.setMinimumContentsLength(16)
+        self.run_box.currentIndexChanged.connect(self._on_run_box)
+        rb.addWidget(self.run_box, 1)
+        rb.addWidget(QLabel(tr("견줄 것")))
+        self.against_box = QComboBox()
+        self.against_box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.against_box.setMinimumContentsLength(16)
+        self.against_box.currentIndexChanged.connect(self._on_against_box)
+        rb.addWidget(self.against_box, 1)
+        cl.addWidget(self.run_bar)
+        self.run_msg = QLabel()
+        self.run_msg.setWordWrap(True)
+        self.run_msg.setVisible(False)
+        cl.addWidget(self.run_msg)
+        self.run_bar.setVisible(False)
         self.header = QLabel()
         self.header.setWordWrap(True)
         cl.addWidget(self.header)
@@ -481,10 +593,10 @@ class AnalysisView(QWidget):
         self.timeline.set_fixed_tracks_visible(segments=False, density=False, waveform=False)   # 마커 두 줄만 쓴다
         self.timeline.seekRequested.connect(self._on_timeline_seek)
         cl.addWidget(self.timeline)
-        legend = QLabel("  ".join(f"<span style='color:{STATUS_COLORS[s].name()}'>●</span> {tr(STATUS_KO[s])}"
-                                  for s in STATUSES) + "  " + tr("○ = 그쪽 판정이 반응 미확인"))
-        legend.setTextFormat(Qt.RichText)
-        cl.addWidget(legend)
+        self.legend = QLabel()
+        self.legend.setTextFormat(Qt.RichText)
+        self._fill_legend()
+        cl.addWidget(self.legend)
 
         split = QSplitter(Qt.Horizontal, self.content)
         cl.addWidget(split, 1)
@@ -533,7 +645,8 @@ class AnalysisView(QWidget):
         self.summary_table.verticalHeader().setVisible(False)
         self.summary_table.setEditTriggers(QTableWidget.NoEditTriggers)
         rl.addWidget(self.summary_table)
-        rl.addWidget(QLabel(tr("엔진(줄) × 사람 최종(칸) 등급")))
+        self.confusion_title = QLabel(tr("엔진(줄) × 사람 최종(칸) 등급"))
+        rl.addWidget(self.confusion_title)
         self.confusion_table = QTableWidget(len(CONFUSION_VALUES), len(CONFUSION_VALUES))
         names = [tr(VAL_KO[v]) for v in CONFUSION_VALUES]
         self.confusion_table.setHorizontalHeaderLabels(names)
@@ -570,35 +683,258 @@ class AnalysisView(QWidget):
     # ------------------------------------------------------------------ 자료
     def set_data(self, *, run: Mapping | None = None, final_rows: Iterable[Mapping] | None = None,
                  sealed_count: int = 0, scores: Mapping | None = None, chat_times: Mapping[str, int] | None = None,
-                 duration_ms: int | None = None) -> None:
-        """자료를 바꾼다. run 이 None 이면 봉인 상태 — 최종 세트도 계산하지 않고 '봉인됨 n건' 만 보인다."""
+                 duration_ms: int | None = None, runs: Sequence | None = None,
+                 run_loader: Callable[[str], Mapping] | None = None, run_id: str | None = None) -> None:
+        """자료를 바꾼다. run 이 None 이면 봉인 상태 — 최종 세트도 계산하지 않고 '봉인됨 n건' 만 보인다.
+
+        runs: 해제된 run 고르기 목록(최신 먼저. str · {run_id, label} · RunChoice). run_loader(run_id) →
+        {run, scores} — 다른 판을 고를 때만 부른다. run_id: 지금 run 의 ID(없으면 run['run_id'])."""
         self._current = None
         self._sealed_count = max(0, int(sealed_count)) if _is_int(sealed_count) else 0
+        self._loaded = {}
+        self._against = None
         if run is None:
             self._sealed = True
             self._cmp = Comparison([], {}, {})
             self._visible = []
+            self._runs, self._loader, self._run_id = [], None, None
+            self._final_rows, self._chat_times, self._duration = [], None, None
             self._clear_content()
+            self._fill_run_bar()
             self.sealed_label.setText(tr("봉인됨 {n}건").format(n=self._sealed_count))
             self.stack.setCurrentWidget(self.sealed_page)
             LOG.info("분석 나란히 보기: 봉인 %d건 (열지 않음)", self._sealed_count)
             return
         self._sealed = False
-        self._cmp = compare(run, final_rows, chat_times)
-        eng = run.get("engine") if isinstance(run.get("engine"), Mapping) else {}
-        rid = run.get("run_id") if isinstance(run.get("run_id"), str) else "?"
-        self.header.setText(tr("엔진 실행 {rid} · {name} {ver} · 사람 = 최종 세트").format(
-            rid=rid, name=eng.get("name", "?"), ver=eng.get("version", "?")))
+        self._final_rows = list(final_rows or [])
+        self._chat_times = chat_times
+        self._duration = duration_ms if _is_int(duration_ms) and duration_ms > 0 else None
+        rid = run_id if isinstance(run_id, str) and run_id else run.get("run_id") if isinstance(run.get("run_id"), str) else "?"
+        self._run_id = rid
+        self._loaded[rid] = {"run": run, "scores": scores}
+        self._runs = _run_entries(runs)
+        if self._runs and rid not in (r for r, _ in self._runs):
+            self._runs.insert(0, (rid, rid))
+        self._loader = run_loader
+        if self._filter != FILTER_ALL and self._filter_auto:
+            self._filter = FILTER_ALL
+        self._filter_auto = False
+        self._fill_run_bar()
+        self._render()
+
+    # ------------------------------------------------------------------ 판 고르기 (17 6-1 4번)
+    _filter_auto = False      # 판끼리 견주기로 들어가며 '다름만' 으로 바꾼 것인가
+
+    def is_runs_mode(self) -> bool:
+        """판끼리 견주는 중인가 (아래 = 다른 엔진 판)."""
+        return not self._sealed and self._against is not None
+
+    def run_ids(self) -> list[str]:
+        return [r for r, _ in self._runs]
+
+    def current_run_id(self) -> str | None:
+        return None if self._sealed else self._run_id
+
+    def against_run_id(self) -> str | None:
+        return self._against
+
+    def _can_pick(self) -> bool:
+        return not self._sealed and self._loader is not None and len(self._runs) >= 2
+
+    def _fill_run_bar(self) -> None:
+        for box in (self.run_box, self.against_box):
+            box.blockSignals(True)
+            box.clear()
+        if self._can_pick():
+            for rid, label in self._runs:
+                self.run_box.addItem(self._run_label(rid, label), rid)
+            i = self.run_box.findData(self._run_id)
+            self.run_box.setCurrentIndex(max(0, i))
+            self.against_box.addItem(tr("사람 최종 세트"), "")
+            for rid, label in self._runs:
+                if rid != self._run_id:
+                    self.against_box.addItem(self._run_label(rid, label), rid)
+            j = self.against_box.findData(self._against or "")
+            self.against_box.setCurrentIndex(max(0, j))
+        for box in (self.run_box, self.against_box):
+            box.blockSignals(False)
+        self.run_bar.setVisible(self._can_pick())
+        self.run_msg.clear()
+        self.run_msg.setVisible(False)
+
+    def _run_label(self, rid: str, label: str) -> str:
+        """고르기 글. 한 번 읽은 판은 엔진 이름·판을 덧붙인다."""
+        got = self._loaded.get(rid)
+        run = got.get("run") if got else None
+        eng = run.get("engine") if isinstance(run, Mapping) and isinstance(run.get("engine"), Mapping) else None
+        if eng:
+            return f"{label} · {eng.get('name', '?')} {eng.get('version', '?')}"
+        return label
+
+    def _get(self, rid: str) -> dict | None:
+        """판 하나를 읽는다(기억해 둔 것 먼저). 못 읽으면 None 과 함께 까닭을 보인다."""
+        if rid in self._loaded:
+            return self._loaded[rid]
+        if self._loader is None or rid not in self.run_ids():
+            self._show_run_msg(tr("이 판은 고를 수 없습니다"))
+            return None
+        try:
+            got = self._loader(rid)
+        except Exception as ex:  # noqa: BLE001 — 해제 기록·형식 문제는 까닭만 보이고 지금 화면을 둔다
+            msg = str(ex) if not isinstance(ex, (OSError, KeyError, TypeError, AttributeError)) else type(ex).__name__
+            self._show_run_msg(tr("판을 열지 못했습니다: {0}").format(msg))
+            LOG.info("나란히 보기: run %s 읽기 실패 (%s)", rid, type(ex).__name__)
+            return None
+        run = got.get("run") if isinstance(got, Mapping) else None
+        if not isinstance(run, Mapping):
+            self._show_run_msg(tr("판을 열지 못했습니다: 결과가 없습니다"))
+            return None
+        self._loaded[rid] = {"run": run, "scores": got.get("scores")}
+        return self._loaded[rid]
+
+    def _show_run_msg(self, text: str) -> None:
+        self.run_msg.setText(text)
+        self.run_msg.setVisible(True)
+
+    def select_run(self, run_id: str) -> bool:
+        """판 A(위)를 바꾼다. 견주던 판과 같아지면 '사람 최종' 으로 돌아간다."""
+        if self._sealed or run_id == self._run_id:
+            return not self._sealed
+        if self._get(run_id) is None:
+            self._fill_run_bar_keep_msg()
+            return False
+        self._run_id = run_id
+        if self._against == run_id:
+            self._against = None
+            if self._filter_auto:
+                self._filter, self._filter_auto = FILTER_ALL, False
+        self._fill_run_bar()
+        self._render()
+        self.runChanged.emit(self._run_id, self._against or "")
+        return True
+
+    def compare_with(self, run_id: str | None) -> bool:
+        """판 B(아래)를 고른다. None·'' = 사람 최종 세트. 다른 판이면 다른 곳만(필터 '다름만')으로 연다."""
+        rid = run_id or None
+        if self._sealed:
+            return False
+        if rid == self._against:
+            return True
+        if rid is not None:
+            if rid == self._run_id or self._get(rid) is None:
+                if rid == self._run_id:
+                    self._show_run_msg(tr("같은 판끼리는 견주지 않습니다"))
+                self._fill_run_bar_keep_msg()
+                return False
+        prev = (self._against, self._filter, self._filter_auto)
+        self._against = rid
+        if rid is not None:
+            if prev[0] is None:
+                self._filter, self._filter_auto = FILTER_DIFF, True
+        elif self._filter_auto:
+            self._filter, self._filter_auto = FILTER_ALL, False
+        self._fill_run_bar()
+        if not self._render():
+            self._against, self._filter, self._filter_auto = prev
+            self._fill_run_bar_keep_msg()
+            self._render()
+            return False
+        self.runChanged.emit(self._run_id or "", self._against or "")
+        return True
+
+    def _fill_run_bar_keep_msg(self) -> None:
+        msg = self.run_msg.text()          # _fill_run_bar 가 지우므로 글이 있으면 보이던 것
+        self._fill_run_bar()
+        if msg:
+            self._show_run_msg(msg)
+
+    def _on_run_box(self, _i: int) -> None:
+        rid = self.run_box.currentData()
+        if isinstance(rid, str) and rid:
+            self.select_run(rid)
+
+    def _on_against_box(self, _i: int) -> None:
+        rid = self.against_box.currentData()
+        self.compare_with(rid if isinstance(rid, str) and rid else None)
+
+    # ------------------------------------------------------------------ 그리기
+    def _render(self) -> bool:
+        """지금 고른 판(들)로 다시 그린다. 판끼리 견주기에 실패하면(대상 영상이 다름 등) False."""
+        cur = self._loaded.get(self._run_id or "")
+        if cur is None:
+            return False
+        run = cur["run"]
+        self._current = None
+        b = self._loaded.get(self._against) if self._against else None
+        if self._against and b is None:
+            return False
+        if b is not None:
+            try:
+                # 대상 영상이 같은지·다른 곳 규칙을 한 곳(ai_compare.diff_results)에서 본다
+                diff = ai_compare.diff_results(run, b["run"], human=self._final_rows, chat_times=self._chat_times)
+            except ai_compare.AICompareError as ex:
+                self._show_run_msg(tr("두 판을 견주지 못했습니다: {0}").format(str(ex)))
+                return False
+            self._cmp = compare(run, self._final_rows, self._chat_times, against=b["run"])
+            self._cmp.summary.update(graded_no_grade_a=diff["a"]["graded_no_grade"],
+                                     graded_no_grade_b=diff["b"]["graded_no_grade"])
+            self.header.setText(tr("판 A = {a} ↔ 판 B = {b} · 사람 = 최종 세트(참고)").format(
+                a=self._run_title(run), b=self._run_title(b["run"])))
+        else:
+            self._cmp = compare(run, self._final_rows, self._chat_times)
+            eng = run.get("engine") if isinstance(run.get("engine"), Mapping) else {}
+            rid = run.get("run_id") if isinstance(run.get("run_id"), str) else "?"
+            self.header.setText(tr("엔진 실행 {rid} · {name} {ver} · 사람 = 최종 세트").format(
+                rid=rid, name=eng.get("name", "?"), ver=eng.get("version", "?")))
         times = [it.t_ms for it in self._cmp.items if it.t_ms is not None]
-        dur = duration_ms if _is_int(duration_ms) and duration_ms > 0 else (max(times, default=0) + 10_000)
-        self.timeline.set_duration(dur)
+        self.timeline.set_duration(self._duration or (max(times, default=0) + 10_000))
+        self._fill_legend()
+        self._fill_filter_labels()
         self._fill_summary()
-        self._fill_scores(scores)
+        if b is not None:
+            self._fill_scores_pair(cur.get("scores"), b.get("scores"))
+        else:
+            self._fill_scores(cur.get("scores"))
         self._apply_filter()
         self.stack.setCurrentWidget(self.content)
         s = self._cmp.summary
-        LOG.info("분석 나란히 보기: 엔진 %d · 사람 %d · 같음 %d · 등급 다름 %d · 엔진만 %d · 사람만 %d",
-                 s["engine_rows"], s["human_rows"], s[SAME], s[GRADE_DIFF], s[ENGINE_ONLY], s[HUMAN_ONLY])
+        LOG.info("분석 나란히 보기%s: 위 %d · 아래 %d · 같음 %d · 등급 다름 %d · 위만 %d · 아래만 %d",
+                 " (판끼리)" if b is not None else "", s["engine_rows"], s["human_rows"], s[SAME], s[GRADE_DIFF],
+                 s[ENGINE_ONLY], s[HUMAN_ONLY])
+        return True
+
+    @staticmethod
+    def _run_title(run: Mapping) -> str:
+        eng = run.get("engine") if isinstance(run.get("engine"), Mapping) else {}
+        rid = run.get("run_id") if isinstance(run.get("run_id"), str) else "?"
+        return f"{rid} ({eng.get('name', '?')} {eng.get('version', '?')})"
+
+    def status_ko(self, status: str) -> str:
+        """비교 결과 이름. 판끼리 견줄 때는 엔진만·사람만 대신 A만·B만."""
+        if self.is_runs_mode():
+            return tr({ENGINE_ONLY: "A만", HUMAN_ONLY: "B만"}.get(status, STATUS_KO.get(status, status)))
+        return tr(STATUS_KO.get(status, status))
+
+    def _side_names(self) -> tuple[str, str]:
+        return (tr("판 A"), tr("판 B")) if self.is_runs_mode() else (tr("엔진"), tr("사람 최종"))
+
+    def _fill_legend(self) -> None:
+        self.legend.setText("  ".join(f"<span style='color:{STATUS_COLORS[s].name()}'>●</span> {self.status_ko(s)}"
+                                      for s in STATUSES) + "  " + tr("○ = 그쪽 판정이 반응 미확인"))
+
+    def _fill_filter_labels(self) -> None:
+        names = dict(FILTER_KO)
+        if self.is_runs_mode():
+            names[FILTER_MISSED] = "B만"
+        self.filter_box.blockSignals(True)
+        for i in range(self.filter_box.count()):
+            self.filter_box.setItemText(i, tr(names[self.filter_box.itemData(i)]))
+        j = self.filter_box.findData(self._filter)
+        if j >= 0:
+            self.filter_box.setCurrentIndex(j)
+        self.filter_box.blockSignals(False)
+        a, b = self._side_names()
+        self.confusion_title.setText(tr("{a}(줄) × {b}(칸) 등급").format(a=a, b=b))
 
     def _clear_content(self) -> None:
         self.list.blockSignals(True)
@@ -611,6 +947,7 @@ class AnalysisView(QWidget):
         for r in range(self.confusion_table.rowCount()):
             for c in range(self.confusion_table.columnCount()):
                 self.confusion_table.setItem(r, c, QTableWidgetItem(""))
+        self._set_score_columns(False)
         self.score_table.setRowCount(0)
         self.score_note.clear()
         self._clear_detail()
@@ -646,6 +983,7 @@ class AnalysisView(QWidget):
         if mode not in FILTERS:
             raise ValueError(f"모르는 필터 {mode!r}")
         self._filter = mode
+        self._filter_auto = False
         i = self.filter_box.findData(mode)
         if i >= 0 and self.filter_box.currentIndex() != i:
             self.filter_box.blockSignals(True)
@@ -660,9 +998,13 @@ class AnalysisView(QWidget):
         self._visible = filter_items(self._cmp.items, self._filter)
         self.list.blockSignals(True)
         self.list.clear()
+        runs = self.is_runs_mode()
+        a, b = (tr("A"), tr("B")) if runs else (tr("엔진"), tr("사람"))
         for it in self._visible:
-            text = f"{_t(it.t_ms)}  {tr('엔진')} {tr(VAL_KO.get(it.engine.value, it.engine.value))} · " \
-                   f"{tr('사람')} {tr(VAL_KO.get(it.human.value, it.human.value))}  [{tr(STATUS_KO[it.status])}]"
+            text = f"{_t(it.t_ms)}  {a} {tr(VAL_KO.get(it.engine.value, it.engine.value))} · " \
+                   f"{b} {tr(VAL_KO.get(it.human.value, it.human.value))}  [{self.status_ko(it.status)}]"
+            if runs and it.ref is not None and it.ref.present:
+                text += f"  {tr('사람')} {tr(VAL_KO.get(it.ref.value, it.ref.value))}"
             li = QListWidgetItem(text)
             li.setData(Qt.UserRole, it.chat_id)
             li.setForeground(STATUS_COLORS[it.status])
@@ -685,8 +1027,9 @@ class AnalysisView(QWidget):
                 e_marks.append((it.t_ms, f"an_{it.status}" + ("" if it.engine.graded else "_n")))
             if it.human.present:
                 h_marks.append((it.t_ms, f"an_{it.status}" + ("" if it.human.graded else "_n")))
-        self.timeline.set_markers(ENGINE_TRACK, e_marks, tr("엔진"))
-        self.timeline.set_markers(HUMAN_TRACK, h_marks, tr("사람 최종"))
+        a, b = self._side_names()
+        self.timeline.set_markers(ENGINE_TRACK, e_marks, a)
+        self.timeline.set_markers(HUMAN_TRACK, h_marks, b)
 
     # ------------------------------------------------------------------ 고르기·건너뛰기
     def _on_row(self, row: int) -> None:
@@ -768,11 +1111,13 @@ class AnalysisView(QWidget):
         self._take_detail()
         self.detail_title.setText(tr("목록이나 타임라인에서 채팅을 고르세요"))
 
-    def detail_rows(self) -> list[tuple[str, str, str]]:
-        """고른 건의 표 (항목, 엔진, 사람). 아무것도 고르지 않았으면 빈 목록."""
+    def detail_rows(self) -> list[tuple[str, ...]]:
+        """고른 건의 표 (항목, 엔진, 사람). 판끼리 견줄 때는 (항목, 판 A, 판 B, 사람 최종). 고르지 않았으면 빈 목록."""
         it = self._current
         if it is None:
             return []
+        if self.is_runs_mode():
+            return self._detail_rows_runs(it)
         e, h = it.engine, it.human
         rows = [
             (tr("판정"), tr(VAL_KO.get(e.value, e.value)) if e.present else tr("평가 안 함"),
@@ -797,19 +1142,42 @@ class AnalysisView(QWidget):
             rows.append((tr("평가"), _fmt_score(sc) if sc is not None else "—", " · ".join(ev) or "—"))
         return rows
 
+    @staticmethod
+    def _detail_rows_runs(it: CompareItem) -> list[tuple[str, str, str, str]]:
+        a, b, h = it.engine, it.human, it.ref if it.ref is not None else Side()
+
+        def val(s: Side, missing: str) -> str:
+            return tr(VAL_KO.get(s.value, s.value)) if s.present else tr(missing)
+        rows = [
+            (tr("판정"), val(a, "평가 안 함"), val(b, "평가 안 함"), val(h, "최종 세트에 없음")),
+            (tr("확신도"), tr(CONF_KO.get(a.confidence, "—")), tr(CONF_KO.get(b.confidence, "—")),
+             tr(CONF_KO.get(h.confidence, "—"))),
+            (tr("반응 시각"), _t(a.reaction_time_ms), _t(b.reaction_time_ms), _t(h.reaction_time_ms)),
+        ]
+        rows += evidence_rows_runs(it)
+        rows.append((tr("근거"), a.rationale or "—", b.rationale or "—", h.rationale or "—"))
+        sa, sb = (s.extra.get("score") if s.present else None for s in (a, b))
+        same = None
+        if h.present and h.value != GRADED_NO_GRADE:
+            same = tr("A 와 같음") if h.value == a.value else tr("B 와 같음") if h.value == b.value else tr("둘 다 다름")
+        rows.append((tr("점수 · 사람과"), _fmt_score(sa) if sa is not None else "—",
+                     _fmt_score(sb) if sb is not None else "—", same or "—"))
+        return rows
+
     def _fill_detail(self, it: CompareItem) -> None:
         self._take_detail()
-        self.detail_title.setText(f"{_t(it.t_ms)} · {it.chat_id} · {tr(STATUS_KO[it.status])}")
-        for c, text in enumerate(("", tr("엔진"), tr("사람 최종"))):
+        self.detail_title.setText(f"{_t(it.t_ms)} · {it.chat_id} · {self.status_ko(it.status)}")
+        heads = ("",) + self._side_names() + ((tr("사람 최종"),) if self.is_runs_mode() else ())
+        for c, text in enumerate(heads):
             lab = QLabel(f"<b>{text}</b>")
             self.detail.addWidget(lab, 0, c)
-        for r, (name, et, ht) in enumerate(self.detail_rows(), 1):
-            for c, text in enumerate((name, et, ht)):
+        for r, row in enumerate(self.detail_rows(), 1):
+            for c, text in enumerate(row):
                 lab = QLabel(text)
                 lab.setTextFormat(Qt.PlainText)
                 lab.setWordWrap(True)
                 lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                if r == 1 and c > 0:          # 판정 줄은 비교 결과 색
+                if r == 1 and c in (1, 2):    # 판정 줄은 비교 결과 색
                     lab.setStyleSheet(f"color: {STATUS_COLORS[it.status].name()};")
                 self.detail.addWidget(lab, r, c)
 
@@ -818,6 +1186,18 @@ class AnalysisView(QWidget):
         s = self._cmp.summary
         if not s:
             return []
+        if s.get("mode") == "runs":
+            return [
+                (tr("판 A 채팅"), s["engine_rows"]), (tr("판 B 채팅"), s["human_rows"]), (tr("두 판 모두"), s["both"]),
+                (tr("같음"), s[SAME]), (tr("등급 다름"), s[GRADE_DIFF]), (tr("A만"), s[ENGINE_ONLY]), (tr("B만"), s[HUMAN_ONLY]),
+                (tr("다른 곳 중 사람과 A 가 같음"), s["ref_a"]), (tr("다른 곳 중 사람과 B 가 같음"), s["ref_b"]),
+                (tr("다른 곳 중 둘 다 사람과 다름"), s["ref_neither"]), (tr("다른 곳 중 사람 판정 없음"), s["ref_none"]),
+                (tr("A 에만 있는 채팅"), s["human_missing"]), (tr("B 에만 있는 채팅"), s["engine_unevaluated"]),
+                (tr("짝 없음 (반응 없음)"), s["unpaired_no_reaction"]), (tr("시각 없음"), s["no_time"]),
+                (tr("등급 없는 graded 뺌 (A)"), s.get("graded_no_grade_a", 0)),
+                (tr("등급 없는 graded 뺌 (B)"), s.get("graded_no_grade_b", 0)),
+                (tr("A 중복 chat_id"), s["engine_duplicates"]), (tr("B 중복 chat_id"), s["human_duplicates"]),
+            ]
         return [
             (tr("엔진 판정 채팅"), s["engine_rows"]), (tr("사람 최종 채팅"), s["human_rows"]), (tr("두 쪽 모두"), s["both"]),
             (tr(STATUS_KO[SAME]), s[SAME]), (tr(STATUS_KO[GRADE_DIFF]), s[GRADE_DIFF]),
@@ -844,7 +1224,30 @@ class AnalysisView(QWidget):
                 it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.confusion_table.setItem(r, c, it)
 
+    def _set_score_columns(self, pair: bool) -> None:
+        heads = [tr("지표"), tr("A 엄격"), tr("A 참고"), tr("B 엄격"), tr("B 참고")] if pair \
+            else [tr("지표"), tr("엄격"), tr("참고")]
+        self.score_table.setColumnCount(len(heads))
+        self.score_table.setHorizontalHeaderLabels(heads)
+
+    def _fill_scores_pair(self, sa: Mapping | None, sb: Mapping | None) -> None:
+        """판끼리 견줄 때: 두 판의 점수(각각 사람 최종과 견준 것)를 나란히."""
+        self._set_score_columns(True)
+        rows = score_rows_pair(sa, sb)
+        self.score_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, text in enumerate(row):
+                self.score_table.setItem(r, c, QTableWidgetItem(text))
+        notes = [tr("점수는 판마다 사람 최종 세트와 견준 것입니다")]
+        for tag, s in (("A", sa), ("B", sb)):
+            if not isinstance(s, Mapping):
+                notes.append(tr("{0}: 점수 없음").format(tag))
+            elif s.get("dev_only") is True or s.get("preregistered") is False:
+                notes.append(tr("{0}: 사전 봉인 아님 — 개발용 점수").format(tag))
+        self.score_note.setText(" · ".join(notes))
+
     def _fill_scores(self, scores: Mapping | None) -> None:
+        self._set_score_columns(False)
         rows = score_rows(scores)
         self.score_table.setRowCount(len(rows))
         for r, row in enumerate(rows):
@@ -861,10 +1264,11 @@ class AnalysisView(QWidget):
                     notes.append(w)
             self.score_note.setText(" · ".join(notes))
 
-    def score_table_rows(self) -> list[tuple[str, str, str]]:
+    def score_table_rows(self) -> list[tuple[str, ...]]:
         out = []
+        n = self.score_table.columnCount()
         for r in range(self.score_table.rowCount()):
-            out.append(tuple(self.score_table.item(r, c).text() for c in range(3)))
+            out.append(tuple(self.score_table.item(r, c).text() for c in range(n)))
         return out
 
     def all_texts(self) -> list[str]:
@@ -874,6 +1278,8 @@ class AnalysisView(QWidget):
             out.append(w.text())
         for i in range(self.list.count()):
             out.append(self.list.item(i).text())
+        for box in (self.run_box, self.against_box):
+            out += [box.itemText(i) for i in range(box.count())]
         for t in (self.summary_table, self.confusion_table, self.score_table):
             for r in range(t.rowCount()):
                 for c in range(t.columnCount()):

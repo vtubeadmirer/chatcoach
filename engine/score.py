@@ -459,7 +459,11 @@ def _fmt(v, pct=False) -> str:
 def format_report(rep: Mapping) -> str:
     L: list[str] = []
     sc, c, b, t = rep["scope"], rep["counts"], rep["binary"], rep["reaction_time_error"]
-    L.append(f"범위: {_fmt(sc['start_ms'])} ~ {_fmt(sc['end_ms'])} ms ({sc['source']})")
+    if sc.get("start_ms") is None and sc.get("end_ms") is None:
+        # 범위 없이 채점하면 파일 전체의 엔진 판정이 분모에 들어간다(2026-10-22 link-v03 측정 고침)
+        L.append(f"범위: 없음 — 파일 전체를 채점함 ({sc['source']}). 구간 채점이면 --start-ms/--end-ms 를 주세요")
+    else:
+        L.append(f"범위: {_fmt(sc['start_ms'])} ~ {_fmt(sc['end_ms'])} ms ({sc['source']})")
     L.append(f"라벨 {c['labels_in_scope']}/{c['labels_total']}건 (사람 반응 있음 {c['human_positive']}, 없음 {c['human_negative']}, "
              f"불명확 제외 {c['excluded']['grade_unclear']}, AI 미평가 제외 {c['excluded']['ai_unevaluated']})")
     L.append(f"엔진 반응 있음(범위 안) {c['engine_positive_in_scope']}건 / 엔진 판정 {c['link_reactions_in_scope']}건")

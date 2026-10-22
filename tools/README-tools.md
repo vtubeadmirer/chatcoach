@@ -20,13 +20,25 @@
 
 | 도구 | 한 줄 설명 |
 |---|---|
-| `engine_to_ai.py` | 엔진 link 출력 → ai-result 1판. 시범 프로젝트는 `--seal` 로만 받는다(D-15 8). |
+| `engine_to_ai.py` | 엔진 link 출력 → ai-result 1판. 시범 프로젝트는 `--seal` 로만 받는다(D-15 8). `--engine v0.3`(로컬 임베딩 의미 비교, 엔진 venv) · `--topics`(주제 흐름도 만들어 판정 봉인의 짝으로 봉인, `--out a.json` 이면 `a.topics.json`, D-17 5). |
 | `ai_seal.py` | AI 결과 봉인 받기·상태·해제 (`app.seal`). |
 | `ai_compare.py` | 해제한 run 과 최종 세트로 AI 비교 보고서를 만든다 (`app.ai_compare`). |
 
 - **시범 엔진 작업 폴더(`chatcoach-data\sealed-work`)의 산출물(wav·asr.json 등)은 휴지통으로 보내지 않는다.** 봉인(`sealed\<sha>.bin`)이
   결과를 보존하므로, 봉인이 끝나면 **영구 삭제**(PowerShell `Remove-Item`, 탐색기 Shift+Delete)한다. 휴지통에 두면 시범 세션이 잠기기
   전에도 '복원' 한 번으로 라벨 구간 전사문을 열 수 있고 엔진으로 봉인된 판정을 다시 계산할 수 있다(D-15 8, 개인정보).
+- `sealed-work` 를 지우는 모든 길(스크립트·도구·손)은 `Remove-Item`(PowerShell) 또는 `os.remove`·`shutil.rmtree`(Python)만 쓴다.
+  `send2trash`·`send_to_recycle_bin`(screenshot_cleanup, 스크린샷 전용)·탐색기 Delete 는 쓰지 않는다.
+- 시범 봉인 절차의 마지막 단계: ① `sealed-work` 가 비었는지 ② **휴지통에 원래 위치가 `sealed-work` 인 항목이 0개인지** 본다.
+  휴지통 확인은 이름·원래 위치·지운 시각만 읽는다(내용은 열지 않는다). PowerShell 예:
+  `$ns=(New-Object -ComObject Shell.Application).Namespace(10); ($ns.Items() | ? { $ns.GetDetailsOf($_,1) -like '*sealed-work*' }).Count`
+  (`GetDetailsOf(항목, 1)` = 원래 위치)
+  하나라도 있으면 사람이 휴지통에서 그 항목을 직접 영구 삭제한다(영구 삭제는 도구·에이전트가 하지 않는다).
+- `engine_to_ai.py --seal` 의 출력에는 해시·크기·검사와 함께 `engine_version`·`semantic`(active·status·fallback)이 찍힌다(내용 아님).
+  `--engine v0.3` 인데 v0.2 로 물러나면 봉인하지 않고 종료 1(`engine_fallback`) — 일부러 v0.2 로 봉인하려면 `--allow-fallback`.
+- `python -m engine link`·`python -m engine topics` 는 시범 프로젝트(`pilot-*`)를 거부한다(`pilot_needs_seal`, 평문 파일을 쓰지 않음).
+- **실제 채팅 사본도 휴지통으로 보내지 않는다.** gui_smoke 등이 개발용 실제 프로젝트를 복사한 임시 폴더(`chatcoach_smoke_*`,
+  `chat\messages.jsonl` 포함)는 `shutil.rmtree`(remove_tree_checked)로만 지운다. 휴지통에 그런 폴더가 보이면 사람이 영구 삭제한다.
 
 ## 테스트 · 점검
 

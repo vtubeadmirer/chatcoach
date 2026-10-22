@@ -20,9 +20,13 @@
 
 분석 메뉴 (E, 08 D-01·D-15 7·8, 06 6장·7장, app/analysis_flow.py):
 - [분석 → AI 결과 가져오기(봉인)…] 세션 밖(보기 전용)·조정 세션: 파일을 바이트 그대로 봉인(app.seal). 화면에는 유효·거부 코드·
-  해시 앞 8자·크기만.
+  해시 앞 8자·크기만. 같은 폴더에 '<이름>.topics.json'(주제 흐름)이 있으면 짝으로 같이 봉인한다(D-17 5).
 - [분석 → 봉인 해제…] 같은 자리: 06 7-1 조건을 안내하고, 안 되면 거부(사유를 적으면 앞당겨 열기, conditions_met=false).
+  짝 주제 흐름은 같은 해제에서 같이 풀린다.
 - [분석 → 엔진과 나란히 보기] 분석 세션에서만, 해제된 run 이 있을 때만(D-15 7). app/ui/analysis_view 를 모달 아닌 창으로.
+  해제된 run 이 둘 이상이면 판 고르기·판끼리 견주기(17 6-1 4번).
+- [분석 → 방송 요약] 같은 자리·같은 조건: 주제 덩어리별 채팅·반응률·놓친 질문(app/ui/summary_view, D-01·D-17 8).
+  분석 세션 작업대에는 타임라인 위 주제 트랙(app/ui/topic_track)이 같이 보인다(해제 전에는 '봉인됨').
 - [보고 → AI 비교 보고서…] 세션 밖·조정 세션: 해제된 run 으로 app.ai_compare 보고서(프로젝트 밖).
 - 라벨링·재라벨·출처 판정 세션에서는 분석 메뉴가 꺼지고 data\\ai 를 열지 않는다. 봉인 건수는 메뉴를 펼 때만 읽는다.
 
@@ -68,10 +72,22 @@ UPDATE_CHANNEL_KEY = "update/channel"        # 숨은 설정 (04 6-2): stable | 
 # 열고, 같은 라벨러의 이어 쓸 라벨링 세션이 하나뿐이면 세션 화면 없이 그 세션으로 연다(session.auto_resume_candidate)
 RESUME_KEY = "startup/resume_last"
 LAST_LABELER_KEY = "session/last_labeler"
-BACKGROUND_JOBS = frozenset({"waveform", "media_check", "media_ref", "engine", "chat_index"})   # 세션 메뉴를 막지 않는 작업대 일
+BACKGROUND_JOBS = frozenset({"waveform", "media_check", "media_ref", "engine", "chat_index",
+                             "topics"})   # 세션 메뉴를 막지 않는 작업대 일
 PATH_ACK_GROUP = "path_ack"                 # 앱·데이터·백업 폴더 경고(confirm)를 '그래도 계속' 한 기록
 MANUAL_GUIDE =("수동 업데이트: 앱을 끄고 릴리스 페이지에서 전체 zip 을 받아 새 폴더에 푼 뒤, 옛 폴더의 data\\ 를 "
                 "새 폴더의 ChatCoach\\ 안으로 복사합니다 (docs/install.md, 04 8장).")
+TOPICS_SUFFIX = ".topics.json"
+
+
+def topics_sibling(path: str | None) -> str | None:
+    """AI 결과 파일 'a.json' 옆의 주제 흐름 'a.topics.json'(tools/engine_to_ai --out a.json --topics 가 쓰는 이름).
+    고른 파일이 이미 주제 흐름이면 None(판정 결과를 골라야 짝이 정해진다)."""
+    if not path or path.lower().endswith(TOPICS_SUFFIX):
+        return None
+    stem, ext = os.path.splitext(path)
+    cand = stem + ".topics" + (ext or ".json")
+    return cand if os.path.isfile(cand) else None
 
 
 class MainWindow(QMainWindow):
@@ -608,8 +624,12 @@ class MainWindow(QMainWindow):
         self.a_side_by_side = QAction(tr("엔진과 나란히 보기(&S)"), self)
         self.a_side_by_side.triggered.connect(lambda: self.side_by_side_view())
         self.m_analysis.addAction(self.a_side_by_side)
+        self.a_summary = QAction(tr("방송 요약(&B)"), self)
+        self.a_summary.triggered.connect(lambda: self.broadcast_summary_view())
+        self.m_analysis.addAction(self.a_summary)
         self.m_analysis.aboutToShow.connect(self.update_analysis_actions)
         self.side_view_dialog = None
+        self.summary_dialog = None
 
     def _reader_kind(self) -> str | None:
         wb = self.workbench
@@ -627,12 +647,13 @@ class MainWindow(QMainWindow):
         from .. import analysis_flow as af
         root, kind = self._ai_project_root(), self._reader_kind()
         out: dict[str, str | None] = {}
+        keys = ("menu", "seal", "unseal", "view", "report", "summary")
         if root is None:
             why = tr("프로젝트를 먼저 여세요")
-            return {k: why for k in ("menu", "seal", "unseal", "view", "report")}
+            return {k: why for k in keys}
         if self.jobs_busy():
             why = tr("작업이 도는 중입니다 — 끝난 뒤에 쓸 수 있습니다")
-            return {k: why for k in ("menu", "seal", "unseal", "view", "report")}
+            return {k: why for k in keys}
         menu = af.menu_block_reason(kind)
         out["menu"] = tr(menu) if menu else None
         seal_why = af.seal_block_reason(kind)
@@ -657,6 +678,8 @@ class MainWindow(QMainWindow):
                     out["view"] = tr("봉인됨 {0}건 — 봉인을 푼 뒤에 열립니다 (D-15 7)").format(sealed)
                 if out["report"] is None and not runs:
                     out["report"] = tr("봉인을 푼 AI 결과가 없습니다 (봉인됨 {0}건)").format(sealed)
+        # 방송 요약(D-01, D-17 5): 나란히 보기와 같은 자리·같은 조건(분석 세션, 해제 뒤)
+        out["summary"] = out["view"]
         return out
 
     def update_analysis_actions(self, *_a) -> None:
@@ -668,9 +691,10 @@ class MainWindow(QMainWindow):
         self.m_analysis.setEnabled(r["menu"] is None)
         self.m_analysis.menuAction().setToolTip(r["menu"] or "")
         for a, k in ((self.a_seal_import, "seal"), (self.a_unseal, "unseal"), (self.a_side_by_side, "view"),
-                     (self.a_ai_compare, "report")):
-            a.setEnabled(r[k] is None)
-            a.setToolTip(r[k] or "")
+                     (self.a_ai_compare, "report"), (self.a_summary, "summary")):
+            why = r.get(k, r.get("view"))
+            a.setEnabled(why is None)
+            a.setToolTip(why or "")
 
     def _actor_id(self, by: str | None, title: str) -> str | None:
         """봉인·해제 기록의 by(라벨러 ID). 세션이 있으면 그 라벨러, 없으면 마지막 라벨러를 기본값으로 묻는다."""
@@ -726,9 +750,75 @@ class MainWindow(QMainWindow):
                 ", ".join(e.reject_reasons))
         if not e.new:
             msg = tr("이미 봉인한 결과입니다: {0}…").format(af.short(e.sha256))
+        # 같은 폴더의 '<이름>.topics.json'(엔진 주제 흐름, tools/engine_to_ai --topics)이 있으면 짝으로 같이 봉인한다
+        # (D-17 5 — 판정을 풀 때 같이 풀린다). 고르는 단계를 더하지 않는다(D-16 클릭 한 번).
+        self.last_topics_seal = None
+        tpath = topics_sibling(path)
+        if tpath is not None and e.check == "valid":
+            try:
+                te = seal.seal_topics_file(self._ai_project_root(), tpath, pair_sha256=e.sha256, by=by,
+                                           app_version=__version__, reader_kind=self._reader_kind())
+            except (seal.SealError, OSError) as ex:
+                LOG.warning("주제 흐름 봉인 실패: %s", type(ex).__name__)
+                msg += " " + tr("주제 흐름은 봉인하지 못했습니다: {0}").format(
+                    str(ex) if isinstance(ex, seal.SealError) else type(ex).__name__)
+            else:
+                self.last_topics_seal = te
+                LOG.info("주제 흐름 봉인: %s (%d바이트, %s, 짝 %s)", af.short(te.sha256), te.size, te.check,
+                         af.short(e.sha256))
+                msg += " " + (tr("주제 흐름도 함께 봉인했습니다: {0}…").format(af.short(te.sha256))
+                              if te.check == "valid" else
+                              tr("주제 흐름은 검사에서 거부되었습니다: {0}").format(", ".join(te.reject_reasons)))
         self.statusBar().showMessage(msg, 8000)
         self.last_seal_message = msg
         return e
+
+    def broadcast_summary_view(self, *, show: bool = True):
+        """'분석 → 방송 요약' (08 D-01 방송 분석, D-17 5·8, 17 6-1 2번). 분석 세션에서 해제 뒤에만. 해제된 run 의 짝
+        주제 흐름 덩어리마다 채팅 수·반응률·놓친 질문을 표 하나로 보인다(열면 바로, 입력 칸 없음 — D-16). 행을 누르면 그
+        덩어리 시작으로 간다. 숫자·주제 이름만 다루고 저장하지 않는다. SummaryView 를 담은 창(모달 아님) 또는 None."""
+        title = tr("방송 요약")
+        why = self.analysis_block_reasons(read_seal=True)["summary"]
+        if why:
+            self.statusBar().showMessage(why, 6000)
+            return None
+        from .. import analysis_flow as af
+        wb = self.workbench
+        try:
+            data = af.broadcast_summary(self._ai_project_root(), reader_kind=self._reader_kind())
+        except Exception as ex:  # noqa: BLE001 — 까닭만 보이고 창은 열지 않는다
+            msg = str(ex) if not isinstance(ex, (OSError, KeyError, TypeError)) else type(ex).__name__
+            self.warn(title, tr("방송 요약을 열지 못했습니다: {0}").format(msg))
+            return None
+        from PySide6.QtWidgets import QDialog
+        from .summary_view import SummaryView
+        old = self.summary_dialog
+        if old is not None:
+            old.close()
+            old.deleteLater()
+        dlg = QDialog(self)
+        src = {"final_set": tr("반응: 사람 최종 세트"), "engine": tr("반응: 엔진 판정")}.get(data.reaction_source or "", "")
+        dlg.setWindowTitle(" — ".join(x for x in (title, f"run {data.topic_run_id}" if data.topic_run_id else "", src)
+                                      if x))
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        view = SummaryView(data.rows, sealed=data.sealed, parent=dlg)
+        lay.addWidget(view)
+        if wb is not None:
+            view.seekRequested.connect(wb.seek_vod)
+        avail = self.screen().availableGeometry() if self.screen() is not None else None
+        w, h = 900, 560
+        if avail is not None and avail.width() > 0:
+            w, h = min(w, avail.width() - 40), min(h, avail.height() - 60)
+        dlg.resize(w, h)
+        dlg.view = view
+        dlg.data = data
+        self.summary_dialog = dlg
+        if show:
+            dlg.show()
+        if data.warnings:
+            self.statusBar().showMessage(tr("방송 요약: 경고 {0}개").format(len(data.warnings)), 6000)
+        return dlg
 
     def unseal_dialog(self, *, sha256: str | None = None, by: str | None = None, confirm=None, early_reason=None):
         """'분석 → 봉인 해제…' (06 7-1·7-2). 06 7-1 조건(라벨링 세션 모두 잠김 · 1차마다 계획 · 계획된 재라벨 잠김 ·
@@ -837,9 +927,11 @@ class MainWindow(QMainWindow):
         idx = getattr(wb, "chat_index", None)
         if idx is not None:
             try:
-                want = {r.get("chat_id") for r in data.final_rows} | {
-                    x.get("chat_id") for x in (data.run.get("reactions") or []) if isinstance(x, dict)}
-                chat_times = idx.chat_times([c for c in want if isinstance(c, str)])
+                # 다른 판에만 있는 채팅도 시각이 있게 전체를 넘긴다(채팅 시각만, 본문 없음)
+                chat_times = idx.chat_times(None if len(data.choices) > 1 else [
+                    c for c in ({r.get("chat_id") for r in data.final_rows} | {
+                        x.get("chat_id") for x in (data.run.get("reactions") or []) if isinstance(x, dict)})
+                    if isinstance(c, str)])
             except Exception:  # noqa: BLE001 — 시각이 없으면 최종 세트 행의 시각을 쓴다
                 chat_times = None
         dur = None
@@ -855,7 +947,8 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(0, 0, 0, 0)
         view = AnalysisView(dlg, run=data.run, final_rows=data.final_rows, sealed_count=data.sealed_count,
-                            scores=data.scores, chat_times=chat_times, duration_ms=dur)
+                            scores=data.scores, chat_times=chat_times, duration_ms=dur,
+                            runs=data.choices, run_loader=data.load_run, run_id=data.run_id)
         lay.addWidget(view)
         if wb is not None:
             view.seekRequested.connect(wb.seek_vod)
@@ -901,9 +994,15 @@ class MainWindow(QMainWindow):
         box: dict = {}
 
         def job(_ctx):
-            run = ai_compare.load_unsealed_run(root, run_id, reader_kind=kind)
-            return ai_compare.make_report(root, run, out_root=out_root, human_gate=gate, reader_kind=kind,
-                                          created_by=created_by, app_version=__version__)
+            run = ai_compare.load_unsealed_run(root, run_id, reader_kind=kind)    # 해제 확인이 라벨 파일보다 먼저
+            final, g = None, gate
+            if g is None:
+                # 사람 일치도 기준은 같은 1차·재라벨 쌍의 최신 일치도 보고서에서(17 5-2 3번) — 나란히 보기와 같은 기준
+                from .. import export
+                final = export.build_final_set(root, reader_kind=kind)
+                g, _rid = af.agreement_gate(root, final.info, reader_kind=kind)
+            return ai_compare.make_report(root, run, out_root=out_root, human_gate=g, reader_kind=kind,
+                                          created_by=created_by, app_version=__version__, final=final)
         from ..workers import JobWorker
         w = JobWorker.single("ai_compare", job, name="AI 비교 보고서", parent=self)
         w.failed.connect(lambda _k, m: box.setdefault("err", m))

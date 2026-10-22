@@ -199,9 +199,14 @@ def test_analysis_session_does_not_open_sealed_ai(qapp, tmp_path, monkeypatch):
     watch.on = True
     wb = open_wb(qapp, proj, ctx("L01-AN-20261023-bl03", "analysis", "L01"))
     assert wb.primary_labels()["sessions"]
+    # 주제 트랙(D-17 5)은 '봉인됨' — 해제 기록이 없어 topics\ 를 열지 않는다
+    assert not wb.topic_track.isHidden() and wb.topic_track.is_sealed()
     close_wb(wb)
     watch.on = False
-    assert watch.seen > 0 and watch.bad == [], watch.bad
+    # 분석 세션은 seal.jsonl 의 건수만 읽을 수 있다(visibility UNSEALED_ONLY — 주제 트랙의 '봉인됨'). 봉인 파일·runs·
+    # topics·보고서는 열지 않는다
+    bad = [(h, p) for h, p in watch.bad if not p.endswith(os.sep + SEAL_LOG)]
+    assert watch.seen > 0 and bad == [], bad
 
 
 def test_assumed_paths_match_seal_module_when_present(tmp_path):

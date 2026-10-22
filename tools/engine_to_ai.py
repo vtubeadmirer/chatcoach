@@ -18,9 +18,15 @@
 시범 프로젝트(폴더 이름 pilot-*)는 --seal 만 된다. 시범 라벨 세션이 잠기기 전에는 아무도 결과를 열지 않는다(D-15 8).
 표준 출력에는 해시·크기·검사 결과(봉인), 또는 건수(파일 출력)만 찍는다. 채팅 본문·닉네임·전사문은 엔진 결과에도 없다.
 
+엔진 판(--from-project): --engine v0.2(기본) · v0.3(로컬 문장 임베딩 의미 비교, D-17 6 — 모델이 없으면 v0.2 로 물러나고
+결과의 engine.components.other 에 '물러남' 이 남는다). --topics 를 주면 같은 입력으로 주제 흐름(topic-flow, D-17 5)도
+메모리로 만들어, --seal 이면 판정 봉인의 **짝**으로 봉인하고(seal.seal_topics_bytes — 판정을 풀 때 같이 풀린다),
+--out a.json 이면 a.topics.json 에 쓴다('분석 → AI 결과 가져오기' 가 같은 이름을 찾아 같이 봉인한다).
+
 사용
   python tools/engine_to_ai.py --in link.json --out ai.json
   python tools/engine_to_ai.py --from-project <폴더> --seal --by L01 [--start-ms ..] [--end-ms ..] [--ai-root <폴더>]
+        [--engine v0.3] [--topics]
 종료 코드: 0 정상 · 1 거부(4단계 아님·검사 거부·시범에 파일 출력) · 2 입력 오류
 """
 from __future__ import annotations
@@ -115,28 +121,90 @@ def dump(doc: Mapping) -> bytes:
     return (json.dumps(doc, ensure_ascii=False, indent=1, allow_nan=False) + "\n").encode("utf-8")
 
 
+V03_VERSION = "link-v0.3"     # engine.link.ENGINE_VERSION_V03 (앱 venv 에서도 읽히게 글자로 둔다)
+
+
+def engine_run_meta(doc: Mapping) -> dict:
+    """봉인 출력에 찍어도 되는 메타데이터만: 엔진 판과 의미 비교 상태(active·status·fallback). 판정 내용은 넣지 않는다."""
+    eng = doc.get("engine") if isinstance(doc.get("engine"), Mapping) else {}
+    sem = doc.get("semantic") if isinstance(doc.get("semantic"), Mapping) else None
+    return {"engine_version": eng.get("version"),
+            "semantic": {k: sem.get(k) for k in ("active", "status", "fallback")} if sem else None}
+
+
 def _is_pilot(project_dir: str | None) -> bool:
     return bool(project_dir) and os.path.basename(os.path.abspath(project_dir)).lower().startswith("pilot-")
 
 
-def _run_engine(project_dir: str, ns) -> dict:
-    """엔진 link 를 메모리로 돌린다(engine.link.run 은 결과 파일을 쓰므로 쓰지 않는다)."""
+def _run_engine(project_dir: str, ns, topics_out: dict | None = None) -> dict:
+    """엔진 link 를 메모리로 돌린다(engine.link.run 은 결과 파일을 쓰므로 쓰지 않는다).
+
+    ns.engine: 'v0.2'(기본, 글자·시간 규칙) 또는 'v0.3'(로컬 문장 임베딩 의미 비교, D-17 6 — 모델이 없으면 v0.2 로 물러나고
+    결과의 engine.components.other 에 '물러남' 이 남는다). topics_out 에 dict 를 주면 같은 입력으로 주제 흐름(engine.topics,
+    D-17 5)도 메모리로 만들어 topics_out['doc'] 에 넣는다 — 파일을 쓰지 않는다."""
     import time
     from datetime import datetime
     from engine import link as L
-    inp = L.load_project(project_dir, use_identities=not ns.no_identities, offset_ms=ns.offset_ms,
-                         file_start_ms=ns.file_start_ms, asr_path=getattr(ns, "asr", None))
-    cfg = L.LinkConfig()
-    t0 = time.perf_counter()
-    reactions, stats = L.link(inp, cfg, start_ms=ns.start_ms, end_ms=ns.end_ms)
-    now = datetime.now().astimezone()
-    doc = L.build_result(inp, reactions, stats, cfg, start_ms=ns.start_ms, end_ms=ns.end_ms,
-                         elapsed_s=time.perf_counter() - t0, created_at=now.isoformat(timespec="seconds"),
-                         run_id=f"link-v0-{now.strftime('%Y%m%dT%H%M%S')}")
+    engine = getattr(ns, "engine", None) or "v0.2"
+    if engine == "v0.2" and topics_out is None:
+        # 지난 판과 같은 길(바이트 단위로 같은 결과): link 를 바로 부른다
+        inp = L.load_project(project_dir, use_identities=not ns.no_identities, offset_ms=ns.offset_ms,
+                             file_start_ms=ns.file_start_ms, asr_path=getattr(ns, "asr", None))
+        cfg = L.LinkConfig()
+        t0 = time.perf_counter()
+        reactions, stats = L.link(inp, cfg, start_ms=ns.start_ms, end_ms=ns.end_ms)
+        now = datetime.now().astimezone()
+        doc = L.build_result(inp, reactions, stats, cfg, start_ms=ns.start_ms, end_ms=ns.end_ms,
+                             elapsed_s=time.perf_counter() - t0, created_at=now.isoformat(timespec="seconds"),
+                             run_id=f"link-v0-{now.strftime('%Y%m%dT%H%M%S')}")
+    else:
+        if topics_out is not None:
+            from engine import topics as TP
+            utts, msgs, nicks, inp = TP.inputs_from_project(
+                project_dir, asr_path=getattr(ns, "asr", None), offset_ms=ns.offset_ms,
+                file_start_ms=ns.file_start_ms, use_identities=not ns.no_identities)
+        else:
+            inp = L.load_project(project_dir, use_identities=not ns.no_identities, offset_ms=ns.offset_ms,
+                                 file_start_ms=ns.file_start_ms, asr_path=getattr(ns, "asr", None))
+        doc = L.build_doc(inp, L.LinkConfig(), start_ms=ns.start_ms, end_ms=ns.end_ms, engine=engine,
+                          semantic_backend=getattr(ns, "semantic_backend", None) or "onnx",
+                          models_dir=getattr(ns, "models_dir", None))
+        if topics_out is not None:
+            topics_out["doc"] = _run_topics(utts, msgs, nicks, inp, ns)
     probs = L.validate_result(doc)
     if probs:
         raise ConvertError(f"엔진 결과 검사 실패 {len(probs)}건")
     return doc
+
+
+def _run_topics(utts, msgs, nicks, inp, ns) -> dict:
+    """주제 흐름(engine.topics.segment → build_doc)을 메모리로. 범위는 --start-ms/--end-ms, 없으면 입력 전체."""
+    import time
+    from datetime import datetime
+    from app.core import topics as T
+    from engine import topics as TP
+    t0 = time.perf_counter()
+    times = [u.t_ms for u in utts] + [u.end_ms for u in utts] + [m.t_ms for m in msgs]
+    start = ns.start_ms if ns.start_ms is not None else (min(times) if times else 0)
+    end = ns.end_ms if ns.end_ms is not None else (max(times) + 1 if times else start + 1)
+    cfg = TP.TopicConfig()
+    embed, embed_name = TP.load_semantic(getattr(ns, "topics_semantic", None) or "off", getattr(ns, "models_dir", None))
+    part = TP.segment(utts, msgs, start_ms=start, end_ms=end, cfg=cfg, embed=embed, nicknames=nicks)
+    now = datetime.now().astimezone()
+    tdoc = TP.build_doc(part, cfg=cfg, run_id=f"topics-v0-{now.strftime('%Y%m%dT%H%M%S')}",
+                        created_at=now.isoformat(timespec="seconds"), video_no=inp.video_no,
+                        messages_sha256=inp.messages_sha256, asr_sha256=inp.asr_meta.get("sha256"),
+                        embedding=embed_name)
+    tdoc["stats"]["elapsed_s"] = round(time.perf_counter() - t0, 3)
+    if T.validate(tdoc):
+        raise ConvertError("주제 흐름 검사 실패")
+    return tdoc
+
+
+def topics_out_path(out: str) -> str:
+    """--out a.json 일 때 주제 흐름 파일 이름: a.topics.json (분석 → AI 결과 가져오기 가 같은 이름을 찾아 같이 봉인한다)."""
+    stem, ext = os.path.splitext(out)
+    return stem + ".topics" + (ext or ".json")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,7 +226,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-identities", action="store_true")
     ap.add_argument("--asr", help="--from-project 의 asr.json 경로(기본 <project>\\derived\\asr.json). 시범은 프로젝트 밖 "
                                   "작업 폴더(chatcoach-data\\sealed-work)의 것을 준다(D-15 8)")
+    ap.add_argument("--engine", choices=("v0.2", "v0.3"), default="v0.2",
+                    help="--from-project 의 엔진 판(v0.3 = 로컬 임베딩 의미 비교, 모델이 없으면 v0.2 로 물러남)")
+    ap.add_argument("--semantic-backend", choices=("onnx", "lmstudio", "off"), default="onnx")
+    ap.add_argument("--models-dir", help="의미 비교 모델 폴더(기본은 engine.semantic 이 정함)")
+    ap.add_argument("--topics", action="store_true",
+                    help="--from-project 에서 주제 흐름(topic-flow)도 만든다. --seal 이면 판정 봉인의 짝으로 봉인, "
+                         "--out 이면 <out>.topics.json")
+    ap.add_argument("--topics-semantic", choices=("off", "onnx", "lmstudio"), default="off",
+                    help="주제 흐름에 로컬 임베딩을 섞을지(기본 off = 낱말만)")
+    ap.add_argument("--allow-fallback", action="store_true",
+                    help="--engine v0.3 --seal 에서 의미 비교가 돌지 못해 v0.2 로 물러나도 봉인한다(기본은 봉인하지 않고 종료 1)")
     ns = ap.parse_args(argv)
+    if ns.topics and not ns.from_project:
+        print(json.dumps({"error": "args", "detail": "--topics 는 --from-project 와 함께 씁니다"}, ensure_ascii=False))
+        return 2
     project = ns.project or ns.from_project
     if ns.out and (_is_pilot(project) or _is_pilot(ns.from_project)):
         print(json.dumps({"error": "pilot_needs_seal", "detail": "시범 프로젝트 결과는 --seal 로만 받습니다(D-15 8)"},
@@ -168,12 +250,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": "args", "detail": "--seal 에는 --project(또는 --from-project)와 --by 가 필요합니다"},
                          ensure_ascii=False))
         return 2
+    tbox: dict | None = {} if ns.topics else None
     try:
         if ns.inp:
             with open(ns.inp, "rb") as f:
                 doc = air.parse_bytes(f.read(air.MAX_BYTES + 1))
         else:
-            doc = _run_engine(ns.from_project, ns)
+            doc = _run_engine(ns.from_project, ns, tbox)
         v1, info = to_ai_result(doc, graded_none=ns.graded_none)
     except (air.AiResultError, ConvertError) as e:
         print(json.dumps({"error": type(e).__name__, "detail": str(e)[:300]}, ensure_ascii=False))
@@ -181,22 +264,42 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, KeyError) as e:
         print(json.dumps({"error": type(e).__name__}, ensure_ascii=False))
         return 2
+    run_meta = engine_run_meta(doc)
+    fell_back = bool(ns.from_project) and ns.engine == "v0.3" and run_meta["engine_version"] != V03_VERSION
+    if fell_back and ns.seal and not ns.allow_fallback:
+        # 봉인 뒤에는 내용을 열어야만 판을 알 수 있다 — 물러났으면 봉인하지 않는다(시범 봉인 'link-v0.3 로 봉인' 확인)
+        print(json.dumps({"error": "engine_fallback", **run_meta,
+                          "detail": "v0.3 의미 비교가 돌지 않아 v0.2 로 물러났습니다. 엔진 venv·모델을 확인하거나 "
+                                    "--allow-fallback 을 주세요"}, ensure_ascii=False))
+        return 1
     data = dump(v1)
+    tdata = dump(tbox["doc"]) if tbox else None
     if ns.seal:
         from app import seal
         try:
             e = seal.seal_bytes(project, data, source="engine_link", by=ns.by, ai_root=ns.ai_root)
+            te = seal.seal_topics_bytes(project, tdata, pair_sha256=e.sha256, by=ns.by, source="engine_topics",
+                                        ai_root=ns.ai_root) if tdata is not None else None
         except seal.SealError as ex:
             print(json.dumps({"error": type(ex).__name__, "detail": str(ex)[:300]}, ensure_ascii=False))
             return 1
-        # 봉인 기록에 있는 것만 찍는다(해시·크기·검사). 변환 건수는 내용을 해석한 값이라 찍지 않는다(06 7-2).
-        print(json.dumps({"sealed": e.sha256, "size": e.size, "check": e.check, "reject_reasons": e.reject_reasons,
-                          "new": e.new, "presealed": e.presealed}, ensure_ascii=False))
-        return 0 if e.check == "valid" else 1
+        # 봉인 기록에 있는 것(해시·크기·검사)과 엔진 판·의미 비교 상태(메타데이터)만 찍는다.
+        # 변환 건수는 내용을 해석한 값이라 찍지 않는다(06 7-2).
+        out = {"sealed": e.sha256, "size": e.size, "check": e.check, "reject_reasons": e.reject_reasons,
+               "new": e.new, "presealed": e.presealed, **run_meta, "engine_fallback": fell_back}
+        if te is not None:
+            out.update(topics_sealed=te.sha256, topics_size=te.size, topics_check=te.check,
+                       topics_reject_reasons=te.reject_reasons)
+        print(json.dumps(out, ensure_ascii=False))
+        return 0 if e.check == "valid" and (te is None or te.check == "valid") else 1
     os.makedirs(os.path.dirname(os.path.abspath(ns.out)), exist_ok=True)
     with open(ns.out, "wb") as f:
         f.write(data)
-    print(json.dumps({"out": ns.out, **info}, ensure_ascii=False))
+    if tdata is not None:
+        with open(topics_out_path(ns.out), "wb") as f:
+            f.write(tdata)
+        info = {**info, "topics_out": topics_out_path(ns.out), "topic_blocks": len(tbox["doc"]["blocks"])}
+    print(json.dumps({"out": ns.out, **info, **run_meta, "engine_fallback": fell_back}, ensure_ascii=False))
     return 0
 
 

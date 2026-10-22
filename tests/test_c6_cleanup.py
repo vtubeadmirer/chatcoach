@@ -189,7 +189,7 @@ def test_step_list_matches_c5_49_with_renames():
               "adj_analysis"}                                       # 도우미가 흐름마다 다르게 찍는 것
     # 흐름 머리글자 f"{p}_…" 는 흐름마다 자기 단계만 찍는다: agree·adj 는 E 분석 단계를, an 은 agree·adj 전용 단계를 찍지 않는다
     an_only = {f"{p}_{s}" for p in ("agree", "adj") for s in ("seal", "labeling_blind", "view_sealed", "unseal",
-                                                               "side_by_side", "copy")}
+                                                               "side_by_side", "copy", "topic_track", "summary")}
     an_only.discard("agree_copy")
     names -= an_only
     names -= {n for n in names if n.startswith("an_") and n not in gs.STEPS_ANALYSIS}
