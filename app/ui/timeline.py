@@ -166,6 +166,7 @@ class Timeline(QWidget):
         self._tracks: dict[str, tuple[list[int], list[str]]] = {}   # 이름 → (정렬된 시각, 종류)
         self._track_labels: dict[str, str] = {}
         self._track_seq: list[str] = []      # 처음 나온 순서
+        self._kind_times: dict[str, dict[str, list[int]]] = {}   # 촘촘한 트랙 그리기용 색인 (이름 → 종류 → 시각)
         self._snap_points: list[int] = []
         self._loop: tuple[int, int] | None = None
         self._styles = dict(MARK_STYLES)
@@ -279,7 +280,7 @@ class Timeline(QWidget):
         w = float(self.width())
         y = 0.0
         out = []
-        for name, h in (("ruler", RULER_H), ("segments", SEG_H), ("density", DENS_H), ("waveform", WAVE_H)):
+        for name, h in self._fixed_tracks():
             out.append((name, QRectF(0, y, w, h)))
             y += h + TRACK_GAP
         for n in self._marker_track_names():
@@ -287,8 +288,27 @@ class Timeline(QWidget):
             y += MARK_H + TRACK_GAP
         return out
 
+    def _fixed_tracks(self) -> list[tuple[str, int]]:
+        """눈금 + 보이는 고정 칸(구간·밀도·파형). 기본은 모두 보인다."""
+        hidden = getattr(self, "_hidden_fixed", frozenset())
+        return [(n, h) for n, h in (("ruler", RULER_H), ("segments", SEG_H), ("density", DENS_H), ("waveform", WAVE_H))
+                if n not in hidden]
+
+    def set_fixed_tracks_visible(self, *, segments: bool = True, density: bool = True, waveform: bool = True) -> None:
+        """고정 칸(구간·채팅 밀도·파형)을 숨기거나 보인다. 눈금은 늘 보인다. 기본값(모두 보임)은 작업대와 같다.
+        방송 분석 화면(app/ui/analysis_view)처럼 마커 트랙만 쓰는 화면이 빈 칸을 숨길 때 쓴다."""
+        hidden = frozenset(n for n, on in (("segments", segments), ("density", density), ("waveform", waveform))
+                           if not on)
+        if hidden == getattr(self, "_hidden_fixed", frozenset()):
+            return
+        self._hidden_fixed = hidden
+        self._update_height()
+        self._data_changed()
+
     def _area_height(self) -> int:
-        return RULER_H + SEG_H + DENS_H + WAVE_H + len(self._tracks) * MARK_H + (4 + len(self._tracks)) * TRACK_GAP
+        fixed = self._fixed_tracks()
+        return (sum(h for _n, h in fixed) + len(self._tracks) * MARK_H
+                + (len(fixed) + len(self._tracks)) * TRACK_GAP)
 
     def _update_height(self):
         self.setFixedHeight(self._area_height() + BAR_H)
@@ -477,6 +497,7 @@ class Timeline(QWidget):
         """이름별 마커 트랙. items = [(ms, kind)]. 빈 목록이면 빈 트랙이 남는다(clear_markers 로 지움)."""
         pairs = sorted((int(t), str(k)) for t, k in items)
         new_track = name not in self._tracks
+        self._kind_times.pop(name, None)
         self._tracks[name] = ([t for t, _ in pairs], [k for _, k in pairs])
         if label is not None:
             self._track_labels[name] = label
@@ -489,6 +510,7 @@ class Timeline(QWidget):
     def clear_markers(self, name: str):
         if name in self._tracks:
             del self._tracks[name]
+            self._kind_times.pop(name, None)
             self._update_height()
             self._data_changed()
 
@@ -513,6 +535,7 @@ class Timeline(QWidget):
         i = self._insert_pos(ts, ks, t, k)
         ts.insert(i, t)
         ks.insert(i, k)
+        self._index_add(name, t, k)
         self._snap_add(t)
         self._marks_changed(name, [t], was_dense)
 
@@ -526,6 +549,7 @@ class Timeline(QWidget):
         if i is None:
             return False
         was_dense = self._is_dense(name)
+        self._index_remove(name, t, ks[i])
         del ts[i]
         del ks[i]
         self._snap_remove(t)
@@ -542,11 +566,13 @@ class Timeline(QWidget):
         if i is None:
             return False
         was_dense = self._is_dense(name)
+        self._index_remove(name, ot, ks[i])
         del ts[i]
         del ks[i]
         j = self._insert_pos(ts, ks, nt, nk)
         ts.insert(j, nt)
         ks.insert(j, nk)
+        self._index_add(name, nt, nk)
         if ot != nt:
             self._snap_remove(ot)
             self._snap_add(nt)
@@ -889,6 +915,65 @@ class Timeline(QWidget):
         a, b = self.view_range()
         return (bisect.bisect_right(ts, b) - bisect.bisect_left(ts, a)) > self.width() / 3
 
+    # ------------------------------------------------------------------ 촘촘한 트랙의 열 계산 (16 5-2 12번)
+    # 확대·축소·스크롤 때마다 보이는 마커 수십만 개를 하나씩 x 로 바꾸던 것을, 트랙별 '종류 → 정렬된 시각' 색인에서
+    # 열마다 bisect 한 번으로 건너뛰는 계산으로 바꾼다. 결과(열 번호 목록)는 예전 {floor((t - view_start) * scale)} 와
+    # 같다. 색인은 처음 촘촘하게 그릴 때 만들고, add/remove/update_marker 는 색인을 그 자리에서 고친다(다시 만들지 않음).
+    def _kind_index(self, name: str) -> dict[str, list[int]]:
+        idx = self._kind_times.get(name)
+        if idx is None:
+            idx = {}
+            ts, ks = self._tracks.get(name, ([], []))
+            for t, k in zip(ts, ks):
+                lst = idx.get(k)
+                if lst is None:
+                    lst = idx[k] = []
+                lst.append(t)            # ts 가 (시각, 종류) 순으로 정렬돼 있어 종류별 목록도 정렬돼 있다
+            self._kind_times[name] = idx
+        return idx
+
+    def _index_add(self, name: str, t: int, k: str) -> None:
+        idx = self._kind_times.get(name)
+        if idx is not None:
+            bisect.insort(idx.setdefault(k, []), t)
+
+    def _index_remove(self, name: str, t: int, k: str) -> None:
+        idx = self._kind_times.get(name)
+        if idx is None:
+            return
+        lst = idx.get(k)
+        j = bisect.bisect_left(lst, t) if lst else 0
+        if lst and j < len(lst) and lst[j] == t:
+            del lst[j]
+            if not lst:
+                del idx[k]
+        else:                            # 어긋남(있을 수 없음) — 안전하게 다음 그리기 때 다시 만든다
+            self._kind_times.pop(name, None)
+
+    @staticmethod
+    def _occupied_columns(times: list[int], a: int, b: int, vs: float, scale: float, out: set) -> None:
+        """times(정렬) 중 [a, b] 안의 시각이 하나라도 있는 열 c = floor((t - vs) * scale) 를 out 에 더한다.
+        열마다 첫 시각 하나만 보고 다음 열의 시작 시각으로 bisect 한다(보이는 열 수만큼만 돈다)."""
+        if scale <= 0:
+            return
+        i = bisect.bisect_left(times, a)
+        j = bisect.bisect_right(times, b)
+        inv = 1.0 / scale
+        floor, ceil, bl = math.floor, math.ceil, bisect.bisect_left
+        while i < j:
+            c = floor((times[i] - vs) * scale)
+            out.add(c)
+            # 다음 열이 시작하는 정수 시각. 부동소수 오차에 대비해 1ms 앞에서 찾는다(앞당겨진 한 칸은 다음 바퀴가 다시 본다).
+            i = bl(times, ceil(vs + (c + 1) * inv) - 1, i + 1, j)
+
+    def _dense_columns(self, name: str, a: int, b: int, vs: float, scale: float) -> list[tuple[tuple, list[int]]]:
+        """[(모양 열쇠 (rgba, hollow), 정렬된 열 번호들)] — 모양 열쇠 순(겹칠 때 쌓임 순서가 늘 같게)."""
+        by_style: dict[tuple, set] = {}
+        for k, times in self._kind_index(name).items():
+            col, hollow = self._styles.get(k, DEFAULT_MARK)
+            self._occupied_columns(times, a, b, vs, scale, by_style.setdefault((col.rgba(), hollow), set()))
+        return [(sk, sorted(cols)) for sk, cols in sorted(by_style.items(), key=lambda kv: kv[0]) if cols]
+
     def _draw_marks(self, p: QPainter, r: QRectF, name: str, window: tuple[float, float] | None = None):
         """마커 트랙 하나. window = (시작 ms, 끝 ms) 를 주면 그 시각 안의 마커만 그린다(부분 갱신, 칠하기는 clip 이 막는다).
         촘촘함(dense)은 늘 보이는 범위 전체로 정한다 — 부분 갱신과 전체 그리기의 모양이 같게."""
@@ -906,6 +991,16 @@ class Timeline(QWidget):
         key_of: dict[str, tuple] = {}
         vs = self.view_start
         scale = self.width() / self.view_len if self.view_len > 0 else 0.0
+        if dense:
+            # 촘촘하면 화면 열마다 한 줄만 (20만 마커를 한 줄씩 긋지 않는다). 열 = floor(x), 선은 열 가운데.
+            # 보이는 마커를 하나씩 훑지 않고 종류별 시각 목록에서 열마다 한 번 건너뛴다(_occupied_columns, 16 5-2 12번).
+            y0, y1 = r.top() + 2, r.bottom() - 2
+            p.setRenderHint(QPainter.Antialiasing, False)
+            for (rgba, _hollow), cols in self._dense_columns(name, a, b, vs, scale):
+                p.setPen(QPen(QColor.fromRgba(rgba), 1))
+                p.drawLines([QLineF(c + 0.5, y0, c + 0.5, y1) for c in cols])
+            self._track_title(p, r, self._track_labels.get(name) or TRACK_NAMES.get(name, name))
+            return
         for i in range(lo, hi):
             k = ks[i]
             sk = key_of.get(k)
@@ -913,16 +1008,10 @@ class Timeline(QWidget):
                 col, hollow = self._styles.get(k, DEFAULT_MARK)
                 sk = key_of[k] = (col.rgba(), hollow)
             by_style.setdefault(sk, []).append((ts[i] - vs) * scale)
-        p.setRenderHint(QPainter.Antialiasing, not dense)
+        p.setRenderHint(QPainter.Antialiasing, True)
         # 겹친 마커의 쌓임 순서를 정해 둔다(색·속 빔 순) — 부분 갱신과 전체 그리기가 같은 그림이 되게
         for (rgba, hollow), xs in sorted(by_style.items(), key=lambda kv: kv[0]):
             col = QColor.fromRgba(rgba)
-            if dense:
-                # 촘촘하면 화면 열마다 한 줄만 (20만 마커를 한 줄씩 긋지 않는다). 열 = floor(x), 선은 열 가운데
-                y0, y1 = r.top() + 2, r.bottom() - 2
-                p.setPen(QPen(col, 1))
-                p.drawLines([QLineF(c + 0.5, y0, c + 0.5, y1) for c in sorted({math.floor(x) for x in xs})])
-                continue
             p.setPen(QPen(col, 1.5))
             p.setBrush(Qt.NoBrush if hollow else QBrush(col))
             for x in xs:

@@ -69,6 +69,9 @@ ALLOWED_HEX: dict[str, str] = {
 ALLOWED_VIDEO_NOS: dict[str, str] = {
     # tests/test_chzzk_parse.py test_parse_video_no — 주소 파싱 시험의 1~3자리 값 (실제 VOD 번호는 7~8자리)
     "1": "주소 파싱 시험값", "9": "주소 파싱 시험값", "77": "주소 파싱 시험값", "123": "주소 파싱 시험값",
+    # tests/test_ai_results.py · test_ai_compare.py · test_seal.py — 합성 프로젝트(project.create(…, 777, …))와 맞춘
+    # ai-result 의 target.video_no. 778 은 '다른 방송' 거부 시험값. 실제 VOD 번호(7~8자리)가 아니다
+    "777": "합성 시험 방송 번호", "778": "합성 시험 방송 번호(불일치 시험)", "999": "합성 시험 방송 번호(불일치 시험)",
 }
 ALLOWED_NICKNAMES: dict[str, str] = {
     "익명의 후원자": "치지직이 익명 후원에 붙이는 고정 표시 (사람 닉네임 아님)",

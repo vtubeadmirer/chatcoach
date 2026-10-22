@@ -15,7 +15,11 @@ UI 는 can_show / show_policy 만 묻는다. '열지 않음' 은 화면에서 �
   session.close 같은 운영 기록만 쓴다.
 - 분석 세션을 연 사실은 그 세션의 기록 파일(labels/<라벨러>-AN-….jsonl, 첫 줄 session.open)이 곧 기록이다.
   일치도 보고서는 analysis_exposure() 로 '분석 세션을 연 라벨러' 와 그 라벨러의 라벨링 세션을 노출로 표시한다(D-09 5).
-- 봉인된 평가용 AI 결과(<앱>\\data\\ai\\, 06 7-1)는 열지 않는다. 봉인 규칙은 평가 절차의 것이라 분석 화면이 깨면 안 된다.
+- 봉인된 평가용 AI 결과(<앱>\\data\\ai\\, 06 7-1)는 UNSEALED_ONLY: seal.jsonl 의 '봉인됨 n건' 과 **해제된** 결과
+  (runs\\<run_id>.json)만 읽는다. 봉인 파일·해제 전 결과는 열지 않고, 봉인·해제도 하지 않는다(D-15 7 '나란히 보기는
+  해제 전에는 열지 않는다'). 봉인 규칙은 평가 절차의 것이라 분석 화면이 깨면 안 된다.
+- 봉인이 하나라도 해제된 뒤(단계 COMPARISON)에는 다른 세션 라벨을 잠긴 세션 것까지 읽는다(LOCKED_ONLY) — 나란히 보기의
+  '사람 최종'(최종 세트: 재라벨·조정 반영)을 만들려고. 해제 조건이 모든 라벨링 세션 잠김이라 새 쏠림은 없다.
 
 core 층: 파일·시계·Qt 를 쓰지 않는다. 순수 표와 함수뿐이다.
 """
@@ -67,9 +71,13 @@ TOGGLE = "toggle"                 # 기본 숨김. 켜면 view.exposed 를 남�
 READ_CAL_MEDIA = "read_cal_media" # project.json: 읽기(보정·영상만 쓰기)
 SEAL_ONLY = "seal_only"           # <앱>\data\ai: 봉인(받기·해시 기록)만, 내용은 열지 않음
 OPS_ONLY = "ops_only"             # 자기 세션 labels/: 운영 기록만 쓰기(라벨 없음), 읽기 가능
+# <앱>\data\ai (분석 세션, E 통합): seal.jsonl 의 건수와 **해제된** runs\<run_id>.json 만 읽는다. 봉인 파일
+# sealed\*.bin 과 해제 전 결과는 열지 않고, 봉인·해제도 하지 않는다. '읽기 가능'(_READABLE)에 넣지 않는다 —
+# session.open.blind.to_ai 는 그대로 True 다(기본 상태에서 AI 결과를 보지 않는다).
+UNSEALED_ONLY = "unsealed_only"
 
 ACCESS_VALUES = frozenset({NONE, HOLD, READ, RW, READ_DRAW, LOCKED_ONLY, LOCKED_PRIMARY, OWN, TOGGLE,
-                           READ_CAL_MEDIA, SEAL_ONLY, OPS_ONLY})
+                           READ_CAL_MEDIA, SEAL_ONLY, OPS_ONLY, UNSEALED_ONLY})
 _READABLE = frozenset({READ, RW, READ_DRAW, LOCKED_ONLY, LOCKED_PRIMARY, OWN, READ_CAL_MEDIA, OPS_ONLY})
 _WRITABLE = frozenset({RW, READ_DRAW, READ_CAL_MEDIA, OPS_ONLY})
 
@@ -166,7 +174,7 @@ _TABLE: Mapping[str, FileScope] = MappingProxyType({
     ANALYSIS: _scope(
         open_lock=HOLD, own_labels=OPS_ONLY, other_labels=LOCKED_PRIMARY, project_json=READ, messages=READ,
         samples=READ, relabel_plans=READ, identities=TOGGLE, raw_pages=TOGGLE, derived_asr=READ,
-        engine_results=READ, origin=READ, ai_sealed=NONE, reports=READ,
+        engine_results=READ, origin=READ, ai_sealed=UNSEALED_ONLY, reports=READ,
         writable_label_kinds=frozenset(),
     ),
 })
@@ -176,12 +184,15 @@ def files_to_open(session_kind: str, phase: str | None = None) -> FileScope:
     """세션 종류(와 단계) → 열 수 있는 파일 (02 3-3 계약). 모르는 세션 종류는 BLOCKED.
 
     단계에 따라 바뀌는 것: 조정 세션의 봉인 AI 결과는 COMPARISON(봉인 해제 뒤)에서만 READ, 그 전엔 SEAL_ONLY.
+    분석 세션의 다른 세션 라벨은 COMPARISON 에서 LOCKED_ONLY(최종 세트), 그 전엔 LOCKED_PRIMARY.
     """
     base = _TABLE.get(session_kind) if isinstance(session_kind, str) else None
     if base is None:
         return BLOCKED
     if session_kind == ADJUDICATION and phase == COMPARISON:
         return _replace(base, ai_sealed=READ)
+    if session_kind == ANALYSIS and phase == COMPARISON:
+        return _replace(base, other_labels=LOCKED_ONLY)
     return base
 
 
@@ -297,5 +308,5 @@ __all__ = [
     "SESSION_KINDS", "SESSION_CODES", "LABELING_SESSIONS", "PHASES", "ITEMS",
     "PRIMARY", "RELABEL_SAME", "RELABEL_SECOND", "ADJUDICATION", "ORIGIN_REVIEW", "ANALYSIS",
     "NONE", "HOLD", "READ", "RW", "READ_DRAW", "LOCKED_ONLY", "OWN", "TOGGLE", "READ_CAL_MEDIA",
-    "SEAL_ONLY", "OPS_ONLY", "ALWAYS", "ON_TOGGLE", "NEVER",
+    "SEAL_ONLY", "OPS_ONLY", "UNSEALED_ONLY", "ALWAYS", "ON_TOGGLE", "NEVER",
 ]

@@ -1039,6 +1039,18 @@ def _default_report_roots(project_root: str, droot: str) -> list[str]:
     return roots
 
 
+def _default_ai_roots(project_root: str, droot: str) -> list[str]:
+    """AI 결과(봉인 원본·seal.jsonl·runs) 루트 후보: <데이터>\\ai 와 app.seal.default_ai_root(프로젝트가
+    '…\\projects\\<slug>' 에 있으면 그 옆 '…\\ai'). 보고서 루트와 같은 규칙."""
+    roots = [os.path.join(droot, "ai")]
+    try:
+        from .seal import default_ai_root
+        roots.append(default_ai_root(project_root))
+    except Exception:                       # 봉인 모듈을 못 읽어도 파기는 계속한다
+        pass
+    return roots
+
+
 def _count_pre_update_with(pid: str, broot: str) -> int:
     d = os.path.join(broot, PRE_UPDATE_DIR)
     n = 0
@@ -1059,7 +1071,7 @@ def _count_pre_update_with(pid: str, broot: str) -> int:
 
 def plan_disposal(project_root: str, *, keep_labels: bool = False, data_root: str | None = None,
                   backup_root: str | None = None, report_roots: Iterable[str] | None = None,
-                  ignore_open_lock: bool = False) -> DisposalPlan:
+                  ignore_open_lock: bool = False, ai_roots: Iterable[str] | None = None) -> DisposalPlan:
     """'프로젝트 파기' 의 대상·경고 목록. 아무것도 지우지 않는다. 화면이 이것을 보여 주고 확인을 받은 뒤 execute_disposal.
 
     keep_labels=True('라벨만 남기기'): 프로젝트 폴더의 chat/ · derived/ · 보호 구역만 보내고 labels/ · samples/ · locks/ ·
@@ -1096,7 +1108,11 @@ def plan_disposal(project_root: str, *, keep_labels: bool = False, data_root: st
     add("cache", os.path.join(droot, "cache", pid), droot)
     for fp16 in _media_fps(proj):
         add("media_cache", os.path.join(droot, "cache", fp16), droot)
-    add("ai", os.path.join(droot, "ai", pid), droot)
+    for ar_ in (ai_roots if ai_roots is not None else _default_ai_roots(root, droot)):
+        ar_ = _abs(ar_)
+        if _under(ar_, root):
+            continue
+        add("ai", os.path.join(ar_, pid), ar_)
     for rr in (report_roots if report_roots is not None else _default_report_roots(root, droot)):
         rr = _abs(rr)
         if _under(rr, root):

@@ -54,6 +54,14 @@
   출처 판정 세션에서 전부 판정(다른 세션 기록·samples/·relabel/ 을 열지 않음). 스크린샷 _adj_b · _adj_missed · _adj ·
   _adj_origin. 끝나면 다 지운다.
 
+--analysis-flow (E 첫 묶음, 08 D-01·D-15 7·8, 06 6장·7장): 같은 모양의 사본(…\\projects\\프로젝트, ai 루트는 그 옆 …\\ai)에서
+  보기 전용으로 열어 '분석 → AI 결과 가져오기(봉인)' (합성 엔진 결과: 사본의 chat_id 만, 등급은 chat_id 해시로) →
+  '봉인 해제' 가 조건 미충족으로 거부 → L01 1차·L02 재라벨을 기존 흐름(_flow_primary·_flow_second)으로 잠금(그동안 ai 폴더를
+  한 번도 열지 않음, 잠긴 두 세션을 다시 열어도 분석 메뉴가 꺼짐) → L01 분석 세션: 나란히 보기가 '봉인됨 1건' 으로 막힘(봉인
+  파일·runs 를 열지 않음) → 보기 전용에서 해제(조건 됨, 사전 봉인) → L01 분석 세션 '엔진과 나란히 보기'(목록·점수 표·
+  다음 다른 곳, --window-size 면 그 크기로, 스크린샷 _an_side) → 보기 전용 '보고 → AI 비교 보고서'(사본 옆 임시 폴더).
+  끝나면 다 지운다. 단계 이름 앞에 an_.
+
 지키는 것
 - 원본 프로젝트에는 쓰지 않는다: 영상 연결은 persist=False, 세션 없이(보기 전용) 열어 라벨 기록도 열지 않는다.
   열기 잠금(locks/open.lock)만 잡았다 푼다. 끝에 project.json 수정 시각과 크기가 그대로인지 확인한다.
@@ -93,6 +101,8 @@ def parse_args(argv=None):
                     help="사본에서 L01 1차→잠그기→재라벨 계획→L02 두 번째 사람(열기 감시)→잠그기→일치도 보고서→분석 세션")
     ap.add_argument("--adjudication-flow", action="store_true",
                     help="사본에서 L01 1차·L02 재라벨(④ 놓친 후보 포함) 잠금→보고서→조정 2건→계획 취소→출처 판정 3건")
+    ap.add_argument("--analysis-flow", action="store_true",
+                    help="사본에서 합성 엔진 결과 봉인→해제 거부→L01·L02 잠금→해제→분석 세션 나란히 보기→AI 비교 보고서")
     ap.add_argument("--window-size", help="--labeling-flow 동안 메인 창 크기 (예: 1366x768, 테두리 포함)")
     ap.add_argument("--data-dir", help="임시 데이터 폴더 (기본 %%TEMP%%\\chatcoach_smoke)")
     ap.add_argument("--timeout", type=float, default=60.0, help="단계 하나의 대기 상한(초)")
@@ -187,21 +197,30 @@ STEPS_RENAMED = {"agree_a_segments": "agree_a_label", "agree_a_samples": "agree_
 STEPS_ADDED = ("agree_copy", "adj_tools", "cache_drop")
 
 
-def expected_steps() -> list[str]:
-    """지금 판에서 네 흐름을 다 켰을 때 찍혀야 하는 단계 이름(c5 목록을 STEPS_RENAMED 로 바꾸고 STEPS_ADDED 를 더함)."""
+# --analysis-flow (E 첫 묶음) 의 단계. 켜면 STEPS_C5 대조 목록 뒤에 붙고, 건너뛴 표시 'analysis_flow' 는 빠진다.
+STEPS_ANALYSIS = ("an_copy", "an_seal", "an_open_a", "an_a_label", "an_a_lock_plan", "an_b_label", "an_b_lock_blind",
+                  "an_labeling_blind", "an_view_sealed", "an_unseal", "an_side_by_side", "an_report", "an_cleanup")
+
+
+def expected_steps(analysis: bool = False) -> list[str]:
+    """지금 판에서 네 흐름을 다 켰을 때 찍혀야 하는 단계 이름(c5 목록을 STEPS_RENAMED 로 바꾸고 STEPS_ADDED 를 더함).
+    analysis=True(--analysis-flow 도 켬)면 cache_drop 앞에 STEPS_ANALYSIS 를 넣는다."""
     out: list[str] = []
     for s in STEPS_C5:
         s = STEPS_RENAMED.get(s, s)
         if s not in out:
             out.append(s)
     out += [s for s in STEPS_ADDED if s not in out]
+    if analysis:
+        i = out.index("cache_drop") if "cache_drop" in out else len(out)
+        out[i:i] = [s for s in STEPS_ANALYSIS if s not in out]
     return out
 
 
-def compare_steps(names) -> tuple[list[str], list[str]]:
-    """찍힌 단계 이름 → (빠진 것, 목록에 없는 것)."""
-    seen = list(dict.fromkeys(names))
-    want = expected_steps()
+def compare_steps(names, analysis: bool = False) -> tuple[list[str], list[str]]:
+    """찍힌 단계 이름 → (빠진 것, 목록에 없는 것). 'analysis_flow'(건너뜀 표시)는 대조하지 않는다."""
+    seen = [s for s in dict.fromkeys(names) if s != "analysis_flow"]
+    want = expected_steps(analysis)
     return [s for s in want if s not in seen], [s for s in seen if s not in want]
 
 
@@ -260,6 +279,29 @@ def remove_tree_checked(path: str) -> list[str]:
     if os.path.exists(path) and not failed:
         failed.append(path)
     return failed
+
+
+def synthetic_engine_result(project_root: str, run_id: str = "run-smoke-synth") -> bytes:
+    """--analysis-flow 의 합성 엔진 결과(ai-result 1판). 사본의 chat_id 만 쓰고(본문은 읽지 않음) 등급은 chat_id 의
+    sha256 으로 정한다(약 8%: 직접 3% · 높음 3% · 관련성만 2%, 나머지 반응 미확인). 엔진 판정이 아니라 화면·보고서 시험용."""
+    import hashlib
+    import json
+    from app import ai_results as air
+    from app.project import open_project
+    data = open_project(project_root).data or {}
+    rx = []
+    for c in sorted(air.project_chat_ids(project_root)):
+        v = int(hashlib.sha256(c.encode("ascii")).hexdigest()[:2], 16)
+        grade = "direct" if v < 8 else "likely" if v < 16 else "related_only" if v < 21 else None
+        rx.append({"chat_id": c, "result": "graded" if grade else "unconfirmed", "grade": grade})
+    doc = {"schema": "chatcoach/ai-result", "schema_version": 1, "run_id": run_id,
+           "created_at": "2026-10-22T09:00:00+09:00",
+           "engine": {"name": "smoke-synthetic", "version": "0.0.0", "preregistered": True},
+           "target": {"platform": "chzzk", "video_no": str((data.get("broadcast") or {}).get("video_no")),
+                      "chat_id_algorithm": "sl-chat-id-v1",
+                      "messages_sha256": (data.get("chat") or {}).get("messages_sha256")},
+           "time_axis": "vod_ms", "reactions": rx}
+    return json.dumps(doc, ensure_ascii=False).encode("utf-8")
 
 
 def _hms(ms: int) -> str:
@@ -1176,8 +1218,12 @@ class Smoke:
             man_b = q.manifest or {}
             b_items = [it["chat_id"] for it in man_b.get("items") or []]
             judged_b = self._judge_three(wb, ["direct", "certain", "undeterminable"], "B") if good else []
-            no_primary = wb.primary_labels()["chats"] == 0 and not wb.timeline.markers("primary") and \
-                not (wb.chat.label_marks() if hasattr(wb.chat, "label_marks") else {})
+            # 채팅 표 표시: 자기 세션 라벨(초록, D-16)은 괜찮고 1차 라벨(보라)은 안 된다.
+            # 초록이면 표시된 채팅이 모두 B 자신의 라벨이어야 한다(own_chat_marks 와 같음)
+            b_marks = wb.chat.label_marks() if hasattr(wb.chat, "label_marks") else {}
+            own_ok = (not b_marks) or (bool(getattr(wb.chat.model, "marks_own", False))
+                                       and b_marks == wb.own_chat_marks())
+            no_primary = wb.primary_labels()["chats"] == 0 and not wb.timeline.markers("primary") and own_ok
             gate_before = wb.gates()[ph.MISSED].allowed
             self._shot(f"_{p}_b")
             ok = good and bool(man_b.get("from_plan")) and bool(b_items) and len(judged_b) == 3 and no_primary \
@@ -1549,6 +1595,176 @@ class Smoke:
             if tmp is not None:
                 self._flow_cleanup(tmp, p, t0)
 
+    # ---------------------------------------------------------------- --analysis-flow (E 첫 묶음, 08 D-01·D-15 7·8)
+    def _open_view_only(self, dst: str) -> bool:
+        old = self.win.session_chooser
+        self.win.session_chooser = lambda outcome: None
+        try:
+            out = self.win.project_view.open_path(dst)
+        finally:
+            self.win.session_chooser = old
+        ok = out is not None and out.ok and self.wb is not None and self.wait(
+            lambda: not ({"chat", "media_check", "chat_index", "store"} & set(self.wb._jobs)))
+        self.win.update_session_actions()
+        self.win.update_analysis_actions()
+        return ok and self.wb.session is None
+
+    def step_analysis_flow(self) -> bool:
+        t0 = time.perf_counter()
+        if not self.args.analysis_flow:
+            return self.check("analysis_flow", True, t0, "skip (--analysis-flow 없음)")
+        from app import seal
+        p = "an"
+        tmp = None
+        # 경고·안내 상자는 모달이라 화면 없이 멈춘다 — 이 흐름 동안은 문장 앞부분만 찍는다(코드·건수·ID 만 담긴 문장)
+        old_warn, old_inform = self.win.warn, self.win.inform
+        self.win.warn = lambda title, text: print(f"  경고: {str(text)[:160]}", flush=True)
+        self.win.inform = lambda title, text: print(f"  안내: {str(text)[:160]}", flush=True)
+        try:
+            tmp, dst, out_root, done = self._flow_copy(p)
+            ai_dir = os.path.normcase(seal.default_ai_root(dst))
+            outside = not _inside(ai_dir, dst)
+            self.check(f"{p}_copy", bool(done) and outside, time.perf_counter(),
+                       f"copied={len(done)} ai_root_outside_project={outside}")
+            # ---- A. 보기 전용: 합성 엔진 결과 가져오기(봉인) → 해제 조건 미충족 거부
+            t1 = time.perf_counter()
+            eng = os.path.join(tmp, "engine-out.json")          # 사본 밖
+            with open(eng, "wb") as fh:
+                fh.write(synthetic_engine_result(dst))
+            ok = self._open_view_only(dst)
+            menu_on = self.win.m_analysis.isEnabled() and self.win.a_seal_import.isEnabled()
+            e = self.win.seal_import_dialog(path=eng, by=self.AGREE_A) if ok and menu_on else None
+            os.remove(eng)                                       # 봉인 사본만 남긴다
+            self.win.update_analysis_actions()
+            refused = self.win.unseal_dialog(by=self.AGREE_A, confirm=lambda _t: False) is None \
+                if self.win.a_unseal.isEnabled() else False
+            reasons = list(getattr(self.win, "last_unseal_reasons", []))
+            st = seal.seal_status(dst)
+            ok = ok and menu_on and e is not None and e.new and e.check == "valid" and refused and bool(reasons) \
+                and st.sealed_count == 1 and st.unsealed_count == 0
+            self.check(f"{p}_seal", ok, t1, f"sealed={st.sealed_count} sha={e.sha256[:8] if e else '-'} "
+                                            f"size={e.size if e else 0} check={e.check if e else '-'} "
+                                            f"unseal_refused={refused} unmet={len(reasons)}")
+            self.win.show_home()
+            self.pump(50)
+            if not ok:
+                return False
+            # ---- B. L01 1차 → 잠그기 → 계획, L02 재라벨 → 잠그기 (기존 흐름). 그동안 data\ai 를 한 번도 열지 않는지
+            stop, watch = self._watch_opens((ai_dir,))
+            try:
+                a = self._flow_primary(dst, p)
+                b = self._flow_second(dst, a["plan"], a["sid_a"], p, a_items=a["a_items"]) if a else None
+                # 잠긴 라벨링 세션을 다시 열어도 분석 메뉴는 꺼져 있다
+                t1 = time.perf_counter()
+                offs = []
+                for sid, lab in ((a or {}).get("sid_a"), self.AGREE_A), ((b or {}).get("sid_b"), self.AGREE_B):
+                    if not sid:
+                        continue
+                    okr, _c = self._flow_open(dst, "resume:" + sid, lab)
+                    self.win.update_session_actions()
+                    self.win.update_analysis_actions()
+                    offs.append(okr and not self.win.m_analysis.isEnabled()
+                                and self.win.seal_import_dialog(path=os.path.join(tmp, "없음.json"), by=lab) is None)
+                    self.win.show_home()
+                    self.pump(50)
+            finally:
+                stop()
+            ok = a is not None and b is not None and len(offs) == 2 and all(offs) and watch["bad"] == []
+            self.check(f"{p}_labeling_blind", ok, t1, f"menu_off={sum(offs)}/2 ai_opens={len(watch['bad'])} "
+                                                      f"watched={watch['seen']}")
+            if not ok:
+                return False
+            # ---- C. 분석 세션, 해제 전: 나란히 보기는 열리지 않고 '봉인됨 1건' 만
+            t1 = time.perf_counter()
+            stop, watch = self._watch_opens((os.path.join(ai_dir, ""),))
+            try:
+                okc, ctx_c = self._flow_open(dst, "new:analysis", self.AGREE_A)
+                self.win.update_analysis_actions()
+                tip = self.win.a_side_by_side.toolTip()
+                closed = self.win.side_by_side_view(show=False) is None
+            finally:
+                stop()
+            bins = [x for x in watch["bad"] if os.sep + "sealed" + os.sep in x or os.sep + "runs" + os.sep in x]
+            ok = okc and not self.win.a_side_by_side.isEnabled() and "봉인됨 1건" in tip and closed and not bins \
+                and not self.win.a_seal_import.isEnabled() and not self.win.a_unseal.isEnabled()
+            self.check(f"{p}_view_sealed", ok, t1, f"side_by_side_off={not self.win.a_side_by_side.isEnabled()} "
+                                                   f"sealed_count_shown={'봉인됨 1건' in tip} bin_or_run_opens={len(bins)}")
+            self.win.show_home()
+            self.pump(50)
+            if not ok:
+                return False
+            # ---- D. 보기 전용: 조건이 되어 봉인 해제
+            t1 = time.perf_counter()
+            ok = self._open_view_only(dst)
+            res = self.win.unseal_dialog(by=self.AGREE_A, confirm=lambda _t: True) if ok else None
+            st = seal.seal_status(dst)
+            ok = ok and res is not None and res.conditions_met and st.unsealed_count == 1 and st.sealed_count == 0
+            self.check(f"{p}_unseal", ok, t1, f"conditions_met={res.conditions_met if res else '-'} "
+                                              f"presealed={res.presealed if res else '-'} "
+                                              f"locks={len(res.record.get('locks') or []) if res else 0}")
+            self.win.show_home()
+            self.pump(50)
+            if not ok:
+                return False
+            # ---- E. 분석 세션: 엔진과 나란히 보기 (해제된 run · 최종 세트 · 점수)
+            t1 = time.perf_counter()
+            okc, _ctx = self._flow_open(dst, "new:analysis", self.AGREE_A)
+            if self.args.window_size:
+                self._resize(self.args.window_size)
+            self.win.update_analysis_actions()
+            dlg = self.win.side_by_side_view(show=True) if okc and self.win.a_side_by_side.isEnabled() else None
+            v = dlg.view if dlg is not None else None
+            s = v.summary() if v is not None else {}
+            fit = ""
+            if dlg is not None:
+                if self.args.window_size:
+                    w, h = (int(x) for x in self.args.window_size.lower().split("x", 1))
+                    dlg.resize(min(dlg.width(), w - 40), min(dlg.height(), h - 60))
+                self.pump(300)
+                fit = self._fit(v)
+                jumped = v.next_diff()
+            else:
+                jumped = False
+            ok = v is not None and not v.is_sealed() and bool(v.items()) and bool(v.score_table_rows()) and jumped
+            if dlg is not None and self.args.screenshot and _inside(self.args.screenshot, SCREENS_DIR):
+                root_, ext = os.path.splitext(self.args.screenshot)
+                pix = dlg.grab()
+                pix.save(root_ + "_an_side" + (ext or ".png"), "PNG")
+            self.check(f"{p}_side_by_side", ok, t1,
+                       f"items={len(v.items()) if v else 0} engine_rows={s.get('engine_rows')} "
+                       f"human_rows={s.get('human_rows')} same={s.get('same')} grade_diff={s.get('grade_diff')} "
+                       f"engine_only={s.get('engine_only')} human_only={s.get('human_only')} "
+                       f"score_rows={len(v.score_table_rows()) if v else 0} jump={jumped} fit={fit}")
+            self.win.show_home()
+            self.pump(50)
+            if not ok:
+                return False
+            # ---- F. 보기 전용: AI 비교 보고서 (프로젝트 밖)
+            t1 = time.perf_counter()
+            ok = self._open_view_only(dst)
+            rep = self.win.ai_compare_dialog(out_root=out_root) if ok and self.win.a_ai_compare.isEnabled() else None
+            files = sorted(os.listdir(rep.out_dir)) if rep and rep.out_dir else []
+            tables = sorted(os.listdir(os.path.join(rep.out_dir, "tables"))) if "tables" in files else []
+            e1 = (rep.report.get("e1") or {}) if rep else {}
+            hdr = (rep.report.get("header") or {}) if rep else {}
+            ok = rep is not None and files == ["manifest.json", "report.json", "report.md", "tables"] and \
+                not _inside(rep.out_dir, dst) and bool(tables) and hdr.get("conditions_met") is True and \
+                hdr.get("pre_sealed") is True
+            self.check(f"{p}_report", ok, t1,
+                       f"files={len(files)} tables={len(tables)} e1_population={e1.get('population')} "
+                       f"lenient_n={(e1.get('lenient') or {}).get('n')} pre_sealed={hdr.get('pre_sealed')} "
+                       f"conditions_met={hdr.get('conditions_met')} warnings={len(rep.warnings) if rep else 0}")
+            self.win.show_home()
+            self.pump(50)
+            return ok
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc(limit=6)
+            return self.check("analysis_flow", False, t0, type(e).__name__)
+        finally:
+            self.win.warn, self.win.inform = old_warn, old_inform
+            if tmp is not None:
+                self._flow_cleanup(tmp, p, t0)
+
     def _resize(self, spec: str) -> None:
         """--window-size '1366x768': 메인 창 바깥 크기(테두리 포함)를 그 크기로 맞춘다(노트북 화면 확인, 11 4-2 의 2)."""
         w, h = (int(x) for x in spec.lower().split("x", 1))
@@ -1669,7 +1885,7 @@ class Smoke:
         steps = [self.step_window, self.step_open, self.step_chat, self.step_timeline, self.step_video, self.step_waveform,
                  self.step_seek, self.step_chat_activate, self.step_play, self.step_zoom, self.step_filter,
                  self.step_store_copy, self.step_shot, self.step_labeling_flow, self.step_agreement_flow,
-                 self.step_adjudication_flow, self.step_close]
+                 self.step_adjudication_flow, self.step_analysis_flow, self.step_close]
         t_all = time.perf_counter()
         for st in steps:
             try:
@@ -1692,10 +1908,12 @@ class Smoke:
         steps_ok = True
         a = self.args
         if a.store_copy and a.labeling_flow and a.agreement_flow and a.adjudication_flow and not failed:
-            missing, extra = compare_steps(r[0] for r in self.results)
+            an = bool(a.analysis_flow)
+            missing, extra = compare_steps((r[0] for r in self.results), analysis=an)
             steps_ok = not missing
-            print(f"== 단계 목록(14 c5 의 49 와 대조, 15 5-2 의 16): {len(dict.fromkeys(r[0] for r in self.results))}"
-                  f"/{len(expected_steps())} missing={missing} extra={extra}")
+            seen = [s for s in dict.fromkeys(r[0] for r in self.results) if s != "analysis_flow"]
+            print(f"== 단계 목록(14 c5 의 49{' + E 분석 13' if an else ''} 와 대조, 15 5-2 의 16): {len(seen)}"
+                  f"/{len(expected_steps(an))} missing={missing} extra={extra}")
         return 0 if not failed and steps_ok else 1
 
     def step_cache_drop(self) -> bool:

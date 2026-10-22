@@ -39,6 +39,16 @@
 - origin_*, adjudicated_exclude, human_disagreement, agreement_below_gate 는 세지 않는다.
   그래서 eval.strict 는 '이 판이 아는 사유가 없음' 이다. 매니페스트 notes 에 적는다.
 - origin 라벨(출처 판정, 16-2 '검토자만')과 adjudication 기록은 행으로 내보내지 않고 건수만 경고로 남긴다.
+
+최종 세트 모드 (build_final_set · export_final_set, 16 8-1 4번, 06 6-5·6-6, 08 D-15 7)
+- **잠긴** 1차 세션 하나 + 잠긴 재라벨 세션 + 조정 세션의 조정 기록 + (있으면) 잠긴 출처 판정 세션만 읽는다.
+  06 7-1 비교 조건(agreement_report.comparison_gate)을 라벨 파일을 열기 **전에** 본다. 안 잠겼으면 아무 라벨도 열지 않고 거부.
+- 조정 기록은 app.core.final_set 이 adjudicate.case_states 와 같은 열쇠로 바꿔 끼운다. exclude_from_eval 은 세트에서 빼고
+  (계단 건수에만 adjudicated_exclude), keep_as_ambiguous 는 ambiguous.jsonl 에 따로 둔다. 재라벨에서 달랐는데 조정이 없으면
+  human_disagreement. 출처 판정이 있으면 origin_virtual·origin_undeterminable 도 센다.
+- zip: labels.jsonl(참고 점수에 들어가는 행 = eval.lenient, export_type ground_truth_lenient. 엄격은 eval.strict 로 거른다)·
+  ambiguous.jsonl·CSV 3개·manifest.json. 구간 행은 최종 구간 조각(final_set.segment_timeline)마다 한 줄이다.
+- 행 모양은 export-row 그대로다(source = adjudication 이면 조정 값). 라벨 형식(label-event)은 바꾸지 않는다(D-15 7).
 """
 from __future__ import annotations
 
@@ -977,7 +987,8 @@ def export_labels(project_dir: str, out_path: str, options: ExportOptions | None
                         session_ids=list(info["session_ids"]), warnings=warns)
 
 
-def _write_zip(out_path: str, files: list[tuple[str, bytes, Any]], now: datetime) -> None:
+def _write_zip(out_path: str, files: list[tuple[str, bytes, Any]], now: datetime,
+               allowed: tuple[str, ...] = ZIP_NAMES) -> None:
     d = os.path.dirname(os.path.abspath(out_path))
     os.makedirs(d, exist_ok=True)
     tmp = os.path.abspath(out_path) + ".tmp"
@@ -987,7 +998,7 @@ def _write_zip(out_path: str, files: list[tuple[str, bytes, Any]], now: datetime
     try:
         with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as z:
             for name, data, _ in files:
-                assert name in ZIP_NAMES
+                assert name in allowed
                 zi = zipfile.ZipInfo(name, date_time=stamp)
                 zi.compress_type = zipfile.ZIP_DEFLATED
                 z.writestr(zi, data)
@@ -1002,7 +1013,422 @@ def _write_zip(out_path: str, files: list[tuple[str, bytes, Any]], now: datetime
         raise
 
 
+# ---------------------------------------------------------------------------------------------- 최종 세트 모드
+
+FINAL_EXPORT_TYPE = "ground_truth_lenient"
+AMBIGUOUS_NAME = "ambiguous.jsonl"
+FINAL_ZIP_NAMES = ZIP_NAMES + (AMBIGUOUS_NAME,)
+SET_FINAL, SET_EXCLUDED, SET_AMBIGUOUS = "final", "excluded", "ambiguous"
+_AMBIGUOUS_REASON = "adjudicated_ambiguous"          # 매니페스트 counts.excluded 에만 (final_set.R_ADJ_AMBIGUOUS)
+FINAL_NOTES = ("최종 세트(참고 정답 세트): 잠긴 1차 세션 + 재라벨 + 조정 기록. labels.jsonl 은 eval.lenient 인 행만, 엄격 정답은 "
+               "eval.strict 로 거른다. 조정 값으로 바꾼 행은 source = adjudication. 평가 제외(exclude_from_eval)는 행이 없고 "
+               "counts.excluded 의 adjudicated_exclude 로만 센다. 진짜 모호함으로 남긴 것(keep_as_ambiguous)은 ambiguous.jsonl. "
+               "구간 행은 최종 구간 조각마다 한 줄. 시각은 VOD 시각 ms. CSV 는 참고용이며 다시 가져올 수 없음.")
+
+
+class FinalSetBlindError(ExportError, PermissionError):
+    """이 자리(세션 종류)는 최종 세트를 만들지 않는다(다른 세션 라벨을 읽는 일이라 조정 세션·세션 밖만)."""
+
+
+@dataclass
+class FinalSetExport:
+    """최종 세트 행. items 의 각 항목 = {"set": final·excluded·ambiguous, "row": export-row, "report_reasons": [...]}.
+    segment_items 는 구간 조각마다 같은 모양에 "piece"(start_ms·end_ms·category·confidence·status·relabeled) 가 더 있다."""
+    items: list[dict]
+    segment_items: list[dict]
+    other_rows: list[dict]
+    conflicts: list[dict]
+    final_set: Any
+    info: dict
+
+
+def final_set_block_reason(reader_kind: str | None, phase: str | None = None) -> str | None:
+    """최종 세트를 만들 수 없는 자리면 그 까닭. 세션 밖(None)·조정 세션이 된다(03 12-1: 잠긴 다른 세션 라벨 읽기).
+    분석 세션은 봉인 해제 뒤(phase = COMPARISON — 부르는 쪽이 seal.jsonl 의 ai.unsealed 를 확인한다)에만 된다
+    (visibility: 분석 세션의 다른 세션 라벨이 그때 LOCKED_ONLY, 나란히 보기의 '사람 최종')."""
+    if reader_kind is None:
+        return None
+    if reader_kind == vis.ANALYSIS:
+        if phase == vis.COMPARISON:
+            return None
+        return "분석 세션은 AI 결과 봉인을 푼 뒤에만 최종 세트를 봅니다 (D-15 7)"
+    if reader_kind != vis.ADJUDICATION:
+        return "최종 세트는 조정 세션이나 세션 밖(검토자 도구)에서만 만듭니다 (06 7-3)"
+    return None
+
+
+def _apply_reasons(row: dict, extra: Iterable[str] = (), *, strict_block: bool = False, none: bool = False) -> dict:
+    ev = row["eval"]
+    rs_ = set(ev.get("excluded_reasons") or ()) | set(extra)
+    reasons = [r for r in EXCLUDE_ORDER if r in rs_]
+    ev["excluded_reasons"] = reasons
+    ev["strict"] = (not reasons) and not strict_block and not none
+    ev["lenient"] = all(r in LENIENT_OK for r in reasons) and not none
+    return row
+
+
+def _final_sessions(root: str, data: dict, primary: str | None, relabels: Iterable[str] | None,
+                    adjs: Iterable[str] | None, origins: Iterable[str] | None) -> tuple[str, list[str], list[str], list[str], list[str]]:
+    """세션 고르기. 라벨 파일은 열지 않는다(이름·잠금·계획만)."""
+    from . import agreement_report as ar
+    from . import relabel as relabel_io
+    names = ar._session_ids_from_names(root)
+    locked = {s for s in names if os.path.isfile(os.path.join(root, "locks", f"{s}.json"))}
+    warns: list[str] = []
+    if primary is None:
+        cands = sorted(s for s in names if vis.session_kind_of_id(s) == vis.PRIMARY)
+        if len(cands) != 1:
+            raise ExportError(f"1차 세션이 {len(cands)}개입니다. --primary 로 하나를 고르세요")
+        primary = cands[0]
+    if vis.session_kind_of_id(primary) != vis.PRIMARY:
+        raise ExportError("바탕 세션은 1차(primary) 세션이어야 합니다")
+    if relabels is None:
+        rl = []
+        for s in sorted(locked):
+            if vis.session_kind_of_id(s) not in (vis.RELABEL_SAME, vis.RELABEL_SECOND):
+                continue
+            pid = ar._read_lock_doc(root, s).get("relabel_plan_id")
+            if not isinstance(pid, str):
+                warns.append(f"{s}: 재라벨 계획 없이 연 세션이라 최종 세트에 넣지 않았습니다")
+                continue
+            try:
+                plan = relabel_io.read_plan(root, pid)
+            except (OSError, ValueError):
+                warns.append(f"{s}: 재라벨 계획을 읽지 못해 최종 세트에 넣지 않았습니다")
+                continue
+            if plan.get("source_session_id") != primary:
+                continue
+            if relabel_io.is_cancelled(root, pid):
+                warns.append(f"{s}: 재라벨 계획이 취소되어 최종 세트에 넣지 않았습니다 (06 7-1)")
+                continue
+            rl.append(s)
+        relabels = rl
+    relabels = list(relabels)
+    for s in relabels:
+        if vis.session_kind_of_id(s) not in (vis.RELABEL_SAME, vis.RELABEL_SECOND):
+            raise ExportError("재라벨 세션 목록에 재라벨이 아닌 세션이 있습니다")
+    if adjs is None:
+        adjs = [s for s in names if vis.session_kind_of_id(s) == vis.ADJUDICATION]
+    adjs = sorted(adjs)
+    if any(vis.session_kind_of_id(s) != vis.ADJUDICATION for s in adjs):
+        raise ExportError("조정 세션 목록에 조정이 아닌 세션이 있습니다")
+    if origins is None:
+        origins = [s for s in sorted(locked) if vis.session_kind_of_id(s) == vis.ORIGIN_REVIEW]
+    origins = sorted(origins)
+    if any(vis.session_kind_of_id(s) != vis.ORIGIN_REVIEW for s in origins):
+        raise ExportError("출처 판정 세션 목록에 출처 판정이 아닌 세션이 있습니다")
+    if len(adjs) > 1:
+        warns.append(f"조정 세션이 {len(adjs)}개입니다 — 같은 대상의 조정 기록은 seq 가 큰 것을 씁니다(세션끼리는 순서를 모름)")
+    return primary, relabels, adjs, origins, warns
+
+
+def _read_session_files(root: str, sid: str, schema: LabelSchema | None) -> tuple[list[dict], int]:
+    """잠기지 않은 세션(조정)의 기록 파일. 깨진 줄이 있는 파일은 통째로 뺀다(_load_labels 와 같은 규칙)."""
+    labels_dir = os.path.join(root, "labels")
+    recs: list[dict] = []
+    bad = 0
+    try:
+        names = sorted(os.listdir(labels_dir))
+    except FileNotFoundError:
+        return recs, 0
+    for name in names:
+        p = parse_session_file_name(name)
+        if p is None or p[0] != sid:
+            continue
+        res = jsonl.read(os.path.join(labels_dir, name), max_line_bytes=MAX_LINE_BYTES)
+        if res.corrupt_lines:
+            bad += 1
+            continue
+        recs.extend(r for r in res.records if r.get("session_id") == sid)
+    return recs, bad
+
+
+def build_final_set(project_dir: str, options: ExportOptions | None = None, *, primary_session_id: str | None = None,
+                    relabel_session_ids: Iterable[str] | None = None,
+                    adjudication_session_ids: Iterable[str] | None = None,
+                    origin_session_ids: Iterable[str] | None = None, reader_kind: str | None = None,
+                    label_schema: LabelSchema | None = None, ai_root: str | None = None) -> FinalSetExport:
+    """최종 세트 행을 만든다(파일을 쓰지 않는다). 잠기지 않은 라벨 세션이 있으면 라벨 파일을 열기 전에 거부한다.
+
+    계산된 노출(app.core.exposure — 계획 취소 뒤 만든 재라벨, 봉인 해제 때 안 잠겼던·해제 뒤 만든 라벨링 세션)은
+    기록된 view.exposed 와 같이 view_exposed 로 친다: 그 세션의 행, 그리고 재라벨 세션이 노출이면 재라벨을 거친 행에
+    view_exposed 를 단다(대표값에서 빠지고 숫자는 남는다). ai_root 는 봉인 기록 자리(기본 seal.default_ai_root).
+
+    - primary_session_id: 바탕 1차 세션. 없으면 프로젝트의 1차 세션이 하나일 때 그것.
+    - relabel_session_ids: 없으면 그 1차 세션의 계획(취소 안 됨)으로 만든 잠긴 재라벨 세션 전부.
+    - adjudication_session_ids: 없으면 조정 세션 전부(잠기지 않아도 읽는다 — 조정 기록만 쓴다).
+    - origin_session_ids: 없으면 잠긴 출처 판정 세션 전부. 하나도 없으면 '출처 미판정'.
+    """
+    from . import agreement_report as ar
+    from .core import final_set as fsm
+    opts = options or ExportOptions()
+    root = os.path.abspath(project_dir)
+    if os.path.basename(root).lower() == projmod.PROJECT_FILE:
+        root = os.path.dirname(root)
+    phase = None
+    if reader_kind == vis.ANALYSIS:
+        # 분석 세션은 봉인이 하나라도 해제된 뒤에만(seal.jsonl 의 ai.unsealed — 건수만 읽는다, 라벨 파일은 아직 열지 않음)
+        from . import seal as sealmod
+        try:
+            phase = vis.COMPARISON if sealmod.seal_status(root, ai_root=ai_root,
+                                                          reader_kind=reader_kind).unsealed_count > 0 else None
+        except (sealmod.SealError, OSError):
+            phase = None
+    why = final_set_block_reason(reader_kind, phase)
+    if why:
+        raise FinalSetBlindError(why)
+    proj = projmod.open_project(root)
+    if proj.data is None or proj.read_only:
+        raise ExportError(f"project.json 을 읽을 수 없거나 검증을 통과하지 못했습니다({len(proj.problems)}개 사유)")
+    data = proj.data
+    primary, relabels, adjs, origin_sids, warns = _final_sessions(
+        root, data, primary_session_id, relabel_session_ids, adjudication_session_ids, origin_session_ids)
+    label_sids = [primary] + relabels + origin_sids
+    missing = [s for s in label_sids if not os.path.isfile(os.path.join(root, "locks", f"{s}.json"))]
+    if missing:
+        raise ar.NotLockedError(missing)
+    gate_warn = ar.comparison_gate(root, data, [primary] + relabels)    # 06 7-1 — 라벨 파일은 아직 열지 않음
+    warns.extend(gate_warn)
+    if label_schema is None:
+        try:
+            from .store import load_label_schema
+            label_schema = load_label_schema()
+        except (OSError, StrictJsonError, ValueError) as e:
+            raise ExportError(f"기록 스키마를 읽지 못했습니다: {type(e).__name__}") from None
+
+    records: list[dict] = []
+    locks: list[dict] = []
+    invalid = 0
+    metas: dict[str, dict] = {}
+    for sid in label_sids:
+        ls = ar.load_locked_session(root, sid)
+        if ls.meta.get("project_id") not in (None, proj.project_id):
+            raise ExportError("세션의 project_id 가 이 프로젝트와 다릅니다")
+        metas[sid] = ls.meta
+        locks.append({"session_id": sid, "lock_sha256": ls.lock_sha256, "locked_at": ls.lock.get("locked_at"),
+                      "files": ls.files})
+        if ls.after_lock_lines:
+            warns.append(f"{sid}: 잠금 뒤 붙은 줄 {ls.after_lock_lines}개를 뺐습니다")
+        for r in ls.records:
+            if r.get("session_id") != sid or label_schema.check(r):
+                invalid += 1
+                continue
+            records.append(r)
+    for sid in adjs:
+        recs, bad = _read_session_files(root, sid, label_schema)
+        if bad:
+            warns.append(f"{sid}: 깨진 줄이 있는 조정 기록 파일 {bad}개를 뺐습니다")
+        for r in recs:
+            if label_schema.check(r):
+                invalid += 1
+                continue
+            records.append(r)
+    gv = {(metas[s].get("guide_version"), metas[s].get("thresholds_sha256")) for s in [primary] + relabels}
+    if len(gv) > 1:
+        raise ExportError("1차와 재라벨 세션의 기준서 판이 달라 한 세트에 섞지 않습니다(06 9-4)")
+    if invalid:
+        warns.append(f"형식 검사를 통과하지 못한 기록 {invalid}줄을 뺐습니다.")
+
+    view = rs.resolve(records)
+    chats, vno, msha, mwarn = _read_messages(proj.paths.messages_jsonl, opts)
+    warns.extend(mwarn)
+    b = _RowBuilder(view, data, chats, opts)
+    gv0 = next(iter(gv))[0]
+    buffer_ms = b.rules.buffer_ms(gv0)
+    # 계산된 노출 (06 6-6 10번): 라벨 형식은 고정이라(D-15 7) 기록하지 않고 여기서 계산한다
+    from . import exposure_io
+    lock_at = {l["session_id"]: l.get("locked_at") for l in locks}
+    xview, xwarn = exposure_io.compute_for(
+        root, [exposure_io.session_info_of(s, view.other_records, lock_at.get(s)) for s in [primary] + relabels],
+        ai_root=ai_root, reader_kind=reader_kind)
+    warns.extend(xwarn)
+    computed_exposed = sorted(xview.exposed())
+    for s in computed_exposed:
+        b.sessions.setdefault(s, _SessionInfo()).exposed = True
+    relabel_exposed = any(s in relabels for s in computed_exposed) or any(
+        (b.sessions.get(s) or _SessionInfo()).exposed for s in relabels)
+
+    def side(sid: str) -> dict:
+        return {"session_id": sid, "labeler_id": sid.split("-", 1)[0], "scope": ar._scope_ranges(metas[sid]),
+                "segments": view.items(kind="segment", session_id=sid),
+                "reactions": view.items(kind="reaction", session_id=sid)}
+
+    adj_recs = [r for s in adjs for r in view.items(kind="adjudication", session_id=s)]
+    origins = None
+    if origin_sids:
+        per = []
+        for s in origin_sids:
+            per.append({(r.get("body") or {}).get("chat_id"): (r.get("body") or {}).get("origin")
+                        for r in view.items(kind="origin", session_id=s)})
+        origins = fsm.merge_origins(per)
+    chains = [c.versions for c in view.conflicts() if c.session_id == primary and c.kind == "reaction"]
+    fs = fsm.build_final_set(side(primary), [side(s) for s in relabels], adj_recs, origins=origins,
+                             conflict_chains=chains, buffer_ms=buffer_ms)
+
+    items: list[dict] = []
+    for st, group in ((SET_FINAL, fs.reactions), (SET_EXCLUDED, fs.excluded), (SET_AMBIGUOUS, fs.ambiguous)):
+        for it in group:
+            row = b.reaction(it.record)
+            row["source"] = it.source
+            extra_r = list(it.reasons) + (["view_exposed"] if relabel_exposed and it.relabeled else [])
+            _apply_reasons(row, extra_r, strict_block=fsm.R_ADJ_DISAGREEMENT in it.report_reasons,
+                           none=st == SET_AMBIGUOUS)
+            items.append({"set": st, "row": row, "report_reasons": list(it.report_reasons),
+                          "relabeled": it.relabeled, "agreed": it.agreed, "stale": it.stale})
+    seg_items: list[dict] = []
+    for pc in fs.pieces:
+        rec = copy.deepcopy(pc["record"])
+        body = dict(rec.get("body") or {})
+        body.update(start_ms=pc["start_ms"], end_ms=pc["end_ms"])
+        if pc["status"] == fsm.ST_ADJUDICATED:
+            body.update(category=pc["category"], confidence=pc["confidence"])
+        rec["body"] = body
+        row = b.segment(rec)
+        st = {fsm.ST_EXCLUDED: SET_EXCLUDED, fsm.ST_AMBIGUOUS: SET_AMBIGUOUS}.get(pc["status"], SET_FINAL)
+        extra = ["human_disagreement"] if pc["status"] == fsm.ST_DISAGREE else []
+        if relabel_exposed and pc["relabeled"]:
+            extra.append("view_exposed")
+        if st == SET_EXCLUDED:
+            extra.append("adjudicated_exclude")
+        if pc["status"] in (fsm.ST_ADJUDICATED, fsm.ST_EXCLUDED, fsm.ST_AMBIGUOUS):
+            row["source"] = "adjudication"
+        _apply_reasons(row, extra, strict_block=pc["status"] == fsm.ST_ADJUDICATED, none=st == SET_AMBIGUOUS)
+        piece = {k: pc[k] for k in ("start_ms", "end_ms", "category", "confidence", "status", "relabeled")}
+        seg_items.append({"set": st, "row": row, "piece": piece,
+                          "report_reasons": [fsm.R_ADJ_DISAGREEMENT] if pc["status"] == fsm.ST_ADJUDICATED else
+                          ([fsm.R_ADJ_AMBIGUOUS] if st == SET_AMBIGUOUS else [])})
+    other_rows: list[dict] = []
+    for rec in view.items(session_id=primary):
+        k = rec.get("kind")
+        if k == "missed_candidate":
+            other_rows.append(b.missed_candidate(rec))
+        elif k == "continuation" and _continuation_target_ok(view, rec):
+            other_rows.append(b.continuation(rec))
+    if not fs.origin_known:
+        warns.append("출처 판정이 없어 '출처 미판정'(origin_unknown) 입니다 — 가상 채팅이 섞였는지 모릅니다 (06 6-5)")
+    sm = fs.summary["reactions"]
+    if sm["adjudications_unmatched"] or fs.summary["segments"]["unmatched"]:
+        warns.append(f"지금 라벨과 이어지지 않는 조정 기록: 반응 {sm['adjudications_unmatched']} · "
+                     f"구간 {fs.summary['segments']['unmatched']}건 (대상이 바뀜)")
+    if sm["stale"] or fs.summary["segments"]["stale"]:
+        warns.append(f"조정 뒤 대상 판이 바뀐 기록(stale): 반응 {sm['stale']} · 구간 {fs.summary['segments']['stale']}건")
+    info = {
+        "project": data, "project_root": root, "primary_session_id": primary, "relabel_session_ids": relabels,
+        "adjudication_session_ids": adjs, "origin_session_ids": origin_sids, "locks": locks, "warnings": warns,
+        "messages_sha256": msha, "viewer_no": vno, "sessions": b.sessions, "guide_version": gv0,
+        "thresholds_sha256": next(iter(gv))[1], "buffer_ms": buffer_ms, "invalid_records": invalid,
+        "metas": metas, "computed_exposed": {s: list(xview.reasons(s)) for s in computed_exposed},
+    }
+    return FinalSetExport(items, seg_items, other_rows, list(fs.conflicts), fs, info)
+
+
+def export_final_set(project_dir: str, out_path: str, options: ExportOptions | None = None, *,
+                     primary_session_id: str | None = None, relabel_session_ids: Iterable[str] | None = None,
+                     adjudication_session_ids: Iterable[str] | None = None,
+                     origin_session_ids: Iterable[str] | None = None, reader_kind: str | None = None,
+                     created_by: str | None = None, clock: Callable[[], datetime] | None = None,
+                     uuid_factory: Callable[[], str] | None = None, app_version: str | None = None,
+                     ai_root: str | None = None) -> ExportResult:
+    """최종 세트(참고 정답 세트)를 zip 하나로 내보낸다. 출력 위치 규칙은 export_labels 와 같다(먼저 검사)."""
+    opts = options or ExportOptions()
+    root = os.path.abspath(project_dir)
+    if os.path.basename(root).lower() == projmod.PROJECT_FILE:
+        root = os.path.dirname(root)
+    loc_warn = check_output_path(out_path, root)
+    if os.path.exists(out_path) and not opts.overwrite:
+        raise FileExistsError("출력 파일이 이미 있습니다(덮어쓰려면 overwrite)")
+    row_schema, man_schema = _load_export_schema()
+    fx = build_final_set(root, opts, primary_session_id=primary_session_id, relabel_session_ids=relabel_session_ids,
+                         adjudication_session_ids=adjudication_session_ids, origin_session_ids=origin_session_ids,
+                         reader_kind=reader_kind, ai_root=ai_root)
+    data = fx.info["project"]
+    warns: list[str] = loc_warn + fx.info["warnings"]
+    every = [(it["set"], it["row"]) for it in fx.segment_items + fx.items] + [(SET_FINAL, r) for r in fx.other_rows]
+    good: list[dict] = []
+    amb: list[dict] = []
+    bad = 0
+    excluded: dict[str, int] = {}
+    for st, r in every:
+        if row_schema.check(r):
+            bad += 1
+            continue
+        rsn = list(r["eval"]["excluded_reasons"])
+        if st == SET_AMBIGUOUS:       # 열거형 밖이라 행에는 없고 건수에만 (adjudicated_exclude 바로 뒤 순서)
+            cut = EXCLUDE_ORDER.index("adjudicated_exclude") + 1
+            rsn = [x for x in rsn if x in EXCLUDE_ORDER[:cut]] + [_AMBIGUOUS_REASON] + \
+                [x for x in rsn if x not in EXCLUDE_ORDER[:cut]]
+        if rsn:
+            excluded[rsn[0]] = excluded.get(rsn[0], 0) + 1
+        if st == SET_AMBIGUOUS:
+            amb.append(r)
+        elif st == SET_FINAL and r["eval"]["lenient"]:
+            good.append(r)
+    if fx.conflicts:
+        excluded["conflict_unresolved"] = excluded.get("conflict_unresolved", 0) + len(fx.conflicts)
+    if bad:
+        warns.append(f"내보내기 행 형식(export-row)에 맞지 않는 행 {bad}개를 뺐습니다.")
+    order = {k: i for i, k in enumerate(ROW_KINDS)}
+    good.sort(key=lambda r: (order.get(r["label_kind"], 9), r.get("start_ms") or r.get("chat_t_ms") or 0, r["label_id"]))
+    files: list[tuple[str, bytes, int]] = [(JSONL_NAME, b"".join(jsonl.dumps_line(r) for r in good), len(good))]
+    files.append((AMBIGUOUS_NAME, b"".join(jsonl.dumps_line(r) for r in amb), len(amb)))
+    for name, kind in ((CSV_SEGMENTS, "segment"), (CSV_REACTIONS, "reaction"), (CSV_MISSED, "missed_candidate")):
+        data_b, n = _csv_bytes(name, [r for r in good if r["label_kind"] == kind], fx.info["viewer_no"], opts)
+        files.append((name, data_b, n))
+    by_kind = {k: 0 for k in ROW_KINDS}
+    for r in good:
+        by_kind[r["label_kind"]] += 1
+    sessions = [fx.info["primary_session_id"]] + fx.info["relabel_session_ids"] + fx.info["origin_session_ids"] \
+        + fx.info["adjudication_session_ids"]
+    pj_guides = {g.get("guide_version"): g for g in data.get("guides") or [] if isinstance(g, dict)}
+    gvs = fx.info["guide_version"]
+    s0 = fx.info["sessions"].get(fx.info["primary_session_id"])
+    guides = []
+    if s0 is not None and s0.guide_version and s0.guide_doc_sha256 and s0.thresholds_sha256:
+        guides.append({"guide_version": s0.guide_version, "doc_sha256": s0.guide_doc_sha256,
+                       "thresholds_sha256": s0.thresholds_sha256})
+    elif gvs in pj_guides:
+        pg = pj_guides[gvs]
+        guides.append({"guide_version": gvs, "doc_sha256": pg["doc_sha256"], "thresholds_sha256": pg["thresholds_sha256"]})
+    cal = data.get("calibration") or {}
+    active = cal.get("active_rev", 0)
+    crev = next((c for c in cal.get("revs") or [] if isinstance(c, dict) and c.get("rev") == active), {})
+    now = (clock or (lambda: datetime.now().astimezone()))()
+    if now.tzinfo is None:
+        now = now.astimezone()
+    if app_version is None:
+        from . import __version__ as app_version  # noqa: N811
+    manifest = {
+        "schema": "chatcoach/export-manifest", "schema_version": 1,
+        "export_id": (uuid_factory or (lambda: str(uuid.uuid4())))(),
+        "export_type": FINAL_EXPORT_TYPE, "project_id": data["project_id"],
+        "video_no": str((data.get("broadcast") or {}).get("video_no")),
+        "created_at": now.isoformat(timespec="milliseconds"),
+        "created_by": _labeler_of(data, None, created_by), "app_version": app_version,
+        "filters": {"guide_versions": [gvs] if gvs else None, "session_ids": sessions, "include_history": False,
+                    "include_text": bool(opts.include_text), "include_nickname_masked": bool(opts.include_nickname_masked),
+                    "include_heard_text": bool(opts.include_heard_text), "include_protected": False},
+        "guides": guides,
+        "calibration": {"active_rev": active, "offset_ms": crev.get("offset_ms", 0),
+                        "status": crev.get("status", "unverified")},
+        "messages_sha256": fx.info["messages_sha256"],
+        "files": [{"name": n, "size": len(b_), "sha256": hashlib.sha256(b_).hexdigest(), "rows": k} for n, b_, k in files],
+        "counts": {"by_kind": by_kind, "excluded": excluded, "invalid_records": fx.info["invalid_records"]},
+        "warnings": warns, "notes": FINAL_NOTES,
+    }
+    problems = man_schema.check(manifest)
+    if problems:
+        raise ExportError("매니페스트가 형식에 맞지 않습니다: " + "; ".join(problems[:3]))
+    files.append((MANIFEST_NAME, (json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+                  .encode("utf-8"), None))
+    _write_zip(out_path, files, now, FINAL_ZIP_NAMES)
+    log.info("최종 세트 내보내기: 행 %d, 모호 %d, 경고 %d", len(good), len(amb), len(warns))
+    return ExportResult(out_path=os.path.abspath(out_path), manifest=manifest, rows=len(good), by_kind=by_kind,
+                        session_ids=sessions, warnings=warns)
+
+
 __all__ = [
     "safe_cell", "check_output_path", "build_rows", "export_labels", "ExportOptions", "ExportResult",
     "ExportError", "ExportLocationError", "ZIP_NAMES", "CSV_COLUMNS", "EXCLUDE_ORDER", "EXPORT_TYPE",
+    "build_final_set", "export_final_set", "FinalSetExport", "FinalSetBlindError", "final_set_block_reason",
+    "FINAL_EXPORT_TYPE", "FINAL_ZIP_NAMES", "AMBIGUOUS_NAME", "SET_FINAL", "SET_EXCLUDED", "SET_AMBIGUOUS",
 ]

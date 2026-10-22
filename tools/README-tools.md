@@ -16,6 +16,18 @@
 | `extract_audio.py` | 영상에서 STT 용 16kHz 모노 WAV 를 뽑고 걸린 시간을 출력한다. |
 | `export_labels.py` | 프로젝트의 현재 유효 라벨을 zip 하나로 내보낸다 (`app.export.export_labels`). |
 
+## AI 결과 · 봉인
+
+| 도구 | 한 줄 설명 |
+|---|---|
+| `engine_to_ai.py` | 엔진 link 출력 → ai-result 1판. 시범 프로젝트는 `--seal` 로만 받는다(D-15 8). |
+| `ai_seal.py` | AI 결과 봉인 받기·상태·해제 (`app.seal`). |
+| `ai_compare.py` | 해제한 run 과 최종 세트로 AI 비교 보고서를 만든다 (`app.ai_compare`). |
+
+- **시범 엔진 작업 폴더(`chatcoach-data\sealed-work`)의 산출물(wav·asr.json 등)은 휴지통으로 보내지 않는다.** 봉인(`sealed\<sha>.bin`)이
+  결과를 보존하므로, 봉인이 끝나면 **영구 삭제**(PowerShell `Remove-Item`, 탐색기 Shift+Delete)한다. 휴지통에 두면 시범 세션이 잠기기
+  전에도 '복원' 한 번으로 라벨 구간 전사문을 열 수 있고 엔진으로 봉인된 판정을 다시 계산할 수 있다(D-15 8, 개인정보).
+
 ## 테스트 · 점검
 
 | 도구 | 한 줄 설명 |

@@ -109,8 +109,13 @@ def test_analysis_session_sees_engine_and_labels_but_writes_no_labels():
     for k in ("segment", "reaction", "utterance", "retract", "adjudication", "origin"):
         assert not fs.can_write_label(k)
     assert fs.own_labels == V.OPS_ONLY
-    assert fs.ai_sealed == V.NONE                    # 봉인된 평가 결과는 분석 화면도 열지 않는다
+    # 봉인된 평가 결과: 건수와 해제된 결과만(E 통합, D-15 7). 기본 읽기는 아니다 → 화면 항목 AI_RESULTS 는 보이지 않는다
+    assert fs.ai_sealed == V.UNSEALED_ONLY and not fs.can_read("ai_sealed")
     assert not V.can_show(V.AI_RESULTS, V.COMPARISON, V.ANALYSIS)
+    # 해제 뒤(COMPARISON)에는 잠긴 다른 세션 라벨(재라벨·출처 등)도 읽는다 — 최종 세트용
+    cmp_ = V.files_to_open(V.ANALYSIS, V.COMPARISON)
+    assert cmp_.other_labels == V.LOCKED_ONLY and cmp_.may_read_other_session(locked=True, other_kind=V.RELABEL_SECOND)
+    assert not cmp_.may_read_other_session(locked=False, other_kind=V.PRIMARY)
     assert V.can_show(V.ENGINE_RESULTS, V.REACTIONS, V.ANALYSIS)
     assert V.can_show(V.OTHER_SESSION_LABELS, V.REACTIONS, V.ANALYSIS)
     assert not V.can_show(V.NICKNAME_RAW, V.REACTIONS, V.ANALYSIS)   # 원 닉네임은 여전히 토글

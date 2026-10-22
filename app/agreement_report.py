@@ -718,6 +718,15 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
     view_b = rs.resolve(lb.records)
     side_a = _side(la, view_a, proj.data, exposure)
     side_b = _side(lb, view_b, proj.data, exposure)
+    # 계산된 AI 결과 노출(app.core.exposure 규칙 1, 06 6-6 10번): 계획 취소 뒤 만든 재라벨 세션.
+    # 라벨 형식은 고정이라(D-15 7) 기록하지 않고, 기록된 view.exposed 와 같은 칸(view_exposed)에 합친다.
+    # 봉인 해제(규칙 2)는 이 보고서가 봉인 폴더(data\\ai)를 열지 않는다는 약속 때문에 보지 않는다 — AI 비교 쪽(최종 세트)이 본다
+    from . import exposure_io
+    xview, exposure_warnings = exposure_io.compute_for(
+        root, [exposure_io.session_info_of(ls.session_id, v.other_records, ls.lock.get("locked_at"))
+               for ls, v in ((la, view_a), (lb, view_b))], reader_kind=reader_kind, include_unseals=False)
+    for s in (side_a, side_b):
+        s["view_exposed"] = xview.view_exposed(s["session_id"], s["view_exposed"])
     cur_missing: list[str] = []
     for s, ls in ((side_a, la), (side_b, lb)):
         s["plan_cancelled"] = s["session_id"] in plan_cancelled      # 취소된 계획으로 만든 세션 → 대표값에서 뺌
@@ -774,7 +783,7 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
                              adjudicator_is_labeler=None if adj_src == "unknown" else adj)
     when = now or datetime.now().astimezone()
     report_id = f"R-{when.strftime('%Y%m%d')}-{inputs_sha[:4]}"
-    warnings = list(gate_warnings)
+    warnings = list(gate_warnings) + exposure_warnings
     for sid in cur_missing:
         warnings.append(f"{sid}: 잠금에 현재 표본 목록(current_sample)이 없어 구간표로 다시 봤습니다 — 영상 밖·τ 변화는 "
                         "보지 않는 근사입니다 (08 D-12 2)")

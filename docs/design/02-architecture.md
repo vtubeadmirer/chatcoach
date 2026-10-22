@@ -1,6 +1,6 @@
 # ChatCoach 아키텍처 (02)
 
-상태: 설계 초안 (2026-10-19) · 아직 구현되지 않음
+상태: 설계 초안 (2026-10-19). 2026-10-22 에 C단계 마감 코드와 맞추고 E 첫 묶음 자리를 더했다 (16 5-2 1·2번, D-15 7). '계획 (파일 없음)'·'E (만드는 중)' 표시가 없는 모듈은 구현돼 있다.
 
 이 문서는 선정된 설계안(각도 A 「ClipSlicer 재사용 최우선」)을 확정 문서로 정리한 것이다. 스택, 모듈, 폴더, 데이터 흐름, 화면, 스레드, 성능 목표, 테스트, ClipSlicer 에서 가져오는 것을 다룬다.
 
@@ -124,14 +124,16 @@ flowchart TB
   subgraph UI["ui/  (PySide6 위젯·화면)"]
     UI1["mainwindow · project_view · session_dialog · workbench · queue_view"]
     UI2["timeline · chat_panel · review_player · forms/*"]
-    UI3["adjudication_view · origin_view · lock / relabel / agreement / plan_cancel 대화상자"]
+    UI3["adjudication_view · origin_view · lock / relabel / agreement / plan_cancel 대화상자 · ops_dialogs"]
+    UI4["analysis_view (E)"]
   end
   PL["player.py  (MpvWidget, vendored)"]
   WK["workers.py  (QThread 묶음)"]
   subgraph IO["입출력·서비스  (Qt 위젯 없음)"]
     IO1["store · project · jsonl · export"]
     IO2["session · chzzk_chat · media · analysis"]
-    IO4["locking · relabel · agreement_report"]
+    IO4["locking · relabel · agreement_report · chat_index · backup"]
+    IO5["ai_results · seal · ai_compare (E)"]
     IO3["updater · minisign"]
   end
   subgraph CORE["core/  (순수 Python: Qt·파일·네트워크 없음)"]
@@ -139,6 +141,7 @@ flowchart TB
     C2["timecode · segments · phase · visibility"]
     C3["rules · sampling · resolve"]
     C4["agreement · relabel_plan · adjudicate · missed · origin"]
+    C5["final_set · exposure (E)"]
   end
   subgraph INF["기반  (vendored·공통)"]
     INF1["appspec · paths · logging_setup · crashguard · report · i18n · style · selftest"]
@@ -166,7 +169,7 @@ flowchart TB
 ### 3-2. 모듈 표
 
 '단계' 열: MVP = 첫 묶음에서 만든다. C단계 = C단계 묶음에서 만들었다(괄호는 근거 결정). **계획 (파일 없음)** = 설계에는 있으나 아직 파일이 없다 — 지금 그 책임을 맡은 곳을 '책임' 칸에 적었다. v1 = 그때 만든다(지금은 파일 없음).
-이 표는 2026-10-21 의 실제 `app/` 파일 목록과 맞췄다(D-13 2, 14 4-2 12번). 파일이 생기거나 없어지면 이 표와 4장 트리를 같이 고친다.
+이 표는 2026-10-21 의 실제 `app/` 파일 목록과 맞췄다(D-13 2, 14 4-2 12번). 2026-10-22 에 C 마무리(M4)의 `backup.py`·`ui/ops_dialogs.py` 를 '있음' 으로 고치고, **E 첫 묶음**의 새 파일 6개 자리를 더했다 — '단계' 칸이 **E (만드는 중)** 인 행은 책임·경계만 정한 것이고, 함수 이름은 그 묶음 보고에서 맞춘다 (D-15 7·8, 16 8-1). 파일이 생기거나 없어지면 이 표와 4장 트리를 같이 고친다.
 
 | 모듈 | 책임 | 의존 | 기술 | 단계 |
 |---|---|---|---|---|
@@ -207,14 +210,14 @@ flowchart TB
 | `app/project.py` | 프로젝트 폴더 만들기·열기, `project.json` 저장(rev 비교 → 임시 파일 → `os.replace`), 기준서 묶음의 `thresholds_sha256` 계산. 프로젝트 쓰기 잠금(`open.lock`)은 잡지 않는다 | validate, ids, paths | stdlib (03 2-1·6-1·8-3) | MVP |
 | `app/store.py` | 세션 기록 파일 쓰기의 유일한 통로. 열기(잠금은 `lock_factory` 로 주입·검증·로드), 라벨 append, 철회, `project.json` 저장 위임(`update_project`), 가시성에 따른 파일 선택, 세션 잠금(`lock_session`). 조정 세션만: 출처 판정 대상 파일 쓰기(`write_origin_targets`, 없을 때만·불변)·`relabel_second` 계획(`create_second_plan`) (D-14 1, 15 1-4) | project, core, jsonl, locking | 6-3 의 순서 | MVP |
 | `app/export.py` | 내보내기 zip(JSONL·CSV·manifest), 허용 목록 방식, CSV 셀 보호 | store, resolve | csv(utf-8-sig) (S-27) | MVP (라벨러 패키지는 v1) |
-| `app/backup.py` | (계획) 일 1회·업데이트 직전 프로젝트 백업 zip, 보존 개수 순환. 지금은 백업 위치(`paths.backup_root`)와 업데이트의 `_backup` 만 있다 | store | zipfile (S-06, S-39) | 계획 (파일 없음, D-13 2) |
+| `app/backup.py` | 프로젝트 백업 zip(허용 목록, 안에 `manifest.json` — 파일마다 크기·SHA-256), 일 1회 백업(`daily_backup_if_due`, 프로젝트당 14개 순환)·수동 백업·업데이트/되돌리기 직전 백업(`pre_update_backup`, 5개)·세션 끝 기록 복사(`copy_session_file`), 되살리기(`restore_backup`, 새 폴더로만), 보존 기한(`retention_state`), 파기 계획·실행(`plan_disposal`·`execute_disposal`, 휴지통으로만 — 영구 삭제로 넘어가는 길 없음, `data\disposal_log.jsonl`). 순환은 일 1회 백업에만 한다(5-3) | paths, chat_index(파기 때 `drop_cache`) | zipfile, Qt 없음 (S-06, S-39, 05 10-3) | C 마무리 (M4, 16 1-3·5-2 1번) |
 | `app/session.py` | 라벨러 선택, 세션 생성·종료, 프로젝트 잠금, 기계 ID, 열람 이벤트 기록. 잠긴 1차 다시 열기 막기 `reopen_refusal`(같은 사람 재라벨 대기 중, 또는 이 라벨러가 볼 계획 가운데 읽지 못한 것이 있을 때 — [03](03-data-model.md) 12-1, D-14 1) | store, phase | QLockFile 은 ui 쪽에서 주입 | MVP |
 | `app/chzzk_chat.py` | 치지직 VOD 채팅 전량 수집, 원문 페이지 보존, 파싱·가명화 | ids, validate | urllib. ClipSlicer `chat.py` 의 재시도·커서 골격만 (S-28) | MVP |
 | `app/media.py` | 영상 참조(경로·크기·부분 지문·파일 ID·ffprobe 메타), 재연결, 경로 문자열 검사 | analysis | stdlib (S-13, S-26) | MVP |
 | `app/analysis.py` | ffprobe, 파형, 무음, 썸네일(파이프 출력), 프레임 1장 | paths | subprocess(bytes), timeout | MVP |
 | `app/updater.py` | 확인(3상태) → 준비(다운로드·검증·해제·자체 점검) → 적용(Applier). 상세는 [04](04-update-and-release.md) | appspec, paths | urllib, zipfile, PowerShell 5.1 | MVP |
-| `app/workers.py` | 업데이트 확인·준비 워커. 공통 작업 워커 `JobWorker`(여러 `Job` 을 차례로, 취소·진행·오류 시그널, `JobContext.check`·`progress`, `JobWorker.single`)와 재현 검증 워커 `SampleVerifyWorker`·`PlanVerifyWorker`. 잠그기 직전 표본 재현 검증(재라벨은 current_sample 계산)과 일치도 보고서를 UI 스레드 밖에서 돌린다 — 그동안 바쁨 표시와 [취소] (14 6-1 의 1, `MainWindow.run_job_modal`·`AgreementDialog.run`). 보고서는 계획 검증만이 아니라 **`make_report` 전체를 워커 하나로** 돌리고 `cancel_check` 로 멈춘다(나누면 `comparison_gate` 를 두 번 돈다, D-14 1, 15 5-1 15번). ChatFetch·ProjectLoad·Analyze·Backup 워커는 아직 없다(계획) | 입출력 | QThread (8장) | MVP |
-| `app/ui/mainwindow.py` | 창 골격, 메뉴, 상태바, 화면 전환, 단축키 등록, 업데이트 연동. 워커 모달 실행 `run_job_modal`(8장), 프로젝트를 열 때 계획 색인 다시 만들기 `refresh_relabel_index`(내용이 같으면 쓰지 않음, D-14 1, 15 5-1 8번) | ui 전부 | QMainWindow | MVP |
+| `app/workers.py` | 업데이트 확인·준비 워커. 공통 작업 워커 `JobWorker`(여러 `Job` 을 차례로, 취소·진행·오류 시그널, `JobContext.check`·`progress`, `JobWorker.single`)와 재현 검증 워커 `SampleVerifyWorker`·`PlanVerifyWorker`. 잠그기 직전 표본 재현 검증(재라벨은 current_sample 계산)과 일치도 보고서를 UI 스레드 밖에서 돌린다 — 그동안 바쁨 표시와 [취소] (14 6-1 의 1, `MainWindow.run_job_modal`·`AgreementDialog.run`). 보고서는 계획 검증만이 아니라 **`make_report` 전체를 워커 하나로** 돌리고 `cancel_check` 로 멈춘다(나누면 `comparison_gate` 를 두 번 돈다, D-14 1, 15 5-1 15번). ChatFetch·ProjectLoad·Analyze·Backup 워커는 아직 없다(계획). 일 1회 백업은 워커가 아니라 `MainWindow.start_background_backups` 의 데몬 스레드 하나로 돈다(16 5-2 1번) | 입출력 | QThread (8장) | MVP |
+| `app/ui/mainwindow.py` | 창 골격, 메뉴, 상태바, 화면 전환, 단축키 등록, 업데이트 연동. 워커 모달 실행 `run_job_modal`(8장), 프로젝트를 열 때 계획 색인 다시 만들기 `refresh_relabel_index`(내용이 같으면 쓰지 않음, D-14 1, 15 5-1 8번). 작업 중 세션 메뉴 끄기 `jobs_busy`·`update_session_actions`: `busy_jobs > 0` 이거나 작업대 워커가 돌면 [세션 잠그기]·[계획 만들기]·[일치도 보고서]·[계획 취소] 를 끈다. 라벨 기록을 쓰지 않는 배경 일 `BACKGROUND_JOBS`(파형·영상 확인·영상 참조·엔진·채팅 색인)는 셈에서 뺀다. 일 1회 백업·세션 끝 복사는 `main.py` 만 켠다(`start_background_backups`, `session_backup = True` — 시험·smoke 가 사용자 백업 폴더에 쓰지 않게). 업데이트·되돌리기 직전 백업은 늘 한다 (16 5-1 23·24번·5-2 2번) | ui 전부 | QMainWindow | MVP |
 | `app/ui/project_view.py` | 최근 프로젝트, 열기(쓰기 잠금 확인) | store | 7-2 | MVP |
 | `app/ui/new_project_wizard.py` | (계획) 새 프로젝트 5단계. 지금은 화면이 없고 `app/project.create` 와 도구로 만든다 | project, workers | 7-2 | 계획 (파일 없음, D-13 2) |
 | `app/ui/calibration_dialog.py` | (계획) 시간 정렬(앵커 입력·오프셋 확정·건너뛰기 사유). 지금은 작업대가 `project.json` 의 `calibration` 을 읽어 쓰기만 한다 | timecode, store | 7-5 | 계획 (파일 없음, D-13 2) |
@@ -227,8 +230,15 @@ flowchart TB
 | `app/ui/forms/segment_form.py` · `reaction_editor.py` · `continuation_editor.py` · `evidence_widget.py` | 단계별 입력 | rules, timecode, visibility | 7-3 | MVP |
 | `app/ui/forms/missed_form.py` | ④ 놓친 채팅 후보 폼(조건 ① 은 보이기만, ②③④·점검 질문·사유 코드·확신도·근거) | missed | 작업대 ④ 모드 | C단계 (D-12 5) |
 | `app/ui/update_dialog.py` | 새 버전 대화상자 | updater | ClipSlicer `UpdateDialog` 개작 (S-18) | MVP |
+| `app/ui/ops_dialogs.py` | 운영 대화상자: 프로젝트 백업(보호 포함 고르기·위치 검사)·백업에서 되살리기·프로젝트 지우기(휴지통, 대상 목록·경고를 먼저 보이고 확인). 판정·실행은 `backup` 이 한다. 화면에는 경로를 보여도 로그에는 쓰지 않는다(S-20) | backup | 메뉴 '파일' | C 마무리 (M4, 16 1-3·5-2 1번) |
 | `app/ui/settings_dialog.py` | (계획) 설정, 시작값 보기. 라벨러 명부는 지금 세션 선택 화면(`session_dialog`)의 [새 라벨러…] 로 관리한다 | project | — | 계획 (파일 없음, D-13 2) |
-| `compare_view` · `origin_match` · `ai_compare` | 비교 화면(4-9 첫 장), 가상 채팅 생성 기록 대조기, AI 비교. (옛 `missed_view` 는 `forms/missed_form.py`, `relabel_view` 는 `relabel_dialog.py`·`session_dialog.py`, `origin_view` 는 `ui/origin_view.py` 로 만들었다) | — | — | v1 |
+| `app/ai_results.py` | **엔진 결과 가져오기**: 엔진 출력 파일을 `ai-result` 형식으로 받고 [06](06-evaluation-and-agreement.md) 6-2 검사(거부·경고·표시만)를 돌린다. 결과는 '유효 / 거부 사유' 만 돌려주고 내용을 화면·로그에 내지 않는다. **4단계 등급만** 받는다 — `grade_scheme` 은 엔진 형식이 정해질 때 더한다(D-15 7). `engine/link.py` 의 `schema_version` 2 초안은 `to_v1()` 로 맞춘 v1 만 받는다(06 6-1) | core.validate, ids | Qt 없음 | E (만드는 중, D-15 7, 16 8-1 1번) |
+| `app/seal.py` | **AI 결과 봉인·해제**: 받은 바이트를 `<앱>\data\ai\<project_id>\sealed\<sha256>.bin` 에 두고 `seal.jsonl` 에 `ai.sealed`(해시·크기·시각·검사 결과만)를 남긴다. 해제는 06 7-1 조건(계획된 재라벨까지 모두 잠김 + 재현 검증 통과)이면 `ai.unsealed`(그 시점 잠금 해시 목록)를 남기고 `runs\<run_id>.json` 으로 푼다. 사전 봉인 여부는 기록과 잠금 시각에서 계산한다([03](03-data-model.md) 6-14 'AI 봉인 기록'). **봉인·해제 기록은 `ai/` 쪽 파일이고 label-event 스키마를 바꾸지 않는다**(D-15 7). 해제 전에 내보내는 것은 '봉인됨 n건' 뿐이다 | ai_results, locking, relabel | Qt 없음 | E (만드는 중, D-15 7·8, 16 8-1 2·3번) |
+| `app/ai_compare.py` | **AI 비교 보고서**: 해제된 run 만 읽는다. 06 6-3 매칭, 6-4 평가 집합(E1·E2·E3), 6-5 엄격·참고 점수, 6-6 제외 계단표. 보고서 폴더(06 6-7)에 `report.json`·`report.md`·`tables/*.csv`(UTF-8 BOM, 셀 보호)·`manifest.json`. 채팅 본문·닉네임·근거 한 줄은 넣지 않는다 | seal, core.final_set, core.exposure, agreement_report(관문) | Qt 없음 | E (만드는 중, 16 8-1 6번) |
+| `app/core/final_set.py` | **최종 세트**: 잠긴 세션의 유효 라벨에 조정 기록을 덮는다 — `adjudicate.case_states` 를 열쇠로 원 라벨을 조정 값으로 바꾸고 `exclude_from_eval` 은 뺀다(06 6-6 의 `adjudicated_exclude`). 조정 값이 없는 재라벨 불일치는 `human_disagreement`. 내보내기·AI 비교·나란히 보기가 같은 함수를 쓴다 | resolve, adjudicate | 순수 함수 (파일·시계 없음) | E (만드는 중, D-13 2, 16 8-1 4번) |
+| `app/core/exposure.py` | **AI 노출 판정**: 계획 취소 시각 `cancelled_at`·봉인 조기 해제 시각과 세션 생성 시각을 견줘, 그 뒤에 만든 세션에 `view.exposed(what = ai_results)` 가 필요한지와 `view_exposed` 로 뺄 세션을 정한다. 시각은 인자로 받는다. 기록을 쓰는 것은 store 다(기존 `view.exposed` 기록 종류 — 스키마는 그대로, D-15 7) | — | 순수 함수 | E (만드는 중, D-13 2, 16 8-1 7번) |
+| `app/ui/analysis_view.py` | **나란히 보기 (방송 분석 모드)**: 해제된 엔진 판정과 최종 세트만 읽는다. 타임라인 위아래 두 트랙(엔진 / 최종 세트), 채팅마다 같음·다름·놓침 표시, 다른 곳으로 건너뛰기. **해제 전에는 열지 않고 '봉인됨(n건)' 만 보인다**(D-15 7). 분석 세션을 연 라벨러는 D-14 3 대로 노출 표시. 블라인드 시험: 라벨링·재라벨 세션은 이 화면과 `data\ai\`·`data\reports\` 를 열지 않는다(06 7-3) | seal, ai_compare, core.final_set, timeline | 작업대 부품 재사용 | E (만드는 중, D-14 8, D-15 7, 16 8-1 5·8번) |
+| `compare_view` · `origin_match` | 사람끼리 비교 화면(06 4-9 첫 장), 가상 채팅 생성 기록 대조기. (옛 `missed_view` 는 `forms/missed_form.py`, `relabel_view` 는 `relabel_dialog.py`·`session_dialog.py`, `origin_view` 는 `ui/origin_view.py` 로 만들었고, `ai_compare` 는 E 의 `app/ai_compare.py` 로 옮겼다, D-15 7) | — | — | v1 (`origin_match` 는 H 와 같이) |
 
 ### 3-3. 모듈 사이의 계약
 
@@ -305,11 +315,14 @@ chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 │  ├─ project.py                            project.json 만들기·열기·저장
 │  ├─ store.py
 │  ├─ export.py
-│  ├─ backup.py                             (계획 — 파일 없음, D-13 2)
+│  ├─ backup.py                             (C 마무리 M4 — 백업·되살리기·보존·파기, 16 5-2 1번)
 │  ├─ session.py
 │  ├─ locking.py                            (C단계, D-12 1)
 │  ├─ relabel.py                            (C단계, D-12 1·2·7 — 계획·색인·취소)
 │  ├─ agreement_report.py                   (C단계, D-12 1)
+│  ├─ ai_results.py                         (E 만드는 중 — 엔진 결과 가져오기·06 6-2 검사, D-15 7)
+│  ├─ seal.py                               (E 만드는 중 — 봉인·해제, data\ai\, D-15 7·8)
+│  ├─ ai_compare.py                         (E 만드는 중 — AI 비교 보고서, 06 6장)
 │  ├─ chzzk_chat.py
 │  ├─ media.py
 │  ├─ analysis.py                           ffmpeg_tools.py 의 5함수 개작
@@ -330,7 +343,9 @@ chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 │  │  ├─ agreement.py                       (C단계, D-12 1)
 │  │  ├─ adjudicate.py                      (C단계, D-12 3·4)
 │  │  ├─ missed.py                          (C단계, D-12 5)
-│  │  └─ origin.py                          (C단계, D-12 6 — 출처 κ 는 여기 하나)
+│  │  ├─ origin.py                          (C단계, D-12 6 — 출처 κ 는 여기 하나)
+│  │  ├─ final_set.py                       (E 만드는 중 — 조정 반영 최종 세트, D-13 2)
+│  │  └─ exposure.py                        (E 만드는 중 — AI 노출 판정, D-13 2·D-15 7)
 │  └─ ui/
 │     ├─ __init__.py
 │     ├─ mainwindow.py
@@ -347,6 +362,8 @@ chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 │     ├─ plan_cancel_dialog.py              (C단계, D-12 7)
 │     ├─ adjudication_view.py               (C단계, D-12 3·4)
 │     ├─ origin_view.py                     (C단계, D-12 6)
+│     ├─ analysis_view.py                   (E 만드는 중 — 나란히 보기, 해제 전에는 '봉인됨 n건' 만, D-15 7)
+│     ├─ ops_dialogs.py                     (C 마무리 M4 — 백업·되살리기·지우기 대화상자, 16 5-2 1번)
 │     ├─ shortcuts.py                       (계획 — 파일 없음, D-13 2)
 │     ├─ update_dialog.py                   ⟵* dialogs.UpdateDialog
 │     ├─ settings_dialog.py                 (계획 — 파일 없음, D-13 2)
@@ -362,12 +379,15 @@ chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 │  └─ guide-config.v0.1.json                안내서 v0.1 시작값 전부 (기준서 버전마다 파일 하나, 릴리스 뒤 불변)
 ├─ schemas/                                 JSON 스키마. 목록과 정의는 03 19장
 │  ├─ project · chat-message · label-event · guide-config · sample-manifest · ai-result · export-row (.schema.json)
-│  └─ update_manifest.schema.json           (아직 없음) latest.json 형식 (04 5-2). 다른 스키마는 하이픈 이름 — 맞출지 확인 필요
+│  ├─ relabel-plan · session-lock (.schema.json)   (C단계)
+│  └─ update_manifest.schema.json           latest.json 형식 (04 5-2). 다른 스키마는 하이픈 이름 — 맞출지 확인 필요 (16 5-2 1번: 있음)
+│     label-event 는 시범 고정판이다 — E 는 바꾸지 않는다. tests/test_label_format_frozen.py · tools/pilot_freeze.py --check (D-14 7, D-15 7)
 ├─ docs/
 │  ├─ labeling-guide/v0.1.md · v0.1-review.md · v0.2-draft.md
-│  ├─ design/01~07-*.md
+│  ├─ design/01~07-*.md (설계) · 08 (결정) · 09~16 (진행 보고)
+│  ├─ measurements/                         엔진·STT 측정 기록
 │  ├─ release-notes/vX.Y.Z.md               릴리스마다 한 파일. Release 본문·latest.json notes_ko 의 단일 출처 (04 4-3)
-│  └─ install.md                            (M4 예정, 아직 없음) 들어갈 항목은 5-1
+│  └─ install.md                            설치 안내 (M4 에서 씀 — 공개키·수동 업데이트·메뉴 이름, 16 5-2 1번). 들어갈 항목은 5-1
 ├─ tests/
 │  ├─ conftest.py                           ⟵
 │  ├─ test_layers.py                        core 가 PySide6·io 를 import 하지 않는지
@@ -392,6 +412,8 @@ chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 │  ├─ test_updater_safety.py                ⟵* 실제 robocopy·PowerShell (release.ps1 에서만)
 │  ├─ test_report_selftest.py               ⟵*
 │  ├─ test_fixture_clean.py                 픽스처에 실제 식별자가 없는지
+│  ├─ test_label_format_frozen.py           시범 고정판 라벨(골든 frozen_labels_v0_1.jsonl)을 늘 그대로 읽는지 (D-14 7. E 묶음도 이것이 통과해야 한다, D-15 7)
+│  ├─ test_backup.py                        백업·되살리기·보존·파기 (M4)
 │  └─ fixtures/
 │     ├─ chzzk_page_synth.json              tools/make_fixture.py 로 합성 (실제 응답 복사 금지)
 │     └─ labels_*.jsonl                     골든 입력 (.gitignore 예외 필요 — 11-2)
@@ -513,7 +535,9 @@ ChatCoach\                          = <앱>
 | 교체 직전 data 백업 zip | `backup_root()\pre-update\` (이름 `pre-update-<이전>-to-<새>-<시각>.zip`, 최근 5개) | 같음. 새 버전이 첫 실행에서 라벨을 잘못 읽어도 사본이 남도록 옛 버전의 업데이터가 만든다 ([04](04-update-and-release.md) 6-7) | 아니오 |
 | 데이터 폴백 | `%LOCALAPPDATA%\ChatCoach\data\` | 앱 폴더에 쓸 수 없을 때만. 첫 실행에 알리고 상태바에 '폴백 모드' 를 계속 표시 | 아니오 |
 
-일 1회 백업 보존 개수는 프로젝트당 14개(시작값). 오래된 것부터 지운다. '프로젝트 파기' 명령은 이 폴더도 지운다 (S-06). 백업 대상은 열린 프로젝트만이 아니라 `data\projects\*` 전부의 `labels\`·`project.json`·`samples\`·`locks\` 다. 채팅 원문은 주 1회.
+일 1회 백업 보존 개수는 프로젝트당 14개(시작값). 오래된 것부터 **휴지통으로** 보낸다(못 보내면 지우지 않고 경고). **순환은 일 1회 백업에만** 한다 — 수동 백업과 `sessions\`(세션 끝 기록 복사)는 순환 밖이고, '프로젝트 파기' 때 함께 휴지통으로 간다 (S-06, 16 5-1 15·16번·5-2 2번). 백업 대상은 열린 프로젝트만이 아니라 `data\projects\*` 전부(최근 목록의 프로젝트도)의 `project.json`·`guide\`·`labels\`·`samples\`·`locks\`(open.lock 제외)·`relabel\` 이다([03](03-data-model.md) 16-2). 채팅 원문은 수동 백업과 일 1회 중 주 1회. `<앱>\data\ai\` 는 넣지 않는다.
+
+운영 기능을 켜는 곳 (16 5-1 24번·5-2 2번): 일 1회 백업과 세션 끝 복사는 **`main.py` 만** 켠다. 시험·smoke 가 만든 창은 사용자 백업 폴더에 쓰지 않는다. 업데이트·되돌리기 직전 백업은 늘 한다([04](04-update-and-release.md) 6-7).
 
 ### 5-4. 프로젝트 폴더
 
@@ -616,10 +640,13 @@ flowchart LR
   ORI --> LAB
   TOOL["ASR·OCR 도구 (v1)"] --> DER["derived/ 보호 등급 (v1)"]
   DER --> UI
-  AIR["AI 결과 JSON (v1)<br/>받으면 봉인 data/ai/project_id/sealed"] -->|comparison 진입 때 해제| CMP["ai_compare (v1)"]
-  VIEW --> CMP
-  CMP --> REP["평가 보고서 (v1)<br/>data/reports/"]
+  AIR["엔진 결과 JSON (E)<br/>ai_results 검사 → seal: data/ai/project_id/sealed"] -->|comparison 진입 때 해제| CMP["ai_compare (E)"]
+  VIEW -->|core.final_set: 조정 반영| CMP
+  CMP --> REP["AI 비교 보고서 (E)<br/>보고서 폴더"]
+  CMP --> AV["analysis_view 나란히 보기 (E)<br/>해제 전에는 '봉인됨 n건' 만"]
 ```
+
+E 첫 묶음 (D-15 7·8): 엔진 결과는 처음부터 봉인 경로로만 들어온다. 시범 프로젝트(`pilot-*`)에 엔진을 돌린 결과도 같다 — 시범 세션이 잠기기 전에는 아무도 열지 않는다. 봉인·해제 기록은 `data\ai\` 쪽 파일이고, 라벨 기록(label-event)은 시범 고정판 그대로 읽는다.
 
 한 방향 규칙:
 
@@ -664,7 +691,7 @@ stateDiagram-v2
 
 구현 메모 (D-13 1·3·4, 14 4-1 22번): 위 그림의 ④ 는 **재라벨 세션에서만** 있다. 1차 세션은 ③ 다음에 바로 잠근다(1차는 ④ 를 하지 않는다, D-12 5·D-13 4). ③ 모드의 [표본 완료 표시] 는 1차에서도 보이고 ④ 를 여는 관문(`phase.mark(samples)`)이다. 조정·출처 판정 세션은 단계가 없고 자기 화면 하나다(3-2 `core/phase.py` 행). 놓친 후보 일치도는 같은 블록의 같은 사람 재라벨 ↔ 다른 사람 재라벨 사이에서 낸다([06](06-evaluation-and-agreement.md) 4-6).
 
-AI 결과는 어느 단계에서든 받을 수 있다. 받으면 해시·크기·시각만 기록하고 봉인한다. 내용은 comparison 진입 전까지 보이지 않는다([06](06-evaluation-and-agreement.md) 7-2). 봉인을 앞당겨 열려면 사유를 받고, 그 뒤 만든 재라벨 세션은 `ai_exposed` 로 표시한다.
+AI 결과는 어느 단계에서든 받을 수 있다. 받으면 해시·크기·시각만 기록하고 봉인한다. 내용은 comparison 진입 전까지 보이지 않는다([06](06-evaluation-and-agreement.md) 7-2). 나란히 보기 화면(`ui/analysis_view.py`)도 해제 전에는 열지 않고 '봉인됨(n건)' 만 보인다 (D-15 7). 봉인을 앞당겨 열려면 사유를 받고, 그 뒤 만든 재라벨 세션은 `ai_exposed` 로 표시한다(판정은 `core/exposure.py`, D-13 2).
 
 ### 6-3. 라벨 한 건이 저장되는 길
 
@@ -736,16 +763,19 @@ sequenceDiagram
 | 출처 판정 | 출처 판정 세션을 열면 바로. 대상 파일의 채팅만 | C단계 (D-12 6) |
 | 재라벨 계획 취소 | 메뉴 '세션 → 재라벨 계획 취소…'(조정 세션에서만) 대화상자 하나. 조정 화면 아래 칸의 취소 칸은 지웠다 | C단계 (D-12 7, D-13 1, D-14 1·2) |
 | `relabel_second` 계획 · 출처 판정 대상 만들기 | 조정 화면 아래 칸 | C단계 (D-14 1, 15 1-2 7·9번) |
-| 검토·비교 | 비교 화면 첫 장([06](06-evaluation-and-agreement.md) 4-9), AI 비교 | v1 |
+| 프로젝트 백업 · 되살리기 · 지우기(휴지통) | 메뉴 '파일'. `ui/ops_dialogs.py` | C 마무리 (M4, 16 5-2 1번) |
+| 방송 분석 (나란히 보기) | 해제된 엔진 판정 ↔ 최종 세트. 해제 전에는 열지 않고 '봉인됨(n건)' 만 | E (만드는 중, D-14 8, D-15 7) |
+| AI 비교 보고서 | 해제된 run 만. 메뉴 자리는 E 묶음 보고에서 적는다 | E (만드는 중, D-15 7) |
+| 사람끼리 비교 화면 | 비교 화면 첫 장([06](06-evaluation-and-agreement.md) 4-9) | v1 |
 
 목표 해상도는 1920×1080. 최소 1366×768 을 지원한다(폼은 세로 스크롤). 1366×768 에서 반응 편집기가 쓸 만한지는 확인 필요.
 
-1366×768 실제 창 측정 (D-14 1·2, 15 3-2·5-2 17번, gui_smoke 의 '오른쪽 밖' 은 고르기·숫자 칸도 센다):
+1366×768 실제 창 측정 (D-14 1·2, 15 3-2·5-2 17번, gui_smoke 의 '오른쪽 밖' 은 고르기·숫자 칸도 센다). 아래 '남은 것' 은 정리 작업(16 1-2) 뒤 코드로 고쳤다 (16 5-2 1번):
 
 | 화면 | 실제 창 | offscreen | 남은 것 |
 |---|---|---|---|
-| 조정 화면 | 785×732, 가로 스크롤 없음, 글자 잘림 0, 오른쪽 밖 0 (전에는 48) | 870×658, 오른쪽 밖 0 | 나란히 배치 문턱 `NARROW_PX` 900 → 1200 제안(15 5-2 2번) |
-| 반응 편집기 (471 칸) | 471×613, 가로 스크롤 없음, 글자 잘림 0, 오른쪽 밖 24 (전에는 가로 스크롤·63) | 같음 | 24개는 모두 `EvidenceWidget` 자식, 오른쪽 끝 656 — 배치 전 기본 크기를 센 것으로 보이나 확인 안 함(15 5-2 1번) |
+| 조정 화면 | 785×732, 가로 스크롤 없음, 글자 잘림 0, 오른쪽 밖 0 (전에는 48) | 870×658, 오른쪽 밖 0 | 없음. 나란히 배치 문턱 `NARROW_PX` 는 **1200**(전 900)이라 1366 창의 오른쪽 칸(471·731·870px)은 늘 위아래 배치다 (16 1-2 2번) |
+| 반응 편집기 (471 칸) | 471×613, 가로 스크롤 없음, 글자 잘림 0, **오른쪽 밖 0** (전에는 24, 그 전에는 가로 스크롤·63) | 0 | 없음. 원인은 숨은 칸에서 다시 만든 `EvidenceWidget` 부품이 기본 크기 640×480 을 들고 있던 것 — 칸을 부모로 만들고 레이아웃을 바로 돌린다 (16 1-2 1번) |
 | 구간 폼 | 471, 오른쪽 밖 0 | 가로 스크롤·오른쪽 밖 21 | offscreen 글꼴 차이로 봄(15 5-2 3번) |
 | 큐 · ④ 폼 · 출처 판정 화면 | 오른쪽 밖 0 (④ 471×680, 출처 471×732) | — | |
 
@@ -845,7 +875,7 @@ sequenceDiagram
 
 - **타임라인 그림.** 라벨 저장·되돌리기 때는 바뀐 마커 칸만 다시 칠한다(`Timeline.add_marker`·`remove_marker`·`update_marker`, 작업대 `_push_labels(incremental=True)`). 바뀐 마커가 `PATCH_MAX_MARKERS`(64)를 넘거나, 정적 캐시가 지금 보기와 맞지 않거나, 촘촘함 판정이 바뀌거나, 새 트랙이면 전체로 그린다. 부분·전체 그림이 픽셀 단위로 같도록 겹친 마커의 쌓임 순서를 색·속 빔 순으로 고정하고, 촘촘한 트랙은 화면 열마다 한 줄만 긋는다.
 - **마커 찾기.** 마커에 ID 가 없어 (시각, 종류) 로 찾는다. 종류를 주지 않으면 그 시각의 첫 마커다. 작업대는 늘 종류를 넘긴다.
-- **조정 화면 배치.** 조정 모드에서는 작업대 오른쪽 칸을 넓힌다: 기본 창 폭의 58%(`ADJ_RIGHT_SHARE`, 최소 760px). 오른쪽 칸이 `ADJ_SIDE_MIN_PX`(1200) 미만이면 870px 이하로 둬서 위아래 배치가 되게 한다. 조정 화면 안에서는 폭이 `NARROW_PX`(900) 미만이면 목록과 고른 건을 위아래로, 이상이면 나란히 둔다. 고른 건은 세로 스크롤 칸이다. '새 값' 은 두 줄(바탕·분류 / 시작·끝)이다.
+- **조정 화면 배치.** 조정 모드에서는 작업대 오른쪽 칸을 넓힌다: 창 폭의 58%(`ADJ_RIGHT_SHARE`)와 `min(창 폭 − 320, ADJ_RIGHT_MIN_PX = 760)` 가운데 큰 값. 조정 화면 안에서는 폭이 `NARROW_PX`(**1200**) 미만이면 목록과 고른 건을 위아래로, 이상이면 나란히 둔다. 앞 판의 `ADJ_SIDE_MIN_PX`·'870px 이하로 묶기' 는 문턱을 1200 으로 올려 필요 없어져 지웠다 (16 1-2 2번·5-2 1번). 고른 건은 세로 스크롤 칸이다. '새 값' 은 두 줄(바탕·분류 / 시작·끝)이다.
 - **반응 편집기 단축키 표시.** 단축키를 단추 글자('(Ctrl+n)')에 넣지 않고 풍선 도움말과 위 안내문에 둔다. 등급·확신도 단추는 2칸 격자다(470px 칸에서 넘치지 않게). 단축키 자체(7-6)는 그대로다.
 
 ### 7-4. 큐 모드 (3단계 표본)
@@ -951,7 +981,7 @@ sequenceDiagram
 **구현 메모 — 워커 (C단계 여섯째 묶음, D-14 1·4, 15 1-4·4-2 1번·5-1 15·23번):**
 
 - 지금 있는 워커는 업데이트 둘과 공통 작업 워커 `JobWorker` 계열이다(3-2 `app/workers.py`). 위 표의 `ChatFetch`·`ProjectLoad`·`Analyze`·`Backup` 워커는 아직 없다. 채팅 색인은 작업대가 프로젝트를 열 때 `JobWorker` 로 만든다(`ProjectLoadWorker` 자리).
-- `MainWindow.run_job_modal`: 진행 대화상자를 **처음부터 모달로** 띄우고 [취소] 를 둔다. 도는 동안 `busy_jobs > 0` 이면 [세션 잠그기] 를 다시 눌러도 워커를 겹치지 않는다(다시 들어오기 막기는 지금 `lock_session_dialog` 에만, 15 5-2 15번). 끝난 뒤 작업대·store 가 바뀌었으면 잠그기 화면을 만들지 않는다.
+- `MainWindow.run_job_modal`: 진행 대화상자를 **처음부터 모달로** 띄우고 [취소] 를 둔다. 도는 동안 `busy_jobs > 0` 이거나 작업대 워커가 돌면 세션 메뉴([세션 잠그기]·[계획 만들기]·[일치도 보고서]·[계획 취소])를 끈다(`MainWindow.jobs_busy`, 작업대 신호 `Workbench.jobsBusyChanged`). 라벨 기록을 쓰지 않는 배경 일 `BACKGROUND_JOBS`(`waveform`·`media_check`·`media_ref`·`engine`·`chat_index`)는 몇 분 걸려도 막지 않는다 (16 1-2 15번·4-1 3번·5-2 1번. 앞 문구 '다시 들어오기 막기는 `lock_session_dialog` 에만' 을 고침). 끝난 뒤 작업대·store 가 바뀌었으면 잠그기 화면을 만들지 않는다.
 - 도는 중 창을 닫으면 닫기를 미루고 워커를 취소한 뒤, 끝나면 닫는다. 취소 지점이 없는 하나짜리 긴 일은 끝날 때까지 기다린다.
 - 워커가 도는 동안에도 UI 틈이 최대 약 0.3초(재현 검증 표본 100건: 최대 321.7ms, 95분위 53.1ms) 생긴다(파이썬 GIL). 위 '16ms 를 넘기는 작업 금지' 를 넘지만 **받아들인다**(UI 에서 바로 돌리면 4.55초 멈춤). 실제 사용에서 끊김이 보이면 `verify_manifest` 고리에서 `ctx.check()` 를 부르거나 별도 프로세스로 옮긴다 (D-14 4).
 
@@ -1015,7 +1045,18 @@ C단계 여섯째 묶음 측정 (2026-10-21, `tools/bench_c6.py`, 합성 채팅 
 | 재현 검증 (표본 100건) | UI 에서 바로 4.55초 멈춤 → 워커 UI 틈 최대 321.7ms, 95분위 53.1ms | 16ms 넘음(GIL), 받아들임 (8장, D-14 4) |
 | 라벨 저장 뒤 타임라인 (전체 보기, 촘촘함) | add 1.76~2.00ms, update 3.77ms, remove 1.79ms (전체 다시 그리기 179ms) | 8ms 안 |
 | 라벨 저장 뒤 타임라인 (10분 보기) | add 0.47ms, update 0.78ms, remove 0.34ms (전체 120ms) | 8ms 안 |
-| 타임라인 확대·스크롤 · 채팅 메모리 | 재지 않음 (전체 다시 그리기 20만 마커 1029ms → 179ms) | 확인 필요 (15 5-2 14번) |
+| 타임라인 확대·스크롤 · 채팅 메모리 | 이 묶음에서는 재지 않음 (전체 다시 그리기 20만 마커 1029ms → 179ms). 아래 C 마무리 표에서 잼 | — |
+
+C 마무리 측정 (2026-10-22, `tools/bench_c6.py`, 합성 마커 20만 개, offscreen, 이 PC 에서 한 번. 자세한 것은 [16](16-progress-2026-10-21-c7.md) 3-2, 16 1-2 14번·5-2 2번):
+
+| 항목 | 값 | 목표 대비 |
+|---|---|---|
+| 타임라인 확대 | 평균 24.8ms, 최대 71.2ms | **넘음** (1.5·2.2배 확대에서 50ms 초과) |
+| 타임라인 축소 | 평균 30.3ms, 최대 104.3ms | **넘음** |
+| 타임라인 스크롤 | 1시간 보기 최대 39.5ms, 10분 19.7ms, 8시간 2.3ms | 50ms 안 |
+| 채팅 메모리 · 36만 건 색인 처음 만들기 | 재지 않음 (36만은 추정 3.6초 그대로) | 확인 필요 (16 5-2 13번) |
+
+넘은 두 줄의 대책은 촘촘한 트랙을 배율별 열 최댓값 캐시로 그리고 `bench_c6 --only zoom` 으로 다시 재는 것이다(16 5-2 12번, E 첫 묶음 0번). 다시 잰 값은 그 묶음 보고에 적고 이 표를 고친다.
 
 구현 규칙 (어기면 목표를 못 맞춘다):
 

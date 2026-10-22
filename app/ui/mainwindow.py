@@ -18,6 +18,14 @@
 확인 시각은 updater 가 결과 뒤에 쓴다. 시작 확인은 on_start=True(필수 업데이트·지원 종료면 주기와 상관없이),
 채널은 숨은 설정 settings.ini [update] channel (stable·beta, 04 6-2).
 
+분석 메뉴 (E, 08 D-01·D-15 7·8, 06 6장·7장, app/analysis_flow.py):
+- [분석 → AI 결과 가져오기(봉인)…] 세션 밖(보기 전용)·조정 세션: 파일을 바이트 그대로 봉인(app.seal). 화면에는 유효·거부 코드·
+  해시 앞 8자·크기만.
+- [분석 → 봉인 해제…] 같은 자리: 06 7-1 조건을 안내하고, 안 되면 거부(사유를 적으면 앞당겨 열기, conditions_met=false).
+- [분석 → 엔진과 나란히 보기] 분석 세션에서만, 해제된 run 이 있을 때만(D-15 7). app/ui/analysis_view 를 모달 아닌 창으로.
+- [보고 → AI 비교 보고서…] 세션 밖·조정 세션: 해제된 run 으로 app.ai_compare 보고서(프로젝트 밖).
+- 라벨링·재라벨·출처 판정 세션에서는 분석 메뉴가 꺼지고 data\\ai 를 열지 않는다. 봉인 건수는 메뉴를 펼 때만 읽는다.
+
 운영 메뉴 (07 M4):
 - [도움말 → 이전 버전으로 되돌리기…] (04 6-10): updater.rollback_status 로 켜고 끈다. 이번 실행이 _backup 을 지울 차례
   (main.py 9단계, delete_backup_pending)면 처음부터 끈다. 확인(RollbackDialog) → 워커에서 updater.stage_rollback(관문) →
@@ -461,13 +469,343 @@ class MainWindow(QMainWindow):
         self.a_cancel_plan = QAction(tr("재라벨 계획 취소(&C)…"), self)
         self.a_cancel_plan.triggered.connect(lambda: self.plan_cancel_dialog())
         self.m_session.addAction(self.a_cancel_plan)
+        self._build_analysis_menu()
         self.m_report = self.menuBar().addMenu(tr("보고(&B)"))
         self.a_agreement = QAction(tr("일치도 보고서(&A)…"), self)
         self.a_agreement.triggered.connect(lambda: self.agreement_dialog())
         self.m_report.addAction(self.a_agreement)
+        self.a_ai_compare = QAction(tr("AI 비교 보고서(&I)…"), self)
+        self.a_ai_compare.triggered.connect(lambda: self.ai_compare_dialog())
+        self.m_report.addAction(self.a_ai_compare)
         self.m_session.aboutToShow.connect(self.update_session_actions)
         self.m_report.aboutToShow.connect(self.update_session_actions)
+        self.m_report.aboutToShow.connect(self.update_analysis_actions)
         self.update_session_actions()
+
+    # ------------------------------------------------------------------ 분석 메뉴 (E, 08 D-01 · D-15 7·8, 06 6장·7장)
+    def _build_analysis_menu(self) -> None:
+        """분석(&I): AI 결과 가져오기(봉인)… · 봉인 해제… · 엔진과 나란히 보기. 라벨링·재라벨·출처 판정 세션에서는 메뉴가
+        꺼지고 data\\ai 를 열지 않는다(06 7-3). 봉인 건수는 메뉴를 펼 때만 읽는다(update_analysis_actions)."""
+        self.m_analysis = self.menuBar().addMenu(tr("분석(&I)"))
+        self.a_seal_import = QAction(tr("AI 결과 가져오기(봉인)(&I)…"), self)
+        self.a_seal_import.triggered.connect(lambda: self.seal_import_dialog())
+        self.m_analysis.addAction(self.a_seal_import)
+        self.a_unseal = QAction(tr("봉인 해제(&U)…"), self)
+        self.a_unseal.triggered.connect(lambda: self.unseal_dialog())
+        self.m_analysis.addAction(self.a_unseal)
+        self.m_analysis.addSeparator()
+        self.a_side_by_side = QAction(tr("엔진과 나란히 보기(&S)"), self)
+        self.a_side_by_side.triggered.connect(lambda: self.side_by_side_view())
+        self.m_analysis.addAction(self.a_side_by_side)
+        self.m_analysis.aboutToShow.connect(self.update_analysis_actions)
+        self.side_view_dialog = None
+
+    def _reader_kind(self) -> str | None:
+        wb = self.workbench
+        return wb.session_kind if wb is not None and wb.session is not None else None
+
+    def _ai_project_root(self) -> str | None:
+        wb = self.workbench
+        proj = getattr(wb, "project", None) if wb is not None else None
+        return proj.root if proj is not None and proj.data is not None else None
+
+    def analysis_block_reasons(self, *, read_seal: bool = True) -> dict[str, str | None]:
+        """분석·AI 보고서 동작마다 막힌 까닭(None = 됨). read_seal=False 면 봉인 건수를 읽지 않는다(세션 메뉴 갱신 때).
+        라벨링 세션은 read_seal 과 상관없이 data\\ai 를 열지 않는다."""
+        from .. import ai_compare
+        from .. import analysis_flow as af
+        root, kind = self._ai_project_root(), self._reader_kind()
+        out: dict[str, str | None] = {}
+        if root is None:
+            why = tr("프로젝트를 먼저 여세요")
+            return {k: why for k in ("menu", "seal", "unseal", "view", "report")}
+        if self.jobs_busy():
+            why = tr("작업이 도는 중입니다 — 끝난 뒤에 쓸 수 있습니다")
+            return {k: why for k in ("menu", "seal", "unseal", "view", "report")}
+        menu = af.menu_block_reason(kind)
+        out["menu"] = tr(menu) if menu else None
+        seal_why = af.seal_block_reason(kind)
+        out["seal"] = tr(seal_why) if seal_why else None
+        out["unseal"] = out["seal"]
+        rep = ai_compare.reader_block_reason(kind)
+        out["report"] = tr(rep) if rep else None
+        view = af.view_block_reason(kind)
+        out["view"] = tr(view) if view else None
+        if read_seal and menu is None:
+            try:
+                sealed, runs = af.seal_counts(root, reader_kind=kind)
+            except Exception as e:  # noqa: BLE001 — 봉인 폴더를 못 읽어도 메뉴는 산다(까닭만)
+                why = tr("AI 결과 봉인 기록을 읽지 못했습니다: {0}").format(type(e).__name__)
+                sealed, runs = None, None
+                for k in ("unseal", "view", "report"):
+                    out[k] = out[k] or why
+            if sealed is not None:
+                if out["unseal"] is None and sealed == 0:
+                    out["unseal"] = tr("봉인된 AI 결과가 없습니다 — 먼저 가져오세요")
+                if out["view"] is None and not runs:
+                    out["view"] = tr("봉인됨 {0}건 — 봉인을 푼 뒤에 열립니다 (D-15 7)").format(sealed)
+                if out["report"] is None and not runs:
+                    out["report"] = tr("봉인을 푼 AI 결과가 없습니다 (봉인됨 {0}건)").format(sealed)
+        return out
+
+    def update_analysis_actions(self, *_a) -> None:
+        """분석 메뉴를 펼 때: 봉인 건수를 읽어 동작을 켜고 끈다(seal.jsonl 만, 라벨링 세션이면 읽지 않음)."""
+        r = self.analysis_block_reasons(read_seal=True)
+        self._apply_analysis_reasons(r)
+
+    def _apply_analysis_reasons(self, r: dict) -> None:
+        self.m_analysis.setEnabled(r["menu"] is None)
+        self.m_analysis.menuAction().setToolTip(r["menu"] or "")
+        for a, k in ((self.a_seal_import, "seal"), (self.a_unseal, "unseal"), (self.a_side_by_side, "view"),
+                     (self.a_ai_compare, "report")):
+            a.setEnabled(r[k] is None)
+            a.setToolTip(r[k] or "")
+
+    def _actor_id(self, by: str | None, title: str) -> str | None:
+        """봉인·해제 기록의 by(라벨러 ID). 세션이 있으면 그 라벨러, 없으면 마지막 라벨러를 기본값으로 묻는다."""
+        from .. import seal
+        if by:
+            return by
+        wb = self.workbench
+        if wb is not None and wb.session is not None and wb.labeler_id:
+            return wb.labeler_id
+        last = self.settings.value("session/last_labeler", "")
+        from PySide6.QtWidgets import QInputDialog
+        text, ok = QInputDialog.getText(self, title, tr("기록에 남길 라벨러 ID (예: L01)"),
+                                        text=last if isinstance(last, str) else "")
+        text = (text or "").strip()
+        if not ok:
+            return None
+        if not seal.LABELER_RE.match(text):
+            self.warn(title, tr("라벨러 ID 형식이 아닙니다 (예: L01)"))
+            return None
+        return text
+
+    def seal_import_dialog(self, *, path: str | None = None, by: str | None = None):
+        """'분석 → AI 결과 가져오기(봉인)…' (06 6-1·6-2·7-2, D-15 7·8). 고른 파일을 바이트 그대로 봉인한다.
+        화면에는 봉인 결과(유효·거부 코드)·해시 앞 8자·크기만 보인다. 내용(run_id·판정 수)은 보이지 않는다.
+        path·by 를 주면 묻지 않는다(시험). 봉인 기록(SealEntry) 또는 None."""
+        title = tr("AI 결과 가져오기(봉인)")
+        why = self.analysis_block_reasons(read_seal=False)["seal"]
+        if why:
+            self.statusBar().showMessage(why, 6000)
+            return None
+        if path is None:
+            path, _f = QFileDialog.getOpenFileName(self, title, "", tr("AI 결과 (*.json);;모든 파일 (*)"))
+            if not path:
+                return None
+        by = self._actor_id(by, title)
+        if by is None:
+            return None
+        from .. import analysis_flow as af
+        from .. import seal
+        try:
+            e = seal.seal_file(self._ai_project_root(), path, source="file", by=by, app_version=__version__,
+                               reader_kind=self._reader_kind())
+        except (seal.SealError, OSError) as ex:
+            self.warn(title, tr("봉인하지 못했습니다: {0}").format(str(ex) if isinstance(ex, seal.SealError)
+                                                                   else type(ex).__name__))
+            return None
+        LOG.info("AI 결과 봉인: %s %s (%d바이트, %s)", af.short(e.sha256), "새로" if e.new else "이미 있음", e.size, e.check)
+        if e.check == "valid":
+            msg = tr("봉인했습니다: {0}… ({1:,}바이트). 내용은 봉인을 풀 때까지 보이지 않습니다.").format(
+                af.short(e.sha256), e.size)
+        else:
+            msg = tr("봉인은 했지만 가져오기 검사에서 거부되었습니다: {0} — 이 결과는 풀 수 없습니다.").format(
+                ", ".join(e.reject_reasons))
+        if not e.new:
+            msg = tr("이미 봉인한 결과입니다: {0}…").format(af.short(e.sha256))
+        self.statusBar().showMessage(msg, 8000)
+        self.last_seal_message = msg
+        return e
+
+    def unseal_dialog(self, *, sha256: str | None = None, by: str | None = None, confirm=None, early_reason=None):
+        """'분석 → 봉인 해제…' (06 7-1·7-2). 06 7-1 조건(라벨링 세션 모두 잠김 · 1차마다 계획 · 계획된 재라벨 잠김 ·
+        재현 검증 통과)을 먼저 안내한다. 조건이 안 되면 사유와 함께 거부하고, 사유를 적으면 앞당겨 열 수 있다(기록에
+        conditions_met = false). confirm(text) → bool 을 주면 확인 상자 대신(시험), early_reason(reasons) → str|None 을
+        주면 사유 입력 대신. UnsealResult 또는 None. self.last_unseal_reasons 에 안 된 조건이 남는다."""
+        title = tr("봉인 해제")
+        self.last_unseal_reasons = []
+        why = self.analysis_block_reasons(read_seal=True)["unseal"]
+        if why:
+            self.statusBar().showMessage(why, 6000)
+            return None
+        from .. import analysis_flow as af
+        from .. import seal
+        root, kind = self._ai_project_root(), self._reader_kind()
+        try:
+            st = seal.seal_status(root, reader_kind=kind)
+            cond = seal.unseal_conditions(root, reader_kind=kind)
+        except (seal.SealError, OSError) as ex:
+            self.warn(title, tr("봉인 기록을 읽지 못했습니다: {0}").format(type(ex).__name__))
+            return None
+        waiting = [e for e in st.entries if e.unsealed_at is None and e.check == "valid"]
+        if sha256 is not None:
+            waiting = [e for e in waiting if e.sha256 == sha256]
+        if not waiting:
+            self.statusBar().showMessage(tr("풀 수 있는 봉인이 없습니다 (봉인됨 {0}건 · 거부된 것은 풀지 않음)")
+                                         .format(st.sealed_count), 6000)
+            return None
+        target = waiting[0]
+        if len(waiting) > 1 and sha256 is None and confirm is None:
+            from PySide6.QtWidgets import QInputDialog
+            names = [f"{af.short(e.sha256)}… ({e.sealed_at[:19]}, {e.size:,}바이트)" for e in waiting]
+            pick, ok = QInputDialog.getItem(self, title, tr("풀 봉인"), names, 0, False)
+            if not ok:
+                return None
+            target = waiting[names.index(pick)]
+        reason = None
+        if not cond.met:
+            self.last_unseal_reasons = list(cond.reasons)
+            text = tr("06 7-1 해제 조건이 아직 되지 않았습니다:\n{0}\n\n조건 전에 열면 기록에 '조건 전 해제' 와 사유가 남고, "
+                      "점수는 대표 점수로 쓰지 않습니다. 그래도 사유를 적고 앞당겨 열까요?").format(
+                "\n".join("· " + r for r in cond.reasons))
+            if early_reason is not None:
+                reason = early_reason(cond.reasons)
+            else:
+                go = confirm(text) if confirm is not None else \
+                    QMessageBox.question(self, title, text) == QMessageBox.Yes
+                if go:
+                    from PySide6.QtWidgets import QInputDialog
+                    reason, ok = QInputDialog.getText(self, title, tr("앞당겨 여는 사유 (1~500자)"))
+                    reason = reason if ok else None
+            if not (reason or "").strip():
+                LOG.info("봉인 해제 거부: 조건 %d개 안 됨", len(cond.reasons))
+                self.statusBar().showMessage(tr("해제하지 않았습니다 — 조건 {0}개가 안 됩니다").format(
+                    len(cond.reasons)), 8000)
+                return None
+        else:
+            text = tr("06 7-1 해제 조건이 됩니다 (라벨링 세션 {0}개 모두 잠김). 봉인 {1}… 을 풀까요?\n"
+                      "푼 뒤에는 되돌릴 수 없고, 그 시점의 잠금 해시 목록이 기록됩니다.").format(
+                len(cond.labeling_sessions), af.short(target.sha256))
+            ok = confirm(text) if confirm is not None else QMessageBox.question(self, title, text) == QMessageBox.Yes
+            if not ok:
+                return None
+        by = self._actor_id(by, title)
+        if by is None:
+            return None
+        try:
+            res = seal.unseal(root, target.sha256, by=by, early_reason=reason, app_version=__version__,
+                              reader_kind=kind)
+        except seal.SealBlockedError as ex:
+            self.last_unseal_reasons = list(ex.reasons)
+            self.warn(title, tr("해제 조건이 되지 않았습니다:\n{0}").format("\n".join(ex.reasons)))
+            return None
+        except (seal.SealError, OSError, ValueError) as ex:
+            self.warn(title, tr("해제하지 못했습니다: {0}").format(str(ex) if isinstance(ex, seal.SealError)
+                                                                   else type(ex).__name__))
+            return None
+        LOG.info("봉인 해제: %s → run %s (조건 %s, 사전 봉인 %s)", af.short(res.sha256), res.run_id,
+                 res.conditions_met, res.presealed)
+        self.statusBar().showMessage(tr("봉인을 풀었습니다: run {0} ({1})").format(
+            res.run_id, tr("사전 봉인") if res.presealed else tr("사전 봉인 아님")), 8000)
+        return res
+
+    def side_by_side_view(self, *, show: bool = True):
+        """'분석 → 엔진과 나란히 보기' (08 D-01 방송 분석 모드, 16 8-1 5번). 분석 세션에서 해제된 run 만 연다.
+        해제 전이면 열지 않는다(D-15 7 — 상태 줄에 '봉인됨 n건'). AnalysisView 를 담은 창(모달 아님) 또는 None."""
+        title = tr("엔진과 나란히 보기")
+        why = self.analysis_block_reasons(read_seal=True)["view"]
+        if why:
+            self.statusBar().showMessage(why, 6000)
+            return None
+        from .. import analysis_flow as af
+        wb = self.workbench
+        try:
+            data = af.side_by_side(self._ai_project_root(), reader_kind=self._reader_kind())
+        except Exception as ex:  # noqa: BLE001 — 잠금·조건·형식 문제는 까닭만 보이고 창은 열지 않는다
+            msg = str(ex) if not isinstance(ex, (OSError, KeyError, TypeError)) else type(ex).__name__
+            self.warn(title, tr("나란히 보기를 열지 못했습니다: {0}").format(msg))
+            return None
+        if data.run is None:
+            self.statusBar().showMessage(tr("봉인됨 {0}건 — 봉인을 푼 뒤에 열립니다 (D-15 7)").format(data.sealed_count), 6000)
+            return None
+        from PySide6.QtWidgets import QDialog
+        from .analysis_view import AnalysisView
+        chat_times = None
+        idx = getattr(wb, "chat_index", None)
+        if idx is not None:
+            try:
+                want = {r.get("chat_id") for r in data.final_rows} | {
+                    x.get("chat_id") for x in (data.run.get("reactions") or []) if isinstance(x, dict)}
+                chat_times = idx.chat_times([c for c in want if isinstance(c, str)])
+            except Exception:  # noqa: BLE001 — 시각이 없으면 최종 세트 행의 시각을 쓴다
+                chat_times = None
+        dur = None
+        tl = getattr(wb, "timeline", None)
+        if tl is not None and getattr(tl, "duration", 0):
+            dur = int(tl.duration)
+        old = self.side_view_dialog
+        if old is not None:
+            old.close()
+            old.deleteLater()
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("{0} — run {1}").format(title, data.run_id))
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        view = AnalysisView(dlg, run=data.run, final_rows=data.final_rows, sealed_count=data.sealed_count,
+                            scores=data.scores, chat_times=chat_times, duration_ms=dur)
+        lay.addWidget(view)
+        if wb is not None:
+            view.seekRequested.connect(wb.seek_vod)
+        avail = self.screen().availableGeometry() if self.screen() is not None else None
+        w, h = 1200, 700
+        if avail is not None and avail.width() > 0:
+            w, h = min(w, avail.width() - 40), min(h, avail.height() - 60)
+        dlg.resize(w, h)
+        dlg.view = view
+        self.side_view_dialog = dlg
+        if show:
+            dlg.show()
+        if data.warnings:
+            self.statusBar().showMessage(tr("나란히 보기: 경고 {0}개 (보고서에서 확인)").format(len(data.warnings)), 6000)
+        return dlg
+
+    def ai_compare_dialog(self, *, run_id: str | None = None, out_root: str | None = None, gate=None):
+        """'보고 → AI 비교 보고서…' (06 6-3~6-7). 세션 밖·조정 세션에서 해제된 run 하나로 보고서를 프로젝트 밖에 쓴다
+        (기본 <데이터>\\reports, 일치도 보고서와 같은 규칙). 사람 일치도 기준은 gate(True·False·None) — 없으면 '기준 미확인'.
+        run_id·out_root 를 주면 묻지 않는다(시험). ReportResult 또는 None."""
+        title = tr("AI 비교 보고서")
+        why = self.analysis_block_reasons(read_seal=True)["report"]
+        if why:
+            self.statusBar().showMessage(why, 6000)
+            return None
+        from .. import ai_compare
+        from .. import analysis_flow as af
+        root, kind = self._ai_project_root(), self._reader_kind()
+        _sealed, runs = af.seal_counts(root, reader_kind=kind)
+        if run_id is None:
+            if len(runs) == 1:
+                run_id = runs[0]
+            else:
+                from PySide6.QtWidgets import QInputDialog
+                pick, ok = QInputDialog.getItem(self, title, tr("보고서를 만들 run"), list(reversed(runs)), 0, False)
+                if not ok:
+                    return None
+                run_id = pick
+        if out_root is None:
+            from .. import agreement_report as ar
+            out_root = ar.default_out_root(root)
+        created_by = self.workbench.labeler_id if self.workbench is not None and self.workbench.session else None
+        box: dict = {}
+
+        def job(_ctx):
+            run = ai_compare.load_unsealed_run(root, run_id, reader_kind=kind)
+            return ai_compare.make_report(root, run, out_root=out_root, human_gate=gate, reader_kind=kind,
+                                          created_by=created_by, app_version=__version__)
+        from ..workers import JobWorker
+        w = JobWorker.single("ai_compare", job, name="AI 비교 보고서", parent=self)
+        w.failed.connect(lambda _k, m: box.setdefault("err", m))
+        outcome = self.run_job_modal(w, title=title, label=tr("AI 비교 보고서를 만드는 중… (run {0})").format(run_id))
+        res = w.results.get("ai_compare")
+        w.deleteLater()
+        if outcome != "done" or res is None:
+            if outcome == "failed":
+                self.warn(title, tr("보고서를 만들지 못했습니다: {0}").format(box.get("err", "")))
+            return None
+        LOG.info("AI 비교 보고서: run %s · 경고 %d개", run_id, len(res.warnings or []))
+        self.statusBar().showMessage(tr("AI 비교 보고서를 썼습니다: {0}").format(res.out_dir), 8000)
+        return res
 
     def agreement_block_reason(self) -> str | None:
         """일치도 보고서를 지금 열 수 없는 까닭.
@@ -507,6 +845,8 @@ class MainWindow(QMainWindow):
 
     def update_session_actions(self, *_a) -> None:
         wb = self.workbench
+        # 분석 메뉴: 세션 종류만 본다(봉인 건수는 메뉴를 펼 때 읽는다 — 라벨링 세션은 data\ai 를 열지 않는다)
+        self._apply_analysis_reasons(self.analysis_block_reasons(read_seal=False))
         if self.jobs_busy():
             why = tr("작업이 도는 중입니다 — 끝난 뒤에 쓸 수 있습니다")
             for a in (self.a_lock, self.a_plan, self.a_agreement, self.a_cancel_plan):
@@ -861,6 +1201,11 @@ class MainWindow(QMainWindow):
             LOG.exception("저장하지 않은 변경 처리 실패")
         st, proj = getattr(wb, "store", None), getattr(wb, "project", None)
         own_file = st.path if st is not None and not getattr(st, "read_only", True) else None
+        side = getattr(self, "side_view_dialog", None)
+        if side is not None:                 # 나란히 보기 창은 이 작업대(플레이어)에 묶여 있다
+            self.side_view_dialog = None
+            side.close()
+            side.deleteLater()
         self.workbench = None
         sig = getattr(wb, "jobsBusyChanged", None)
         if sig is not None:
