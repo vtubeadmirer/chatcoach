@@ -11,8 +11,9 @@
 - 축마다 **단계 하나와 까닭 코드 하나 + 숫자**만 돌려준다(`AxisResult`). **합계 점수는 없다**(D-20 2).
   화면은 `reason_line()` 또는 자기 문구로 코드 + 숫자를 한 줄로 바꾼다. 결과에는 쓴 글·맞은 낱말이 들어가지 않는다
   (기록·로그에는 단계·코드·숫자만, 21 6-3).
-- 문턱은 모두 `DEFAULT_*` 상수와 `ViewerScoreSettings` 에 모았다. guide-config `values.viewer_score` 로 옮길 수 있게
-  `settings_from_values()` 가 있다(21 6-2 '시범 뒤 guide-config 로').
+- 문턱은 모두 `THRESHOLDS` 한 표(guide-config 칸 이름 → 설정 칸·기본값·범위)에 모았고 `ViewerScoreSettings` 가 그 칸을
+  가진다. `settings_from_values()` 가 guide-config `values.viewer_score`(선택 항목, 스키마 `$defs/viewerScore`)를 읽는다 —
+  없거나 범위 밖이면 기본값(D-21 4). 보정 측정: tools/viewer_score_calib.py, docs/measurements/2026-10-23-viewer-score-calib.md.
 - 같은 입력이면 같은 결과(시계·난수 없음, 집합 순서에 기대지 않음).
 - 순수 모듈이다(표준 라이브러리만, 엔진 import 없음, 파일·시계·네트워크 없음 — tests/test_layers.py, D-06 앱 → 엔진 경계).
   엔진은 미리 만든 파일(topic-flow, VOD 로 보정한 시각별 전사 낱말)만 주고, 파일을 읽는 쪽이 값을 넘긴다(D-20 3).
@@ -22,16 +23,33 @@
   'ㅋㅋ' 만 되풀이한 것을 못 보고, `textnorm.normalize` 는 NFKC 라 호환 자모 'ㅋ'(U+314B)를 첫소리 자모(U+110F)로
   바꿔 ko_cues 의 자모 목록과 맞지 않기 때문이다(ko_cues.nfkc 는 호환 자모를 그대로 둔다).
 - 시청자가 쓴 채팅은 시나리오·LLM 입력에 넣지 않는다(20 6장). 이 모듈은 받은 글을 메모리에서만 쓴다.
-- 알려진 약점(첫 판은 그대로): 스트리머가 방금 한 말을 그대로 옮긴 채팅(전사 되풀이)을 잡는 축이 없다. 반복 여부는
-  채팅끼리만 본다. 다음 판 후보: 반복 여부에 '전사 베끼기' 코드(내용 낱말 전부가 앞 전사 낱말에 있으면 ok, 글자 n-gram
-  포함률이 높으면 weak). 21 6-2 에도 적었다.
+- 주제 적합성의 **선택 입력**(G 둘째, 22 7-1 의 3·5-2 의 3). 셋 다 주지 않으면 결과는 이전과 바이트 단위로 같다.
+  · `topic_vectors`: 엔진(engine/topic_vectors.py, e5-small)이 **미리 계산한 창별 전사 벡터**(topic-vectors 문서 또는
+    `(start_ms, end_ms, vector)` 줄). 앱은 임베딩을 계산하지 않으므로 **쓴 글의 벡터는 없다** — 그래서 '쓴 글 ↔ 창' 이 아니라
+    '창 ↔ 창' 만 쓴다: (가) 이웃 창 유사도가 끊기지 않은 **같은 주제 줄기**를 되돌아보기(90초) 앞으로 `vec_run_max_ms` 까지
+    늘리고(경계 = 이웃 창 유사도가 그 파일의 하위 `vec_boundary_pct` 분위 밑), (나) 지금 주제 창과 그 파일의 이웃 창만큼
+    가까운(`vec_related_pct` 분위 이상) **앞선 창**(최대 `vec_related_max` 개)의 전사 낱말을 '관련 풀' 로 본다. 두 풀은 쓴 글의
+    낱말과 **겹칠 때만** 쓰고, weak(겹침 없음)를 ok 로만 올린다(good 은 지금 되돌아보기 안의 겹침만, 정밀도 우선 D-21 2).
+  · `synonyms`: 동의어 묶음(`parse_synonyms` 로 만든 표). 묶음 안 낱말은 같은 낱말로 본다(주제 흐름·전사 풀 모두).
+    파일(`chatcoach-data\\config\\synonyms-ko.txt`)을 읽는 것은 부르는 쪽 몫이다(이 모듈은 파일을 열지 않는다).
+  · `flow_head2`(설정, 기본 끔): 주제 흐름 낱말만 2자 머리 겹침을 허용('보스' ~ '보스전'). 전사 풀에는 쓰지 않는다.
+  · 벡터 문턱(`vec_*`)도 다른 문턱처럼 `THRESHOLDS` 한 표에서 온다(`DEFAULT_VEC_*` 는 그 표에서 나온 옛 이름).
+  · 화면 연결: app/viewer_flow.build_context 가 `<P>\\derived\\asr-topic-vectors.json`(asr 해시·보정이 전사 낱말과 같을 때만)과
+    동의어 파일을 읽어 context 의 `topic_vectors`·`synonyms` 로 넘기고, viewer_train_view 가 `ScoreContext.build` 에 그대로 준다.
+- 전사 베끼기(0.3, 22 7-1 의 4): 반복 여부가 스트리머가 방금(앞 `copy_window_ms`) 한 말도 본다. 서술(질문 아님)의 내용
+  낱말이 2개 이상이고 모두 방금 전사 낱말이면 ok, 3개 이상이고 모두 **한 전사 창** 안의 낱말이면 weak(`repeat.talk_copy`).
+  전사 낱말 파일에는 낱말 집합만 있어(본문·순서 없음) 21 6-2 의 '글자 n-gram 포함률' 대신 '한 창 안에 모두' 로 본다.
 
 예문은 모두 합성이다(시험: tests/test_viewer_score.py).
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import bisect
+import math
 import re
+import struct
 import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Iterable, Mapping, Sequence
@@ -91,7 +109,10 @@ def word_set(text: str) -> frozenset[str]:
 #: 채점 규칙의 판. 문턱·단서 목록·코드를 바꾸면 올린다(viewer-event write 줄의 scorer 칸 'viewer_score/<판>').
 #: 0.2(2026-10-23 검토): 기능어 거르기(목록 + 전사 창 문서 빈도), 접두 겹침 좁힘, 서술에 흔한 열린 질문 머리,
 #: 말버릇의 열린 질문 첫 낱말·끝 기호, 짧은 글의 n-gram 비율, 전사 창은 보낸 시각 앞에 시작한 것만.
-VERSION = "0.2"
+#: 0.3(2026-10-23, 22 7-1 의 4): 반복 여부에 '전사 베끼기'(repeat.talk_copy) — 스트리머가 방금 한 말의 낱말만 옮긴 서술.
+#:     같은 판에서(G 둘째) 문턱을 THRESHOLDS 한 표로 모으고(guide-config values.viewer_score), 주제 적합성의 선택 입력
+#:     (창별 벡터·동의어·flow_head2)과 habit_soft_ok_only 를 더했다. 선택 입력·켜고 끄는 칸은 기본으로 결과를 바꾸지 않는다.
+VERSION = "0.3"
 
 AXES = ("topic", "expand", "repeat")
 GOOD, OK, WEAK = "good", "ok", "weak"
@@ -104,6 +125,11 @@ TOPIC_TALK_ONE = "topic.talk_one"          # 전사 낱말과 하나 겹침
 TOPIC_NO_OVERLAP = "topic.no_overlap"      # 겹침 없음
 TOPIC_NO_WORDS = "topic.no_words"          # 쓴 채팅에 낱말이 없음(이모티콘·'ㅋ' 만 등)
 TOPIC_NO_CONTEXT = "topic.no_context"      # 그 시각 앞에 주제 흐름·전사 낱말이 없음(판단 못 함 → ok)
+TOPIC_RUN_HIT = "topic.run_hit"            # (벡터) 되돌아보기 앞으로 이어진 같은 주제 줄기의 전사 낱말과 겹침 → ok
+TOPIC_RELATED_HIT = "topic.related_hit"    # (벡터) 지금 주제와 가까운 앞선 창의 전사 낱말과 겹침 → ok
+#: 창별 벡터가 있을 때만 나오는 코드와, 그때만 결과 숫자에 붙는 칸(벡터·동의어가 없으면 숫자 칸은 이전과 같다)
+TOPIC_VECTOR_CODES = (TOPIC_RUN_HIT, TOPIC_RELATED_HIT)
+TOPIC_OPTIONAL_NUMS = ("run", "run_sec", "rel", "syn")
 # 대화 확장성
 EXPAND_OPEN_QUESTION = "expand.open_question"
 EXPAND_YN_CONCRETE = "expand.yes_no_concrete"
@@ -120,13 +146,15 @@ REPEAT_SELF_SIMILAR = "repeat.self_similar"
 REPEAT_COPY_SAME = "repeat.copy_same"
 REPEAT_COPY_SIMILAR = "repeat.copy_similar"
 REPEAT_HABIT = "repeat.habit"
+REPEAT_TALK_COPY = "repeat.talk_copy"      # 전사 베끼기: 내용 낱말이 모두 방금 전사 낱말(0.3, _talk_copy)
 
 REASON_CODES: dict[str, tuple[str, ...]] = {
-    "topic": (TOPIC_FLOW_HIT, TOPIC_TALK_HITS, TOPIC_TALK_ONE, TOPIC_NO_OVERLAP, TOPIC_NO_WORDS, TOPIC_NO_CONTEXT),
+    "topic": (TOPIC_FLOW_HIT, TOPIC_TALK_HITS, TOPIC_TALK_ONE, TOPIC_NO_OVERLAP, TOPIC_NO_WORDS, TOPIC_NO_CONTEXT,
+              TOPIC_RUN_HIT, TOPIC_RELATED_HIT),
     "expand": (EXPAND_OPEN_QUESTION, EXPAND_YN_CONCRETE, EXPAND_YN_QUESTION, EXPAND_CONCRETE, EXPAND_THIN,
                EXPAND_TOO_SHORT, EXPAND_TOO_LONG, EXPAND_REACTION_ONLY),
     "repeat": (REPEAT_FRESH, REPEAT_SELF_SAME, REPEAT_SELF_SIMILAR, REPEAT_COPY_SAME, REPEAT_COPY_SIMILAR,
-               REPEAT_HABIT),
+               REPEAT_HABIT, REPEAT_TALK_COPY),
 }
 
 # 화면 한 줄 시안(숫자만 끼운다. 쓴 글·낱말은 넣지 않는다). UI 가 자기 문구를 써도 된다.
@@ -137,6 +165,8 @@ REASON_TEXT_KO: dict[str, str] = {
     TOPIC_NO_OVERLAP: "방금 {window_sec}초 동안의 주제와 겹치는 낱말이 없어요",
     TOPIC_NO_WORDS: "낱말이 없어 주제를 볼 수 없어요",
     TOPIC_NO_CONTEXT: "이 시각 앞에 주제·전사 낱말이 없어 판단하지 않았어요",
+    TOPIC_RUN_HIT: "조금 전까지 {run_sec}초 이어진 같은 주제의 말과 {run}개 겹쳐요",
+    TOPIC_RELATED_HIT: "앞서 같은 주제를 말할 때 나온 말과 {rel}개 겹쳐요",
     EXPAND_OPEN_QUESTION: "열린 질문이라 이어 말할 거리가 있어요",
     EXPAND_YN_CONCRETE: "예/아니오 질문이지만 구체적인 낱말이 {words}개 있어요",
     EXPAND_YN_QUESTION: "예/아니오 질문이에요. 뭐·어떻게·왜로 물으면 더 이어져요",
@@ -151,43 +181,136 @@ REASON_TEXT_KO: dict[str, str] = {
     REPEAT_COPY_SAME: "방금 {window_sec}초 안의 채팅과 같아요",
     REPEAT_COPY_SIMILAR: "방금 {window_sec}초 안의 채팅과 {copy_pct}% 겹쳐요",
     REPEAT_HABIT: "같은 말버릇을 최근 {habit_lookback}번 가운데 {habit}번 썼어요",
+    REPEAT_TALK_COPY: "방금 {window_sec}초 동안 스트리머가 한 말의 낱말만 옮겼어요({talk_copy}개). 내 생각을 하나 더해 보세요",
 }
 
-# ───────────────────────────────────────────────────────────── 문턱 (guide-config values.viewer_score 로 옮길 값)
+# ───────────────────────────────────────────────────────────── 문턱 (guide-config values.viewer_score)
 
-DEFAULT_TOPIC_LOOKBACK_MS = 120_000           # 주제 흐름 덩어리: 보낸 시각 앞 120초와 겹치는 덩어리
-DEFAULT_TRANSCRIPT_LOOKBACK_MS = 90_000       # 전사 낱말: 보낸 시각 앞 90초(허용 60~120초)
-TRANSCRIPT_LOOKBACK_RANGE_MS = (60_000, 120_000)
-DEFAULT_TOPIC_GOOD_FLOW_HITS = 1              # 주제 흐름 낱말이 이만큼 겹치면 good
-DEFAULT_TOPIC_GOOD_TALK_HITS = 2              # 전사 낱말이 이만큼 겹치면 good
-DEFAULT_TOPIC_OK_TALK_HITS = 1                # 전사 낱말이 이만큼 겹치면 ok
-DEFAULT_EXPAND_MIN_CHARS = 4                  # 보이는 글자(이모티콘·공백 뺌)가 이보다 적으면 너무 짧음
-DEFAULT_EXPAND_MAX_CHARS = 60                 # 이보다 많으면 너무 김(good → ok)
-DEFAULT_EXPAND_CONCRETE_WORDS = 2             # 내용 낱말이 이만큼이면 구체적(주제 겹침 1개 이상이어도 구체적)
-DEFAULT_COPY_WINDOW_MS = 45_000               # 베끼기: 보낸 시각 앞 45초의 실제·가상 채팅(허용 30~60초)
-COPY_WINDOW_RANGE_MS = (30_000, 60_000)
-DEFAULT_NGRAM = 5                             # 글자 n-gram 길이
-DEFAULT_COPY_WEAK_PCT = 80                    # 베끼기 겹침 % 이상이면 weak (20 8장 5번 copy_max 0.8)
-DEFAULT_COPY_OK_PCT = 50                      # 이상이면 ok
-DEFAULT_SELF_WEAK_PCT = 60                    # 앞서 쓴 말과 겹침 % 이상이면 weak
-DEFAULT_SELF_OK_PCT = 40                      # 이상이면 ok
-DEFAULT_SELF_LOOKBACK = 30                    # 비슷함을 볼 앞선 내 채팅 수(같음은 이 훈련 전부)
-DEFAULT_HABIT_LOOKBACK = 5                    # 말버릇을 볼 앞선 내 채팅 수
-DEFAULT_HABIT_OK_MIN = 2                      # 그 가운데 같은 말버릇이 이만큼이면 ok
-DEFAULT_HABIT_WEAK_MIN = 3                    # 이만큼이면 weak
-DEFAULT_MIN_GRAMS = 2                         # 내 글의 n-gram 이 이보다 적으면(짧은 흔한 말) 비율 판정을 하지 않고 같음만 본다
-DEFAULT_TALK_COMMON_PCT = 20                  # 전사 창의 이 % 이상에 나오는 낱말은 주제 풀에서 뺀다(기능어, 문서 빈도)
-DEFAULT_TALK_COMMON_MIN_WINDOWS = 30          # 전사 창이 이보다 적으면 문서 빈도 거르기를 하지 않는다(표본이 작음)
+@dataclass(frozen=True)
+class Threshold:
+    """문턱 하나: guide-config 칸 이름(키) → 설정 칸·기본값·범위.
+
+    - attr: `ViewerScoreSettings` 칸 이름. default: 그 칸의 기본값(**코드 단위**: ms·개수·% 또는 bool).
+      문턱 숫자는 이 표에만 적는다(옛 `DEFAULT_*` 이름은 이 표에서 나온다).
+    - scale: guide-config 값 × scale = 코드 값(초 단위 칸은 1000). bool 칸은 1.
+    - lo·hi: guide-config 단위의 허용 범위(양 끝 포함). schemas/guide-config.schema.json `$defs/viewerScore` 의
+      minimum·maximum 과 같아야 한다(tests/test_viewer_score_calib.py 가 맞춰 본다). bool 칸은 (False, True).
+    """
+    attr: str
+    default: int | bool
+    scale: int
+    lo: int | bool
+    hi: int | bool
+    note: str = ""
+
+    @property
+    def is_bool(self) -> bool:
+        return isinstance(self.default, bool)
+
+
+#: 채점 문턱 묶음(22 7-1 의 2번, D-21 4). guide-config `values.viewer_score` 의 칸 이름 → `Threshold`.
+#: 기본값은 손으로 고른 시작값이다. 보정 측정(tools/viewer_score_calib.py, docs/measurements/2026-10-23-viewer-score-calib.md)
+#: 의 후보는 시범 뒤 더 큰 표본으로 다시 잰 다음에 바꾼다(표본 30건 — 과적합).
+THRESHOLDS: dict[str, Threshold] = {
+    "topic_lookback_sec": Threshold("topic_lookback_ms", 120_000, 1000, 10, 600,
+                                    "주제 흐름 덩어리: 보낸 시각 앞 이 초와 겹치는 덩어리"),
+    "transcript_lookback_sec": Threshold("transcript_lookback_ms", 90_000, 1000, 60, 120,
+                                         "전사 낱말: 보낸 시각 앞 이 초 안에 시작한 창(설계 60~120초)"),
+    "topic_good_flow_hits": Threshold("topic_good_flow_hits", 1, 1, 1, 10, "주제 흐름 낱말이 이만큼 겹치면 good"),
+    "topic_good_talk_hits": Threshold("topic_good_talk_hits", 2, 1, 1, 10, "전사 낱말이 이만큼 겹치면 good"),
+    "topic_ok_talk_hits": Threshold("topic_ok_talk_hits", 1, 1, 1, 10, "전사 낱말이 이만큼 겹치면 ok"),
+    "flow_head2": Threshold("flow_head2", False, 1, False, True,
+                            "켜면 주제 흐름 낱말에 한해 2자 낱말의 머리 겹침도 센다('보스'~'보스전', 22 5-2 의 3)"),
+    "expand_min_chars": Threshold("expand_min_chars", 4, 1, 1, 50,
+                                  "보이는 글자(이모티콘·공백 뺌)가 이보다 적으면 너무 짧음"),
+    "expand_max_chars": Threshold("expand_max_chars", 60, 1, 10, 500, "이보다 많으면 너무 김(good → ok)"),
+    "expand_concrete_words": Threshold("expand_concrete_words", 2, 1, 1, 10,
+                                       "내용 낱말이 이만큼이면 구체적(주제 겹침 1개 이상이어도 구체적)"),
+    "copy_window_sec": Threshold("copy_window_ms", 45_000, 1000, 30, 60,
+                                 "베끼기: 보낸 시각 앞 이 초의 실제·가상 채팅(설계 30~60초)"),
+    "ngram": Threshold("ngram", 5, 1, 2, 10, "글자 n-gram 길이"),
+    "copy_weak_pct": Threshold("copy_weak_pct", 80, 1, 1, 100, "베끼기 겹침 % 이상이면 weak (20 8장 5번 copy_max 0.8)"),
+    "copy_ok_pct": Threshold("copy_ok_pct", 50, 1, 1, 100, "베끼기 겹침 % 이상이면 ok"),
+    "self_weak_pct": Threshold("self_weak_pct", 60, 1, 1, 100, "앞서 쓴 말과 겹침 % 이상이면 weak"),
+    "self_ok_pct": Threshold("self_ok_pct", 40, 1, 1, 100, "앞서 쓴 말과 겹침 % 이상이면 ok"),
+    "self_lookback": Threshold("self_lookback", 30, 1, 1, 1000, "비슷함을 볼 앞선 내 채팅 수(같음은 이 훈련 전부)"),
+    "habit_lookback": Threshold("habit_lookback", 5, 1, 1, 50, "말버릇을 볼 앞선 내 채팅 수"),
+    "habit_ok_min": Threshold("habit_ok_min", 2, 1, 1, 50, "그 가운데 같은 말버릇이 이만큼이면 ok"),
+    "habit_weak_min": Threshold("habit_weak_min", 3, 1, 1, 50, "이만큼이면 weak"),
+    "habit_soft_ok_only": Threshold("habit_soft_ok_only", False, 1, False, True,
+                                    "켜면 끝 표지(이모티콘·웃음 자모·'~'·'!')와 흔한 첫 낱말(오늘·진짜 …)의 되풀이는 "
+                                    "ok 까지만(22 5-2 의 4). 끄면 끝 기호 '~'·'!' 만 ok 까지"),
+    "talk_copy_ok_words": Threshold("talk_copy_ok_words", 2, 1, 1, 10,
+                                    "전사 베끼기: 서술의 내용 낱말이 이만큼 이상이고 모두 방금 전사 낱말이면 ok(0.3)"),
+    "talk_copy_weak_words": Threshold("talk_copy_weak_words", 3, 1, 1, 10,
+                                      "전사 베끼기: 이만큼 이상이고 모두 한 전사 창 안의 낱말이면 weak(0.3)"),
+    # 창별 주제 벡터 문턱(G 둘째 통합에서 숫자로 정함 — 벡터 담당 측정의 기본 20/50/6, 22 측정은 docs/measurements 참고).
+    # 벡터가 없으면(파일이 없거나 창이 vec_min_windows 보다 적음) 이 칸들은 결과에 아무 영향이 없다.
+    "vec_run_max_sec": Threshold("vec_run_max_ms", 300_000, 1000, 0, 1800,
+                                 "(벡터) 같은 주제 줄기를 되돌아보기 앞으로 늘리는 한도(보낸 시각 앞 이 초). 0 이면 끔"),
+    "vec_boundary_pct": Threshold("vec_boundary_pct", 20, 1, 1, 99,
+                                  "(벡터) 이웃 창 유사도가 그 파일의 이 분위(%) 밑이면 주제 경계"),
+    "vec_related_pct": Threshold("vec_related_pct", 50, 1, 1, 99,
+                                 "(벡터) 앞선 창이 지금 주제 창과 그 파일 이웃 창 유사도의 이 분위 이상이면 '관련'"),
+    "vec_related_max": Threshold("vec_related_max", 6, 1, 0, 50, "(벡터) 관련 창 최대 수(가까운 순). 0 이면 끔"),
+    "vec_min_windows": Threshold("vec_min_windows", 12, 1, 2, 100_000,
+                                 "(벡터) 벡터 창이 이보다 적으면 분위를 믿지 못해 벡터를 쓰지 않는다"),
+    "vec_max_gap_sec": Threshold("vec_max_gap_ms", 20_000, 1000, 1, 300,
+                                 "(벡터) 이웃 창 사이가 이 초보다 벌어지면(말 없는 틈) 이어지지 않은 것(= 경계)"),
+    "min_grams": Threshold("min_grams", 2, 1, 1, 10,
+                           "내 글의 n-gram 이 이보다 적으면(짧은 흔한 말) 비율 판정을 하지 않고 같음만 본다"),
+    "talk_common_pct": Threshold("talk_common_pct", 20, 1, 5, 100,
+                                 "전사 창의 이 % 이상에 나오는 낱말은 주제 풀에서 뺀다(기능어, 문서 빈도)"),
+    "talk_common_min_windows": Threshold("talk_common_min_windows", 30, 1, 2, 100_000,
+                                         "전사 창이 이보다 적으면 문서 빈도 거르기를 하지 않는다(표본이 작음)"),
+}
+
+# 옛 이름(시험·다른 모듈이 쓴다). 값은 THRESHOLDS 한 곳에서 온다.
+DEFAULT_TOPIC_LOOKBACK_MS = THRESHOLDS["topic_lookback_sec"].default
+DEFAULT_TRANSCRIPT_LOOKBACK_MS = THRESHOLDS["transcript_lookback_sec"].default
+TRANSCRIPT_LOOKBACK_RANGE_MS = (THRESHOLDS["transcript_lookback_sec"].lo * 1000,
+                                THRESHOLDS["transcript_lookback_sec"].hi * 1000)
+DEFAULT_TOPIC_GOOD_FLOW_HITS = THRESHOLDS["topic_good_flow_hits"].default
+DEFAULT_TOPIC_GOOD_TALK_HITS = THRESHOLDS["topic_good_talk_hits"].default
+DEFAULT_TOPIC_OK_TALK_HITS = THRESHOLDS["topic_ok_talk_hits"].default
+DEFAULT_FLOW_HEAD2 = THRESHOLDS["flow_head2"].default
+DEFAULT_EXPAND_MIN_CHARS = THRESHOLDS["expand_min_chars"].default
+DEFAULT_EXPAND_MAX_CHARS = THRESHOLDS["expand_max_chars"].default
+DEFAULT_EXPAND_CONCRETE_WORDS = THRESHOLDS["expand_concrete_words"].default
+DEFAULT_COPY_WINDOW_MS = THRESHOLDS["copy_window_sec"].default
+COPY_WINDOW_RANGE_MS = (THRESHOLDS["copy_window_sec"].lo * 1000, THRESHOLDS["copy_window_sec"].hi * 1000)
+DEFAULT_NGRAM = THRESHOLDS["ngram"].default
+DEFAULT_COPY_WEAK_PCT = THRESHOLDS["copy_weak_pct"].default
+DEFAULT_COPY_OK_PCT = THRESHOLDS["copy_ok_pct"].default
+DEFAULT_SELF_WEAK_PCT = THRESHOLDS["self_weak_pct"].default
+DEFAULT_SELF_OK_PCT = THRESHOLDS["self_ok_pct"].default
+DEFAULT_SELF_LOOKBACK = THRESHOLDS["self_lookback"].default
+DEFAULT_HABIT_LOOKBACK = THRESHOLDS["habit_lookback"].default
+DEFAULT_HABIT_OK_MIN = THRESHOLDS["habit_ok_min"].default
+DEFAULT_HABIT_WEAK_MIN = THRESHOLDS["habit_weak_min"].default
+DEFAULT_HABIT_SOFT_OK_ONLY = THRESHOLDS["habit_soft_ok_only"].default
+DEFAULT_TALK_COPY_OK_WORDS = THRESHOLDS["talk_copy_ok_words"].default
+DEFAULT_TALK_COPY_WEAK_WORDS = THRESHOLDS["talk_copy_weak_words"].default
+DEFAULT_VEC_RUN_MAX_MS = THRESHOLDS["vec_run_max_sec"].default
+DEFAULT_VEC_BOUNDARY_PCT = THRESHOLDS["vec_boundary_pct"].default
+DEFAULT_VEC_RELATED_PCT = THRESHOLDS["vec_related_pct"].default
+DEFAULT_VEC_RELATED_MAX = THRESHOLDS["vec_related_max"].default
+DEFAULT_VEC_MIN_WINDOWS = THRESHOLDS["vec_min_windows"].default
+DEFAULT_VEC_MAX_GAP_MS = THRESHOLDS["vec_max_gap_sec"].default
+DEFAULT_MIN_GRAMS = THRESHOLDS["min_grams"].default
+DEFAULT_TALK_COMMON_PCT = THRESHOLDS["talk_common_pct"].default
+DEFAULT_TALK_COMMON_MIN_WINDOWS = THRESHOLDS["talk_common_min_windows"].default
 
 
 @dataclass(frozen=True)
 class ViewerScoreSettings:
-    """채점 문턱. guide-config `values.viewer_score` 에서 `settings_from_values` 로 만든다(시범 뒤)."""
+    """채점 문턱. guide-config `values.viewer_score` 에서 `settings_from_values` 로 만든다. 칸·기본값은 THRESHOLDS."""
     topic_lookback_ms: int = DEFAULT_TOPIC_LOOKBACK_MS
     transcript_lookback_ms: int = DEFAULT_TRANSCRIPT_LOOKBACK_MS
     topic_good_flow_hits: int = DEFAULT_TOPIC_GOOD_FLOW_HITS
     topic_good_talk_hits: int = DEFAULT_TOPIC_GOOD_TALK_HITS
     topic_ok_talk_hits: int = DEFAULT_TOPIC_OK_TALK_HITS
+    flow_head2: bool = DEFAULT_FLOW_HEAD2
     expand_min_chars: int = DEFAULT_EXPAND_MIN_CHARS
     expand_max_chars: int = DEFAULT_EXPAND_MAX_CHARS
     expand_concrete_words: int = DEFAULT_EXPAND_CONCRETE_WORDS
@@ -201,6 +324,15 @@ class ViewerScoreSettings:
     habit_lookback: int = DEFAULT_HABIT_LOOKBACK
     habit_ok_min: int = DEFAULT_HABIT_OK_MIN
     habit_weak_min: int = DEFAULT_HABIT_WEAK_MIN
+    habit_soft_ok_only: bool = DEFAULT_HABIT_SOFT_OK_ONLY
+    talk_copy_ok_words: int = DEFAULT_TALK_COPY_OK_WORDS
+    talk_copy_weak_words: int = DEFAULT_TALK_COPY_WEAK_WORDS
+    vec_run_max_ms: int = DEFAULT_VEC_RUN_MAX_MS
+    vec_boundary_pct: int = DEFAULT_VEC_BOUNDARY_PCT
+    vec_related_pct: int = DEFAULT_VEC_RELATED_PCT
+    vec_related_max: int = DEFAULT_VEC_RELATED_MAX
+    vec_min_windows: int = DEFAULT_VEC_MIN_WINDOWS
+    vec_max_gap_ms: int = DEFAULT_VEC_MAX_GAP_MS
     min_grams: int = DEFAULT_MIN_GRAMS
     talk_common_pct: int = DEFAULT_TALK_COMMON_PCT
     talk_common_min_windows: int = DEFAULT_TALK_COMMON_MIN_WINDOWS
@@ -208,59 +340,43 @@ class ViewerScoreSettings:
 
 DEFAULT_SETTINGS = ViewerScoreSettings()
 
-# guide-config 칸 이름 → (설정 이름, 단위 배수, 최소, 최대). 초 단위 칸은 ms 로 바꾼다.
-_GUIDE_KEYS: dict[str, tuple[str, int, int, int]] = {
-    "topic_lookback_sec": ("topic_lookback_ms", 1000, 10_000, 600_000),
-    "transcript_lookback_sec": ("transcript_lookback_ms", 1000, *TRANSCRIPT_LOOKBACK_RANGE_MS),
-    "topic_good_flow_hits": ("topic_good_flow_hits", 1, 1, 10),
-    "topic_good_talk_hits": ("topic_good_talk_hits", 1, 1, 10),
-    "topic_ok_talk_hits": ("topic_ok_talk_hits", 1, 1, 10),
-    "expand_min_chars": ("expand_min_chars", 1, 1, 50),
-    "expand_max_chars": ("expand_max_chars", 1, 10, 500),
-    "expand_concrete_words": ("expand_concrete_words", 1, 1, 10),
-    "copy_window_sec": ("copy_window_ms", 1000, *COPY_WINDOW_RANGE_MS),
-    "ngram": ("ngram", 1, 2, 10),
-    "copy_weak_pct": ("copy_weak_pct", 1, 1, 100),
-    "copy_ok_pct": ("copy_ok_pct", 1, 1, 100),
-    "self_weak_pct": ("self_weak_pct", 1, 1, 100),
-    "self_ok_pct": ("self_ok_pct", 1, 1, 100),
-    "self_lookback": ("self_lookback", 1, 1, 1000),
-    "habit_lookback": ("habit_lookback", 1, 1, 50),
-    "habit_ok_min": ("habit_ok_min", 1, 1, 50),
-    "habit_weak_min": ("habit_weak_min", 1, 1, 50),
-    "min_grams": ("min_grams", 1, 1, 10),
-    "talk_common_pct": ("talk_common_pct", 1, 5, 100),
-    "talk_common_min_windows": ("talk_common_min_windows", 1, 2, 100_000),
-}
-
 
 def settings_from_values(values: Mapping | None) -> tuple[ViewerScoreSettings, list[str]]:
     """guide-config `values`(또는 그 안의 `viewer_score` 칸) → (설정, 메모 목록).
 
-    없는 칸은 기본값. 숫자가 아니거나 범위 밖이면 그 칸만 기본값으로 두고 메모에 칸 이름을 적는다.
+    `values.viewer_score` 가 있으면 그 칸을, 없으면 받은 dict 자체를 viewer_score 칸으로 본다.
+    없는 칸은 기본값(THRESHOLDS). 형식이 틀리거나(숫자 칸에 bool·문자열, bool 칸에 숫자) guide 단위 범위 밖이면
+    그 칸만 기본값으로 두고 메모에 칸 이름을 적는다. 모르는 칸은 무시한다(스키마가 막는다).
     ok 문턱이 weak·good 문턱과 뒤집히면(예: copy_ok_pct > copy_weak_pct) 둘 다 기본값으로 돌린다.
+    메모에는 칸 이름만 넣는다(값은 넣지 않는다).
     """
     notes: list[str] = []
     if not isinstance(values, Mapping):
         return DEFAULT_SETTINGS, notes
     v = values.get("viewer_score") if isinstance(values.get("viewer_score"), Mapping) else values
-    changes: dict[str, int] = {}
-    for key, (attr, mul, lo, hi) in _GUIDE_KEYS.items():
+    changes: dict[str, int | bool] = {}
+    for key, th in THRESHOLDS.items():
         if key not in v:
             continue
         raw = v.get(key)
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        if th.is_bool:
+            if not isinstance(raw, bool):
+                notes.append(f"viewer_score.{key}: 참·거짓이 아님 → 기본값")
+                continue
+            changes[th.attr] = raw
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw != raw:
             notes.append(f"viewer_score.{key}: 숫자가 아님 → 기본값")
             continue
-        val = int(round(float(raw) * mul))
-        if not lo <= val <= hi:
+        if not th.lo <= raw <= th.hi:
             notes.append(f"viewer_score.{key}: 범위 밖 → 기본값")
             continue
-        changes[attr] = val
+        changes[th.attr] = int(round(float(raw) * th.scale))
     s = replace(DEFAULT_SETTINGS, **changes)
     for ok_attr, weak_attr in (("copy_ok_pct", "copy_weak_pct"), ("self_ok_pct", "self_weak_pct"),
                                ("habit_ok_min", "habit_weak_min"), ("topic_ok_talk_hits", "topic_good_talk_hits"),
-                               ("expand_min_chars", "expand_max_chars")):
+                               ("expand_min_chars", "expand_max_chars"),
+                               ("talk_copy_ok_words", "talk_copy_weak_words")):
         if getattr(s, ok_attr) > getattr(s, weak_attr):
             notes.append(f"viewer_score.{ok_attr}·{weak_attr}: 순서가 뒤집힘 → 기본값")
             s = replace(s, **{ok_attr: getattr(DEFAULT_SETTINGS, ok_attr),
@@ -431,6 +547,243 @@ def _drop_common(rows: list[tuple[int, int, frozenset[str]]], s: "ViewerScoreSet
     return [(a, b, ws - common) for a, b, ws in rows], common
 
 
+# ───────────────────────────────────────────────────────────── 주제 축 선택 입력: 창별 벡터 · 동의어 (G 둘째)
+
+#: 엔진 engine/topic_vectors.py 가 쓰는 문서(schemas/topic-vectors.schema.json). 앱은 이 모듈로만 푼다(파일은 부르는 쪽이 읽음).
+TOPIC_VECTORS_SCHEMA = "chatcoach/topic-vectors"
+TOPIC_VECTORS_SCHEMA_VERSION = 1
+VEC_ENCODINGS = ("f16le-b64", "round4")      # float16 리틀엔디언 base64 · 소수 4자리 수 목록
+VEC_MAX_DIM = 4096
+
+# 벡터 문턱(vec_*)은 THRESHOLDS 표에 있다(DEFAULT_VEC_* 는 그 표에서 나온 이름). 아래는 문턱이 아니라 속도 상수다.
+VEC_CURRENT_MAX = 3                  # 관련 창을 찾을 때 견주는 '지금 주제' 창 수(마지막 것부터). 채점 한 번 = 창 수 × 이 수 내적
+
+
+def _vs(s: "ViewerScoreSettings", name: str, default: int) -> int:
+    """설정 칸(정수) 읽기. 설정 대신 다른 객체를 줘도(시험·옛 호출) 칸이 없거나 정수가 아니면 default."""
+    v = getattr(s, name, default)
+    return default if isinstance(v, bool) or not isinstance(v, int) else v
+
+
+def decode_vector(value, encoding: str, dim: int) -> tuple[float, ...] | None:
+    """topic-vectors 창 하나의 `v` → 수 튜플(정규화 전). 꼴이 틀리면 None(그 창만 버린다)."""
+    if isinstance(dim, bool) or not isinstance(dim, int) or not 1 <= dim <= VEC_MAX_DIM:
+        return None
+    if encoding == "f16le-b64":
+        if not isinstance(value, str):
+            return None
+        try:
+            raw = base64.b64decode(value.encode("ascii"), validate=True)
+        except (binascii.Error, ValueError, UnicodeEncodeError):
+            return None
+        if len(raw) != 2 * dim:
+            return None
+        xs = struct.unpack(f"<{dim}e", raw)
+    elif encoding == "round4":
+        if not isinstance(value, list) or len(value) != dim:
+            return None
+        if any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in value):
+            return None
+        xs = tuple(float(x) for x in value)
+    else:
+        return None
+    if not all(math.isfinite(x) for x in xs):
+        return None
+    return tuple(xs)
+
+
+def vectors_from_doc(doc) -> list[tuple[int, int, tuple[float, ...]]]:
+    """topic-vectors 문서(dict) → [(start_ms, end_ms, 벡터)]. 형식이 다르면 빈 목록(→ 벡터 없이 지금처럼 채점).
+
+    엄한 검사(해시·칸 모양)는 engine/topic_vectors.validate 몫이다. 여기서는 읽을 수 있는 창만 남긴다."""
+    if not isinstance(doc, Mapping) or doc.get("schema") != TOPIC_VECTORS_SCHEMA \
+            or doc.get("schema_version") != TOPIC_VECTORS_SCHEMA_VERSION or doc.get("time_axis") != "vod_ms":
+        return []
+    enc, dim, wins = doc.get("encoding"), doc.get("dim"), doc.get("windows")
+    if enc not in VEC_ENCODINGS or not isinstance(wins, list):
+        return []
+    out = []
+    for w in wins:
+        if not isinstance(w, Mapping):
+            continue
+        a, b = _as_int(w.get("start_ms")), _as_int(w.get("end_ms"))
+        if a is None or b is None or b <= a:
+            continue
+        v = decode_vector(w.get("v"), enc, dim)
+        if v is not None:
+            out.append((a, b, v))
+    return out
+
+
+def _unit_vec(v: Sequence[float]) -> tuple[float, ...] | None:
+    n = math.sqrt(math.fsum(x * x for x in v))
+    if not n or not math.isfinite(n):
+        return None
+    return tuple(x / n for x in v)
+
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    """내적(같은 순서로 더해 결정적). fsum 보다 열 배쯤 빠르다 — 채점 한 번에 창 수 × 3 번 부른다."""
+    return sum(map(float.__mul__, a, b))
+
+
+def _quantile(sorted_vals: Sequence[float], pct: int) -> float:
+    """가장 가까운 순위 분위(결정적). pct 0~100."""
+    n = len(sorted_vals)
+    k = max(0, min(n - 1, math.ceil(n * max(0, min(100, pct)) / 100) - 1))
+    return sorted_vals[k]
+
+
+@dataclass(frozen=True, repr=False)
+class _Vecs:
+    """창별 벡터(정규화)와 이웃 창 유사도. 문턱(경계·관련)은 그 파일의 이웃 창 유사도 분위로 정한다(모델 눈금에 기대지 않음)."""
+    starts: tuple[int, ...]
+    ends: tuple[int, ...]
+    vecs: tuple[tuple[float, ...], ...]
+    adj: tuple[float | None, ...]     # adj[i] = cos(i-1, i). 이어지지 않으면 None. adj[0] = None
+    boundary_cut: float
+    related_cut: float
+
+    def __repr__(self) -> str:   # 벡터 값을 보이지 않는다
+        return f"_Vecs(windows={len(self.starts)})"
+
+    @classmethod
+    def build(cls, rows: Iterable, s: "ViewerScoreSettings") -> "_Vecs | None":
+        if isinstance(rows, Mapping):
+            rows = vectors_from_doc(rows)
+        seen: dict[int, tuple[int, int, tuple[float, ...]]] = {}
+        dim = None
+        for r in rows or ():
+            if not isinstance(r, (tuple, list)) or len(r) < 3:
+                continue
+            a, b, v = _as_int(r[0]), _as_int(r[1]), r[2]
+            if a is None or b is None or b <= a or not isinstance(v, (tuple, list)) or not v:
+                continue
+            if any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in v):
+                continue
+            if dim is None:
+                dim = len(v)
+            if len(v) != dim or a in seen:       # 차원이 다른 줄·같은 시작의 둘째 줄은 버린다
+                continue
+            u = _unit_vec(v)
+            if u is not None:
+                seen[a] = (a, b, u)
+        items = [seen[k] for k in sorted(seen)]
+        if len(items) < max(2, _vs(s, "vec_min_windows", DEFAULT_VEC_MIN_WINDOWS)):
+            return None
+        gap = _vs(s, "vec_max_gap_ms", DEFAULT_VEC_MAX_GAP_MS)
+        adj: list[float | None] = [None]
+        for i in range(1, len(items)):
+            adj.append(_dot(items[i - 1][2], items[i][2]) if items[i][0] - items[i - 1][1] <= gap else None)
+        vals = sorted(x for x in adj if x is not None)
+        if len(vals) < 2:
+            return None
+        return cls(tuple(r[0] for r in items), tuple(r[1] for r in items), tuple(r[2] for r in items), tuple(adj),
+                   _quantile(vals, _vs(s, "vec_boundary_pct", DEFAULT_VEC_BOUNDARY_PCT)),
+                   _quantile(vals, _vs(s, "vec_related_pct", DEFAULT_VEC_RELATED_PCT)))
+
+    def _cut(self, i: int) -> bool:
+        """창 i-1 과 i 사이가 주제 경계인가(이어지지 않음 포함)."""
+        a = self.adj[i]
+        return a is None or a < self.boundary_cut
+
+    def expand(self, sent_ms: int, base_lo: int, s: "ViewerScoreSettings"
+               ) -> tuple[int | None, tuple[tuple[int, int], ...]] | None:
+        """(같은 주제 줄기의 시작 시각 또는 None, 관련 앞선 창 [(start, end)]) 또는 None(되돌아보기 안에 벡터 창이 없음).
+
+        - 되돌아보기 [base_lo, sent_ms) 안에 시작한 창들 가운데 마지막 경계 뒤가 '지금 주제' 다.
+        - 되돌아보기 안에 경계가 없으면 그 앞으로 경계·틈을 만날 때까지(보낸 시각 앞 vec_run_max_ms 까지) 줄기를 늘린다.
+        - 관련 창: 줄기(없으면 되돌아보기) 앞에 끝난 창 가운데 지금 주제 창 어느 것과의 유사도가 related_cut 이상인 것,
+          가까운 순 vec_related_max 개(같으면 이른 창)."""
+        c = bisect.bisect_left(self.starts, sent_ms) - 1
+        a0 = bisect.bisect_left(self.starts, base_lo)
+        if c < a0:
+            return None
+        cur0 = a0
+        for i in range(c, a0, -1):
+            if self._cut(i):
+                cur0 = i
+                break
+        run_lo = None
+        run_max = _vs(s, "vec_run_max_ms", DEFAULT_VEC_RUN_MAX_MS)
+        if cur0 == a0 and run_max > 0:
+            j, limit = a0, sent_ms - run_max
+            while j > 0 and not self._cut(j) and self.starts[j - 1] >= limit:
+                j -= 1
+            if j < a0:
+                run_lo = self.starts[j]
+        rel: list[tuple[float, int, int]] = []
+        rel_max = _vs(s, "vec_related_max", DEFAULT_VEC_RELATED_MAX)
+        if rel_max > 0:
+            stop = run_lo if run_lo is not None else base_lo
+            cur = self.vecs[max(cur0, c - VEC_CURRENT_MAX + 1):c + 1]   # 지금 주제의 마지막 창 몇 개(속도)
+            for k in range(bisect.bisect_left(self.starts, stop)):
+                if self.ends[k] > stop:
+                    continue
+                sim = max(_dot(v, self.vecs[k]) for v in cur)
+                if sim >= self.related_cut:
+                    rel.append((-sim, self.starts[k], self.ends[k]))
+            rel.sort()
+        return run_lo, tuple((a, b) for _sim, a, b in rel[:rel_max])
+
+
+class _Synonyms:
+    """동의어 표: 낱말 꼴 → 같은 묶음의 다른 꼴들. repr 에는 개수만(낱말이 로그에 새지 않게)."""
+    __slots__ = ("_m",)
+
+    def __init__(self, m: Mapping[str, frozenset[str]] | None = None):
+        self._m = dict(m or {})
+
+    def get(self, w: str) -> frozenset[str]:
+        return self._m.get(w, frozenset())
+
+    def __len__(self) -> int:
+        return len(self._m)
+
+    def __repr__(self) -> str:
+        return f"_Synonyms(words={len(self._m)})"
+
+
+NO_SYNONYMS = _Synonyms()
+
+
+def parse_synonyms(text: str) -> dict[str, frozenset[str]]:
+    """동의어 묶음 글(파일 내용) → {낱말 꼴: 같은 묶음의 다른 꼴들}. 파일은 부르는 쪽이 읽는다(이 모듈은 열지 않는다).
+
+    한 줄에 한 묶음, 낱말은 쉼표·세로줄·공백으로 나눈다. '#' 뒤는 주석. 낱말은 채점과 같은 규칙(`word_set`)으로 꼴을 만든다
+    ('고양이' → '고양이'·'고양'). 꼴이 하나뿐인 묶음은 버린다. 한 낱말이 여러 묶음에 있으면 합친다."""
+    out: dict[str, set[str]] = {}
+    for line in (text or "").splitlines():
+        line = line.split("#", 1)[0]
+        entries = [e for e in re.split(r"[,|\s]+", line) if e]
+        groups = [word_set(e) for e in entries]
+        allf = frozenset().union(*groups) if groups else frozenset()
+        if len([g for g in groups if g]) < 2:
+            continue
+        for g in groups:
+            for w in g:
+                out.setdefault(w, set()).update(allf - g)
+    return {w: frozenset(v - {w}) for w, v in out.items() if v - {w}}
+
+
+def _synonyms_of(synonyms) -> _Synonyms:
+    if synonyms is None:
+        return NO_SYNONYMS
+    if isinstance(synonyms, _Synonyms):
+        return synonyms
+    if isinstance(synonyms, str):
+        return _Synonyms(parse_synonyms(synonyms))
+    m: dict[str, set[str]] = {}
+    if isinstance(synonyms, Mapping):
+        for k, vs in synonyms.items():
+            if isinstance(k, str) and isinstance(vs, Iterable) and not isinstance(vs, str):
+                m.setdefault(k, set()).update(x for x in vs if isinstance(x, str) and x != k)
+    else:                                   # 묶음 목록 [[낱말, …], …]
+        return _Synonyms(parse_synonyms("\n".join(" ".join(x for x in g if isinstance(x, str))
+                                                  for g in synonyms if isinstance(g, (list, tuple, set, frozenset)))))
+    return _Synonyms({k: frozenset(v) for k, v in m.items() if v})
+
+
 @dataclass(frozen=True, repr=False)
 class ScoreContext:
     """한 구간의 채점 맥락. `build()` 로 만든다(정렬·정규화를 한 번만).
@@ -442,6 +795,9 @@ class ScoreContext:
     - chats: 화면에 흐르는 실제·가상 채팅 `(vod_ms, text)` 또는 `{"vod_ms"|"show_vod_ms", "text"}`.
       **시청자가 쓴 연습 채팅은 넣지 않는다**(그것은 history 로 따로 본다). 본문은 정규화한 꼴·n-gram 으로만 남긴다.
     - talk_common: 전사 창의 문서 빈도로 뺀 흔한 낱말(기능어, `_drop_common`). 쓴 채팅의 내용 낱말에서도 뺀다.
+    - topic_vectors(선택): 엔진이 미리 계산한 창별 전사 벡터 — topic-vectors 문서(dict) 또는 `(start_ms, end_ms, vector)`.
+      창이 `vec_min_windows` 보다 적거나 못 읽으면 None(지금처럼). 주제 적합성만 쓴다(모듈 머리말).
+    - synonyms(선택): `parse_synonyms` 결과 dict, 묶음 글(str), 또는 묶음 목록. 없으면 동의어 없이.
 
     repr 에는 개수만 나온다(채팅 본문·전사 낱말이 로그·assert 출력에 새지 않게).
     """
@@ -451,15 +807,21 @@ class ScoreContext:
     chat_keys: tuple[tuple[str, frozenset[str]], ...]
     ngram: int = DEFAULT_NGRAM
     talk_common: frozenset[str] = frozenset()
+    vec: _Vecs | None = None
+    synonyms: _Synonyms = NO_SYNONYMS
 
     def __repr__(self) -> str:
         return (f"ScoreContext(topic={len(self.topic.items)}, talk={len(self.talk.items)}, chats={len(self.chat_ms)}, "
-                f"talk_common={len(self.talk_common)}, ngram={self.ngram})")
+                f"talk_common={len(self.talk_common)}, ngram={self.ngram}"
+                f"{'' if self.vec is None else f', vec={len(self.vec.starts)}'}"
+                f"{'' if not len(self.synonyms) else f', synonyms={len(self.synonyms)}'})")
 
     @classmethod
     def build(cls, topic_blocks: Iterable = (), transcript: Iterable = (), chats: Iterable = (), *,
-              settings: ViewerScoreSettings | None = None) -> "ScoreContext":
+              settings: ViewerScoreSettings | None = None, topic_vectors=None, synonyms=None) -> "ScoreContext":
         s = settings or DEFAULT_SETTINGS
+        vec = _Vecs.build(topic_vectors, s) if topic_vectors is not None else None
+        syn = _synonyms_of(synonyms)
         tb = [r for r in (_timed_words(e, ("keywords", "words", "tokens")) for e in (topic_blocks or ())) if r]
         tr = [r for r in (_timed_words(e, ("words", "tokens", "keywords")) for e in (transcript or ())) if r]
         tr, common = _drop_common(tr, s)
@@ -473,7 +835,7 @@ class ScoreContext:
                 cs.append((c[0], key, grams(key, s.ngram)))
         cs.sort(key=lambda r: (r[0], r[1]))
         return cls(_Timed.build(tb), _Timed.build(tr), tuple(r[0] for r in cs),
-                   tuple((r[1], r[2]) for r in cs), s.ngram, common)
+                   tuple((r[1], r[2]) for r in cs), s.ngram, common, vec, syn)
 
     def recent_chat_keys(self, lo: int, hi: int) -> tuple[tuple[str, frozenset[str]], ...]:
         i = bisect.bisect_left(self.chat_ms, lo)
@@ -568,14 +930,35 @@ EMPTY_CONTEXT = ScoreContext.build()
 
 def _score_topic(units: tuple[frozenset[str], ...], sent_ms: int, ctx: ScoreContext, s: ViewerScoreSettings
                  ) -> tuple[AxisResult, tuple[frozenset[str], ...]]:
-    """(결과, 주제와 겹친 내 낱말들). 겹친 낱말은 대화 확장성의 '구체적' 판단과 말버릇 단위 거르기에도 쓴다."""
+    """(결과, 주제와 겹친 내 낱말들). 겹친 낱말은 대화 확장성의 '구체적' 판단과 말버릇 단위 거르기에도 쓴다.
+
+    선택 입력(모듈 머리말): 동의어(ctx.synonyms)·주제 흐름 2자 머리(flow_head2)는 겹침 자체를 넓힌다(겹친 낱말에 든다).
+    창별 벡터(ctx.vec)는 겹침이 없을 때만 '같은 주제 줄기'·'관련 앞선 창' 풀을 더 보고 weak → ok 로만 올린다(겹친 낱말에
+    넣지 않는다 — 다른 축은 그대로). 선택 입력이 있을 때만 숫자 칸(syn·run·run_sec·rel)이 붙는다."""
     window_sec = s.transcript_lookback_ms // 1000
+    base_lo = sent_ms - s.transcript_lookback_ms
     flow_pool = ctx.topic.words_between(sent_ms - s.topic_lookback_ms, sent_ms)
-    talk_pool = ctx.talk.words_started(sent_ms - s.transcript_lookback_ms, sent_ms)
-    flow_hit = tuple(u for u in units if any(_match(w, flow_pool) for w in sorted(u)))
-    talk_hit = tuple(u for u in units if any(_match(w, talk_pool) for w in sorted(u)))
+    talk_pool = ctx.talk.words_started(base_lo, sent_ms)
+    syn = ctx.synonyms
+    head2 = getattr(s, "flow_head2", DEFAULT_FLOW_HEAD2) is True
+
+    def forms(u: frozenset[str]) -> list[str]:
+        if not len(syn):
+            return sorted(u)
+        ext = set(u)
+        for w in u:
+            ext |= syn.get(w)
+        return sorted(ext)
+
+    def flow_match(w: str) -> bool:
+        return _match(w, flow_pool) or (head2 and _match_head2(w, flow_pool))
+
+    flow_hit = tuple(u for u in units if any(flow_match(w) for w in forms(u)))
+    talk_hit = tuple(u for u in units if any(_match(w, talk_pool) for w in forms(u)))
     hit = tuple(u for u in units if u in flow_hit or u in talk_hit)
     nums = dict(flow=len(flow_hit), talk=len(talk_hit), words=len(units), window_sec=window_sec)
+    if len(syn):   # 동의어로만 겹친 낱말 수(같은 낱말·꼴로는 안 겹침)
+        nums["syn"] = sum(1 for u in hit if not any(flow_match(w) or _match(w, talk_pool) for w in sorted(u)))
     if not units:
         return _result("topic", WEAK, TOPIC_NO_WORDS, **nums), hit
     if not flow_pool and not talk_pool:
@@ -586,7 +969,30 @@ def _score_topic(units: tuple[frozenset[str], ...], sent_ms: int, ctx: ScoreCont
         return _result("topic", GOOD, TOPIC_TALK_HITS, **nums), hit
     if len(talk_hit) >= s.topic_ok_talk_hits:
         return _result("topic", OK, TOPIC_TALK_ONE, **nums), hit
+    ext = ctx.vec.expand(sent_ms, base_lo, s) if ctx.vec is not None else None
+    if ext is not None:
+        run_lo, related = ext
+        run_pool = ctx.talk.words_started(run_lo, base_lo) if run_lo is not None else frozenset()
+        rel_pool: set[str] = set()
+        for a, b in related:
+            rel_pool |= ctx.talk.words_started(a, b)
+        run_hit = sum(1 for u in units if any(_match(w, run_pool) for w in forms(u))) if run_pool else 0
+        rel_hit = sum(1 for u in units if any(_match(w, frozenset(rel_pool)) for w in forms(u))) if rel_pool else 0
+        nums.update(run=run_hit, rel=rel_hit, run_sec=(sent_ms - run_lo) // 1000 if run_lo is not None else 0)
+        if run_hit:
+            return _result("topic", OK, TOPIC_RUN_HIT, **nums), hit
+        if rel_hit:
+            return _result("topic", OK, TOPIC_RELATED_HIT, **nums), hit
     return _result("topic", WEAK, TOPIC_NO_OVERLAP, **nums), hit
+
+
+def _match_head2(word: str, pool: frozenset[str]) -> bool:
+    """2자 머리 겹침(주제 흐름 풀에만, flow_head2): 한쪽이 2자이고 다른 쪽(3자 이상)이 그것으로 시작('보스' ~ '보스전')."""
+    for p in pool:
+        short, long_ = (word, p) if len(word) <= len(p) else (p, word)
+        if len(short) == 2 and len(long_) >= 3 and long_.startswith(short):
+            return True
+    return False
 
 
 def _score_expand(text: str, n_words: int, topic_hits: int, s: ViewerScoreSettings) -> AxisResult:
@@ -627,9 +1033,38 @@ def _habit_units(text: str, topic_words: frozenset[str]) -> frozenset[str]:
     return frozenset(units)
 
 
-def _strong_units(units: frozenset[str]) -> frozenset[str]:
-    """weak 까지 갈 수 있는 말버릇 단위(끝 기호 '!'·'~' 는 뺀다)."""
-    return frozenset(u for u in units if not u.startswith("t:punct:"))
+def _strong_units(units: frozenset[str], soft: bool = False) -> frozenset[str]:
+    """weak 까지 갈 수 있는 말버릇 단위. 끝 기호 '!'·'~'(`t:punct:`)는 늘 뺀다.
+    soft(설정 habit_soft_ok_only, 22 5-2 의 4)면 끝 표지 전부(`t:` — 이모티콘·웃음 자모·기호)와 흔한 첫 낱말(`h:` 가운데
+    말버릇 후보·흔한 낱말 `_STOP` 을 품은 것, 예: '오늘 …')도 빼서 ok 까지만 가게 한다. 말버릇 후보 낱말(`w:`)은 그대로."""
+    if not soft:
+        return frozenset(u for u in units if not u.startswith("t:punct:"))
+    return frozenset(u for u in units
+                     if not u.startswith("t:") and not (u.startswith("h:") and word_set(u[2:]) & _STOP))
+
+
+def _talk_copy(text: str, sent_ms: int, ctx: ScoreContext, s: ViewerScoreSettings) -> tuple[int, int, int]:
+    """전사 베끼기: (내 내용 낱말 수, 그 가운데 앞 copy_window_ms 의 전사 낱말과 겹친 수, 한 전사 창 안에서 겹친 최대 수).
+
+    전사 낱말 파일은 창마다 낱말 **집합**만 남긴다(본문·말한 순서 없음, D-20 3). 그래서 글자 n-gram 포함률 대신
+    '내용 낱말이 모두 방금 전사에 있나' 와 '한 창(스트리머의 한두 문장) 안에 모두 있나' 로 본다. 겹침은 주제 적합성과
+    같은 `_match`(조사·활용 꼴)와 같은 거름(흔한 낱말·기능어·전사 창 문서 빈도)을 쓴다. 숫자만 돌려준다."""
+    units = _content_units(text, ctx.talk_common)
+    if not units:
+        return 0, 0, 0
+    lo, hi = sent_ms - s.copy_window_ms, sent_ms
+    pool = ctx.talk.words_started(lo, hi)
+    if not pool:
+        return len(units), 0, 0
+    copied = sum(1 for u in units if any(_match(w, pool) for w in sorted(u)))
+    one = 0
+    if copied == len(units):   # 한 창 안에 모두 있는지는 다 겹칠 때만 본다
+        i = bisect.bisect_left(ctx.talk.starts, lo)
+        j = bisect.bisect_left(ctx.talk.starts, hi)
+        for _a, _b, ws in ctx.talk.items[i:j]:
+            if ws:
+                one = max(one, sum(1 for u in units if any(_match(w, ws) for w in sorted(u))))
+    return len(units), copied, one
 
 
 def _score_repeat(text: str, sent_ms: int, ctx: ScoreContext, history: Sequence[str], topic_words: frozenset[str],
@@ -647,7 +1082,7 @@ def _score_repeat(text: str, sent_ms: int, ctx: ScoreContext, history: Sequence[
     same_n = ctx.ngram == s.ngram   # 맥락을 다른 n 으로 만들었으면 다시 잘라 본다
     copy_pct = max((contain_pct(mine, g if same_n else grams(k, s.ngram)) for k, g in recent), default=0)
     units = _habit_units(text, topic_words)
-    strong = _strong_units(units)
+    strong = _strong_units(units, s.habit_soft_ok_only)
     habit = habit_strong = 0
     for h in history[-s.habit_lookback:]:
         hu = _habit_units(h, topic_words)
@@ -655,8 +1090,19 @@ def _score_repeat(text: str, sent_ms: int, ctx: ScoreContext, history: Sequence[
             habit += 1
             if strong & hu:
                 habit_strong += 1
+    # 전사 베끼기(0.3): 질문은 스트리머의 낱말을 써도 베끼기로 보지 않는다(되묻기는 대화 확장성이 따로 본다)
+    talk_words, talk_copy, talk_one = _talk_copy(text, sent_ms, ctx, s)
+    # 문턱: ok = 내용 낱말 talk_copy_ok_words 개 이상이 모두 방금 전사 낱말, weak = talk_copy_weak_words 개 이상이 모두
+    # **한 전사 창(10초)** 안의 낱말(한 말을 그대로 옮김). 값은 THRESHOLDS(guide-config values.viewer_score)
+    tc_ok = _vs(s, "talk_copy_ok_words", DEFAULT_TALK_COPY_OK_WORDS)
+    tc_weak = _vs(s, "talk_copy_weak_words", DEFAULT_TALK_COPY_WEAK_WORDS)
+    statement = ko_cues.question_form(text) is None
+    all_copied = statement and talk_words >= 1 and talk_copy == talk_words
+    talk_weak = all_copied and talk_words >= tc_weak and talk_one == talk_words
+    talk_ok = all_copied and talk_words >= tc_ok
     nums = dict(self_pct=self_pct, copy_pct=copy_pct, copies=copies, habit=habit,
-                habit_lookback=s.habit_lookback, window_sec=s.copy_window_ms // 1000)
+                habit_lookback=s.habit_lookback, window_sec=s.copy_window_ms // 1000,
+                talk_copy=talk_copy, talk_one=talk_one, talk_words=talk_words)
     if self_same:
         return _result("repeat", WEAK, REPEAT_SELF_SAME, **nums)
     if copies:
@@ -665,12 +1111,16 @@ def _score_repeat(text: str, sent_ms: int, ctx: ScoreContext, history: Sequence[
         return _result("repeat", WEAK, REPEAT_SELF_SIMILAR, **nums)
     if copy_pct >= s.copy_weak_pct:
         return _result("repeat", WEAK, REPEAT_COPY_SIMILAR, **nums)
+    if talk_weak:
+        return _result("repeat", WEAK, REPEAT_TALK_COPY, **nums)
     if habit_strong >= s.habit_weak_min:   # 끝 기호('!'·'~')만 겹친 것은 ok 까지만
         return _result("repeat", WEAK, REPEAT_HABIT, **{**nums, "habit": habit_strong})
     if self_pct >= s.self_ok_pct:
         return _result("repeat", OK, REPEAT_SELF_SIMILAR, **nums)
     if copy_pct >= s.copy_ok_pct:
         return _result("repeat", OK, REPEAT_COPY_SIMILAR, **nums)
+    if talk_ok:
+        return _result("repeat", OK, REPEAT_TALK_COPY, **nums)
     if habit >= s.habit_ok_min:
         return _result("repeat", OK, REPEAT_HABIT, **nums)
     return _result("repeat", GOOD, REPEAT_FRESH, **nums)

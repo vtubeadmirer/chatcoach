@@ -325,11 +325,34 @@ def test_cli_default_out_numbers_only(tmp_path, capsys):
 def test_engine_main_passthrough(tmp_path, capsys):
     from engine.__main__ import main as engine_main
     p = make_project(tmp_path)
-    out = os.path.join(str(tmp_path), "w.json")
+    out = os.path.join(p, "derived", "asr-words-20.json")          # 보호 구역 안(밖은 거부 — 아래 시험)
     assert engine_main(["transcript-words", "--project", p, "--out", out, "--window-sec", "20"]) == 0
     with open(out, encoding="utf-8") as f:
         doc = json.load(f)
     assert doc["window_ms"] == 20000 and [w["start_ms"] for w in doc["windows"]] == [0, 20000]
+
+
+def test_cli_refuses_out_outside_protected_zone(tmp_path, capsys, monkeypatch):
+    """--out 은 그 프로젝트 보호 구역 'derived/asr*' 안만(검토 2026-10-23). 밖이면 asr 을 읽기 전에 종료 2, 아무것도 쓰지 않는다."""
+    p = make_project(tmp_path)
+    bad = [os.path.join(p, "derived", "words.json"),                 # 프로젝트 안, 보호 구역 밖 이름
+           os.path.join(p, "asr-words.json"),                         # derived 밖
+           os.path.join(str(tmp_path), "elsewhere", "asr-words.json"),  # 프로젝트 밖(공용 TEMP 같은 곳)
+           p]                                                         # 프로젝트 폴더 자체
+    opened = []
+    real_open = open
+    monkeypatch.setattr("builtins.open", lambda f, *a, **k: (opened.append(str(f)), real_open(f, *a, **k))[1])
+    for out in bad:
+        assert TW.main(["--project", p, "--out", out]) == 2
+    monkeypatch.undo()
+    assert not [f for f in opened if f.endswith("asr.json")]           # 입력을 읽기 전에 거부
+    for out in bad[:3]:
+        assert not os.path.exists(out)
+    lines = [json.loads(x) for x in capsys.readouterr().out.strip().splitlines()]
+    assert [x["error"] for x in lines] == ["out_unprotected"] * len(bad)
+    assert TW.out_protected(p, os.path.join(p, "DERIVED", "ASR-x.json"))
+    assert TW.out_protected(p, os.path.join(p, "derived", "asr_dir", "a.json"))
+    assert not TW.out_protected(p, os.path.join(p, "derived", "x-asr.json"))
 
 
 def test_refuses_pilot_before_reading(tmp_path, capsys, monkeypatch):

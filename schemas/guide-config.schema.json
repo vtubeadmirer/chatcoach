@@ -180,7 +180,49 @@
             "text_similarity_min": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "본문 유사도 하한(0~1)."},
             "ambiguous_margin": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "1위와 2위 후보 점수 차가 이보다 작으면 판별 불가로 보낸다."}
           }
+        },
+        "viewer_score": {
+          "$ref": "#/$defs/viewerScore",
+          "description": "선택 항목(08 D-21 4, 22 7-1 의 2). 시청자 훈련(G) 채점 문턱. 라벨 기준서의 값이 아니라 채점기(app/core/viewer_score.py THRESHOLDS)의 값이며, v0.1 시작값 파일에는 없다(시범 중 고정, D-14 7). 없거나 칸이 빠지거나 범위 밖이면 코드 기본값을 쓴다(settings_from_values). 칸 정의는 $defs/viewerScore."
         }
+      }
+    },
+    "viewerScore": {
+      "type": "object",
+      "description": "시청자 훈련 채점 문턱(app/core/viewer_score.py THRESHOLDS 와 같은 칸·범위 — tests/test_viewer_score_calib.py 가 맞춰 본다). 모든 칸이 선택이다. 시간은 초. '기본' 은 코드 기본값이다. ok 문턱이 weak·good 문턱보다 크면(예: copy_ok_pct > copy_weak_pct) 그 두 칸은 기본값으로 돌린다.",
+      "additionalProperties": false,
+      "properties": {
+        "topic_lookback_sec": {"type": "number", "minimum": 10, "maximum": 600, "description": "주제 흐름 덩어리: 보낸 시각 앞 이 초와 겹치는 덩어리의 낱말을 본다. 기본 120."},
+        "transcript_lookback_sec": {"type": "number", "minimum": 60, "maximum": 120, "description": "전사 낱말: 보낸 시각 앞 이 초 안에 시작한 창의 낱말을 본다. 기본 90."},
+        "topic_good_flow_hits": {"type": "integer", "minimum": 1, "maximum": 10, "description": "주제 흐름 낱말과 이만큼 겹치면 주제 적합성 good. 기본 1."},
+        "topic_good_talk_hits": {"type": "integer", "minimum": 1, "maximum": 10, "description": "전사 낱말과 이만큼 겹치면 good. 기본 2."},
+        "topic_ok_talk_hits": {"type": "integer", "minimum": 1, "maximum": 10, "description": "전사 낱말과 이만큼 겹치면 ok. 기본 1."},
+        "flow_head2": {"type": "boolean", "description": "true 면 주제 흐름 낱말에 한해 2자 낱말의 머리 겹침도 센다(보스 ~ 보스전, 22 5-2 의 3). 전사 낱말에는 쓰지 않는다. 기본 false."},
+        "expand_min_chars": {"type": "integer", "minimum": 1, "maximum": 50, "description": "보이는 글자(이모티콘·공백 뺌)가 이보다 적으면 너무 짧음. 기본 4."},
+        "expand_max_chars": {"type": "integer", "minimum": 10, "maximum": 500, "description": "이보다 많으면 너무 김(good → ok). 기본 60."},
+        "expand_concrete_words": {"type": "integer", "minimum": 1, "maximum": 10, "description": "내용 낱말이 이만큼이면 구체적. 기본 2."},
+        "copy_window_sec": {"type": "number", "minimum": 30, "maximum": 60, "description": "베끼기·전사 베끼기: 보낸 시각 앞 이 초의 채팅·전사를 본다. 기본 45."},
+        "ngram": {"type": "integer", "minimum": 2, "maximum": 10, "description": "베끼기 비교의 글자 n-gram 길이. 기본 5."},
+        "copy_weak_pct": {"type": "integer", "minimum": 1, "maximum": 100, "description": "앞 채팅과 n-gram 겹침 % 가 이 이상이면 반복 weak. 기본 80."},
+        "copy_ok_pct": {"type": "integer", "minimum": 1, "maximum": 100, "description": "이 이상이면 ok. 기본 50."},
+        "self_weak_pct": {"type": "integer", "minimum": 1, "maximum": 100, "description": "앞서 쓴 내 글과 겹침 % 가 이 이상이면 weak. 기본 60."},
+        "self_ok_pct": {"type": "integer", "minimum": 1, "maximum": 100, "description": "이 이상이면 ok. 기본 40."},
+        "self_lookback": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "비슷함을 볼 앞선 내 채팅 수. 기본 30."},
+        "habit_lookback": {"type": "integer", "minimum": 1, "maximum": 50, "description": "말버릇을 볼 앞선 내 채팅 수. 기본 5."},
+        "habit_ok_min": {"type": "integer", "minimum": 1, "maximum": 50, "description": "그 가운데 같은 말버릇이 이만큼이면 ok. 기본 2."},
+        "habit_weak_min": {"type": "integer", "minimum": 1, "maximum": 50, "description": "이만큼이면 weak. 기본 3."},
+        "habit_soft_ok_only": {"type": "boolean", "description": "true 면 끝 표지(이모티콘·웃음 자모·'~'·'!')와 흔한 첫 낱말의 되풀이는 ok 까지만(22 5-2 의 4). false 면 끝 기호 '~'·'!' 만 ok 까지. 기본 false."},
+        "talk_copy_ok_words": {"type": "integer", "minimum": 1, "maximum": 10, "description": "전사 베끼기: 서술의 내용 낱말이 이만큼 이상이고 모두 방금 전사 낱말이면 ok. 기본 2."},
+        "talk_copy_weak_words": {"type": "integer", "minimum": 1, "maximum": 10, "description": "전사 베끼기: 이만큼 이상이고 모두 한 전사 창 안의 낱말이면 weak. 기본 3."},
+        "vec_run_max_sec": {"type": "number", "minimum": 0, "maximum": 1800, "description": "(창별 주제 벡터) 같은 주제 줄기를 되돌아보기 앞으로 늘리는 한도(보낸 시각 앞 이 초). 0 이면 끔. 기본 300."},
+        "vec_boundary_pct": {"type": "integer", "minimum": 1, "maximum": 99, "description": "(창별 주제 벡터) 이웃 창 유사도가 그 파일의 이 분위(%) 밑이면 주제 경계. 기본 20."},
+        "vec_related_pct": {"type": "integer", "minimum": 1, "maximum": 99, "description": "(창별 주제 벡터) 앞선 창이 지금 주제 창과 그 파일 이웃 창 유사도의 이 분위 이상이면 관련. 기본 50."},
+        "vec_related_max": {"type": "integer", "minimum": 0, "maximum": 50, "description": "(창별 주제 벡터) 관련 창 최대 수(가까운 순). 0 이면 끔. 기본 6."},
+        "vec_min_windows": {"type": "integer", "minimum": 2, "maximum": 100000, "description": "(창별 주제 벡터) 벡터 창이 이보다 적으면 벡터를 쓰지 않는다. 기본 12."},
+        "vec_max_gap_sec": {"type": "number", "minimum": 1, "maximum": 300, "description": "(창별 주제 벡터) 이웃 창 사이가 이 초보다 벌어지면 이어지지 않은 것(경계). 기본 20."},
+        "min_grams": {"type": "integer", "minimum": 1, "maximum": 10, "description": "내 글의 n-gram 이 이보다 적으면 비율 판정 없이 같음만 본다. 기본 2."},
+        "talk_common_pct": {"type": "integer", "minimum": 5, "maximum": 100, "description": "전사 창의 이 % 이상에 나오는 낱말은 주제 풀에서 뺀다(기능어). 기본 20."},
+        "talk_common_min_windows": {"type": "integer", "minimum": 2, "maximum": 100000, "description": "전사 창이 이보다 적으면 문서 빈도 거르기를 하지 않는다. 기본 30."}
       }
     },
     "strength": {

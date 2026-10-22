@@ -20,6 +20,8 @@ G 시청자 훈련 채점기(app/core/viewer_score)는 '보낸 시각 앞 60~120
 — 보호 구역 'derived/asr*' 안이라 내보내기·패키지에 들어가지 않는다. 표준 출력에는 숫자만 낸다(낱말을 찍지 않는다).
 시범 프로젝트(폴더 이름 pilot-*)는 **읽기 전에** 거부한다(D-15 8, D-20 5 — 시범은 잠기기 전 시청자 훈련 메뉴가 꺼져 있다).
 --asr 가 시범 폴더 안을 가리켜도 같다(from_project 도 allow_pilot 이 아니면 거부).
+명령줄 --out 은 그 프로젝트 보호 구역 'derived/asr*' 안만 받는다(아니면 읽기·쓰기 전에 종료 2, out_unprotected — 공용 TEMP·
+프로젝트 밖·보호 구역 밖 이름에 평문 낱말 파일이 생기지 않게, 검토 2026-10-23).
 봉인 짝으로 만드는 길은 tools/engine_to_ai.py --from-project … --words --seal(봉인 함수가 있을 때만).
 
 실행(저장소 루트. 무거운 의존성이 없어 앱 .venv 로도 돈다)
@@ -96,6 +98,38 @@ def inside_pilot(path: str | None) -> bool:
         return False
     parts = os.path.normpath(os.path.abspath(path)).replace("\\", "/").split("/")
     return any(p.lower().startswith("pilot-") for p in parts)
+
+
+#: 전사와 같은 등급의 엔진 산출물(전사 낱말·창별 주제 벡터)을 평문으로 둘 수 있는 곳: 프로젝트 보호 구역 'derived/asr*'
+#: (app.backup.DEFAULT_PROTECTED_ZONE 의 한 칸과 같다 — 엔진은 app.backup 을 import 하지 않아 여기에 작게 둔다).
+PROTECTED_OUT_DIR = "derived"
+PROTECTED_OUT_PREFIX = "asr"
+
+
+def out_protected(project_dir: str, out: str) -> bool:
+    """--out 이 그 프로젝트 보호 구역 'derived/asr*' 안인가(대소문자 무시). 프로젝트 밖·다른 드라이브·다른 이름이면 False.
+
+    'derived/asr*' 는 파일 이름이 asr 로 시작하거나(derived/asr-words.json) 그런 이름의 폴더 아래(derived/asr_x/a.json)."""
+    root, p = os.path.abspath(project_dir), os.path.abspath(out)
+    try:
+        rel = os.path.relpath(p, root)
+    except ValueError:          # 다른 드라이브
+        return False
+    if rel == os.curdir or rel.startswith(os.pardir) or os.path.isabs(rel):
+        return False
+    parts = [x for x in rel.replace("\\", "/").lower().split("/") if x]
+    return len(parts) >= 2 and parts[0] == PROTECTED_OUT_DIR and parts[1].startswith(PROTECTED_OUT_PREFIX)
+
+
+def refuse_unprotected_out(project_dir: str, out: str, what: str) -> bool:
+    """--out 이 보호 구역 밖이면 표준 출력에 오류 JSON 한 줄을 찍고 True(부르는 쪽은 종료 2). 쓰기·읽기 전에 부른다.
+    tools/engine_to_ai.py 의 words_out_unprotected·vectors_out_unprotected 와 같은 규칙(검토 2026-10-23)."""
+    if out_protected(project_dir, out):
+        return False
+    print(json.dumps({"error": "out_unprotected",
+                      "detail": f"{what} 파일은 전사문과 같은 등급이라 프로젝트 보호 구역 안에만 씁니다 "
+                                f"(예: --out <프로젝트>\\derived\\asr-….json)"}, ensure_ascii=False))
+    return True
 
 
 def _refuse_pilot(project_dir: str) -> None:
@@ -391,6 +425,8 @@ def main(argv: list[str] | None = None) -> int:
                           "detail": "시범 프로젝트는 잠기기 전에는 평문 전사 낱말 파일을 만들지 않습니다. 봉인 짝: "
                                     "tools/engine_to_ai.py --from-project … --words --seal"}, ensure_ascii=False))
         return 1
+    if refuse_unprotected_out(ns.project, out, "전사 낱말"):
+        return 2
     if ns.window_sec <= 0:
         ap.error("--window-sec 는 양수")
     try:
@@ -412,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = ["ENGINE_NAME", "ENGINE_VERSION", "SCHEMA", "SCHEMA_VERSION", "DEFAULT_OUT_REL", "WordsConfig", "WordsError",
-           "is_pilot_dir", "inside_pilot", "read_asr", "calibration_for", "calibration_info", "build_windows",
+           "is_pilot_dir", "inside_pilot", "out_protected", "refuse_unprotected_out", "read_asr", "calibration_for", "calibration_info", "build_windows",
            "build_doc", "validate", "default_out_path", "from_project", "dump", "write_json", "main"]
 
 

@@ -406,7 +406,11 @@ def test_reason_text_covers_codes_and_nums():
     for axis, codes in vs.REASON_CODES.items():
         for code in codes:
             assert code.startswith(axis + ".")
-            assert _template_keys(vs.REASON_TEXT_KO[code]) <= nums_by_axis[axis], code
+            have = nums_by_axis[axis]
+            if code in vs.TOPIC_VECTOR_CODES:   # 벡터가 있을 때만 나오는 코드: 그때만 붙는 숫자 칸(벡터 시험이 실제 결과로 본다)
+                have = have | set(vs.TOPIC_OPTIONAL_NUMS)
+            assert _template_keys(vs.REASON_TEXT_KO[code]) <= have, code
+    assert not set(vs.TOPIC_OPTIONAL_NUMS) & nums_by_axis["topic"]   # 선택 입력이 없으면 숫자 칸은 이전과 같다
     for a in score("치즈 라면 맛있겠다", history=["치즈 라면 맛있겠다"]).axes():
         line = vs.reason_line(a)
         assert line and "{" not in line
@@ -569,3 +573,106 @@ def test_context_and_scorer_repr_have_no_text():
     for text in (repr(c), repr(vs.ViewerScorer(c)), repr(c.talk), str(c)):
         assert marker not in text and "하나" not in text
     assert "chats=1" in repr(c)
+
+
+# ───────────────────────────────────────────────────────────── 전사 베끼기 (0.3, 22 7-1 의 4)
+# 합성 전사 두 창: 30~20초 앞 '매운 치즈 라면을 끓여 볼게요', 15~5초 앞 '계란도 하나 넣고 파를 썰어요'
+TALK2 = [(T - 30_000, T - 20_000, ["이번엔 매운 치즈 라면을 끓여 볼게요"]),
+         (T - 15_000, T - 5_000, ["계란도 하나 넣고 파를 썰어요"])]
+CTX_TALK = ctx(talk=TALK2)
+
+
+def test_version_is_0_3_with_talk_copy_code():
+    assert vs.VERSION == "0.3"
+    assert vs.REPEAT_TALK_COPY in vs.REASON_CODES["repeat"] and vs.REPEAT_TALK_COPY.startswith("repeat.")
+
+
+@pytest.mark.parametrize("text, level, code, nums", [
+    # 한 창 안의 낱말 3개만 옮긴 서술 → weak
+    ("매운 치즈 라면", vs.WEAK, vs.REPEAT_TALK_COPY, {"talk_words": 3, "talk_copy": 3, "talk_one": 3}),
+    # 낱말 2개만 옮김 → ok
+    ("치즈 라면", vs.OK, vs.REPEAT_TALK_COPY, {"talk_words": 2, "talk_copy": 2, "talk_one": 2}),
+    # 3개지만 두 창에 걸침(한 말을 그대로 옮긴 것이 아님) → ok
+    ("치즈 라면 계란", vs.OK, vs.REPEAT_TALK_COPY, {"talk_words": 3, "talk_copy": 3, "talk_one": 2}),
+    # 내 낱말을 하나 더함 → good
+    ("매운 치즈 라면 국물 최고", vs.GOOD, vs.REPEAT_FRESH, {"talk_words": 5, "talk_copy": 3, "talk_one": 0}),
+    # 낱말 하나뿐인 반응은 베끼기로 보지 않는다(주제 적합성이 따로 본다)
+    ("라면!", vs.GOOD, vs.REPEAT_FRESH, {"talk_words": 1, "talk_copy": 1}),
+])
+def test_talk_copy_three_levels(text, level, code, nums):
+    r = score(text, c=CTX_TALK).repeat
+    assert (r.level, r.code) == (level, code), text
+    for k, v in nums.items():
+        assert r.num(k) == v, (text, k)
+
+
+def test_talk_copy_questions_are_not_copy():
+    # 스트리머 낱말로 묻는 것은 베끼기가 아니다(되묻기는 대화 확장성이 본다)
+    for text in ("매운 치즈 라면 맛 어때요?", "매운 치즈 라면?", "치즈 라면 맞아요?"):
+        r = score(text, c=CTX_TALK).repeat
+        assert r.code != vs.REPEAT_TALK_COPY, text
+
+
+def test_talk_copy_window_bounds():
+    s = vs.DEFAULT_SETTINGS
+    one = [(T - s.copy_window_ms, T - s.copy_window_ms + 10_000, ["매운 치즈 라면을 끓여 볼게요"])]
+    assert score("매운 치즈 라면", c=ctx(talk=one)).repeat.code == vs.REPEAT_TALK_COPY      # 정확히 45초 앞에 시작
+    old = [(T - s.copy_window_ms - 1, T - s.copy_window_ms + 9_999, ["매운 치즈 라면을 끓여 볼게요"])]
+    r = score("매운 치즈 라면", c=ctx(talk=old)).repeat
+    assert r.code == vs.REPEAT_FRESH and r.num("talk_copy") == 0                          # 그보다 앞이면 안 봄
+    future = [(T, T + 10_000, ["매운 치즈 라면을 끓여 볼게요"])]
+    assert score("매운 치즈 라면", c=ctx(talk=future)).repeat.code == vs.REPEAT_FRESH        # 아직 안 들은 말
+    s60, _ = vs.settings_from_values({"copy_window_sec": 60})
+    old55 = [(T - 55_000, T - 45_000, ["매운 치즈 라면을 끓여 볼게요"])]
+    assert score("매운 치즈 라면", c=ctx(talk=old55)).repeat.code == vs.REPEAT_FRESH
+    assert score("매운 치즈 라면", c=ctx(talk=old55), settings=s60).repeat.code == vs.REPEAT_TALK_COPY
+
+
+def test_talk_copy_no_context_and_empty_text():
+    for c in (vs.EMPTY_CONTEXT, ctx(topic=[(T - 60_000, T, ("매운", "치즈", "라면"))])):   # 주제 흐름만으로는 안 봄
+        r = score("매운 치즈 라면", c=c).repeat
+        assert r.code == vs.REPEAT_FRESH and r.num("talk_copy") == 0
+    r = score("{:zz_test_03:} ㅋㅋ", c=CTX_TALK).repeat
+    assert r.num("talk_words") == 0 and r.code != vs.REPEAT_TALK_COPY
+
+
+def test_talk_copy_precedence():
+    # 앞서 쓴 내 말과 같으면 그것이 먼저(같음 weak), 채팅 베끼기도 먼저
+    r = score("매운 치즈 라면", history=["매운 치즈 라면"], c=CTX_TALK).repeat
+    assert r.code == vs.REPEAT_SELF_SAME and r.num("talk_copy") == 3
+    c = ctx(talk=TALK2, chats=[(T - 1_000, "매운 치즈 라면")])
+    assert score("매운 치즈 라면", c=c).repeat.code == vs.REPEAT_COPY_SAME
+    # 전사 베끼기 weak 는 말버릇 weak 보다 먼저, 전사 베끼기 ok 는 말버릇 ok 보다 먼저
+    r = score("매운 치즈 라면 ㅋㅋ", history=["보스 잡았다 ㅋㅋ", "호텔 멋져요 ㅋㅋ", "대박 ㅋㅋㅋ"], c=CTX_TALK).repeat
+    assert (r.level, r.code) == (vs.WEAK, vs.REPEAT_TALK_COPY) and r.num("habit") == 3
+    r = score("치즈 라면 ㅋㅋ", history=["보스 잡았다 ㅋㅋ", "호텔 멋져요 ㅋㅋ"], c=CTX_TALK).repeat
+    assert (r.level, r.code) == (vs.OK, vs.REPEAT_TALK_COPY)
+
+
+def test_talk_copy_common_words_do_not_count():
+    # 전사 창 문서 빈도로 뺀 흔한 낱말(기능어)은 양쪽에서 빠진다 — 남은 내 낱말이 하나뿐이면 베끼기 아님
+    rows = [(i * 10_000, i * 10_000 + 9_000, ["합성공통 합성낱말%d" % i]) for i in range(40)]
+    c = ctx(talk=rows)
+    assert "합성공통" in c.talk_common
+    r = vs.score_chat("합성공통 합성낱말39", 399_500, c).repeat
+    assert r.code != vs.REPEAT_TALK_COPY and (r.num("talk_words"), r.num("talk_copy")) == (1, 1)
+
+
+def test_talk_copy_reason_line_has_numbers_only():
+    r = score("매운 치즈 라면", c=CTX_TALK).repeat
+    line = vs.reason_line(r)
+    assert "45초" in line and "3개" in line and "{" not in line
+    for w in ("매운", "치즈", "라면"):
+        assert w not in line and w not in json.dumps(r.as_dict(), ensure_ascii=False)
+
+
+def test_talk_copy_deterministic_and_fast():
+    import time
+    # 창마다 다른 합성 낱말 + 열 창에 한 번 '매운 치즈 라면'(문서 빈도 10% — 흔한 낱말로 빠지지 않음)
+    talk = [(i * 10_000, i * 10_000 + 9_000, ["합성낱말%d" % i] + (["매운 치즈 라면"] if i % 10 == 0 else []))
+            for i in range(1440)]
+    c = ctx(talk=talk)
+    t0 = time.perf_counter()
+    rs = [vs.score_chat("매운 치즈 라면", 5_005_000 + k, c).repeat for k in range(200)]
+    assert time.perf_counter() - t0 < 2.0
+    assert rs[0].code == vs.REPEAT_TALK_COPY and all(x == rs[0] for x in rs)

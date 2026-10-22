@@ -14,6 +14,10 @@
   transcript-words --project <P> [--out <json>] …
                                            engine.transcript_words 의 main(asr.json 을 VOD 로 보정한 시각별 전사 낱말,
                                            기본 <P>/derived/asr-words.json, 시범은 거부, 숫자만 출력)
+  topic-vectors --project <P> [--out <json>] …
+                                           engine.topic_vectors 의 main(VOD 10초 창마다 전사 글의 e5-small 벡터.
+                                           창 글은 저장하지 않음, 기본 <P>/derived/asr-topic-vectors.json, 시범은 거부,
+                                           모델이 없으면 종료 3. 엔진 venv 에서)
   scenario --project <P> --from T --to T … tools/make_scenario.py 의 main 을 그대로 부른다(가상 채팅 시나리오)
   semantic-info [--models-dir D] [--lmstudio]
                                            의미 비교 실행기 상태(모델 이름·해시·실행기). 받지 않는다.
@@ -43,6 +47,7 @@ _PASSTHROUGH = {
     "link": ("link", "채팅 ↔ 발화 연결 시험판(engine.link)"),
     "topics": ("topics", "주제 흐름(topic-flow) 만들기(engine.topics)"),
     "transcript-words": ("transcript_words", "VOD 로 보정한 시각별 전사 낱말 만들기(engine.transcript_words)"),
+    "topic-vectors": ("topic_vectors", "VOD 창별 주제 벡터 만들기(engine.topic_vectors, 로컬 e5-small, 엔진 venv)"),
     "scenario": ("tools/make_scenario.py", "가상 채팅 시나리오(retrieved) 만들기(tools/make_scenario.py)"),
 }
 

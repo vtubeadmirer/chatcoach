@@ -143,9 +143,10 @@ def test_values_match_schema_descriptions():
     vals = _load_config()["values"]
     seen = 0
     for sec, sec_spec in schema["$defs"]["values"]["properties"].items():
-        for key, spec in sec_spec["properties"].items():
+        # 선택 섹션(예: viewer_score, D-21 4)은 v0.1 파일에 없고 칸 정의가 $ref 쪽에 있다 — 없는 섹션·칸은 건너뛴다
+        for key, spec in sec_spec.get("properties", {}).items():
             desc = spec.get("description", "")
-            if key not in vals[sec] and key not in sec_spec.get("required", ()):
+            if key not in vals.get(sec, {}) and key not in sec_spec.get("required", ()):
                 continue          # v0.1 파일에 없는 선택 항목(예: recheck.heard_min_coverage, D-10 6 — 코드 기본값)
             got = vals[sec][key]
             m = (re.search(r"v0\.1 시작값 ([0-9]+(?:\.[0-9]+)?)", desc)

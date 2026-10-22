@@ -164,6 +164,7 @@ flowchart TB
 | core | 열거형·표시명, 시작값, 검증, ID, 시각 변환, 구간 모델, 단계 규칙, 가시성, 등급 조건 충족 계산, 표본, 체인 해소 | 인자로 받은 값만 계산한다. 파일을 열지 않는다. 시각·난수도 인자로 받는다 |
 | 입출력 | 프로젝트 폴더 읽기·쓰기, 채팅 수집, 영상 지문, ffmpeg 호출, 업데이트 | Qt 위젯을 import 하지 않는다. 오래 걸리는 함수는 취소 콜백을 받는다 |
 | 워커 | 입출력 함수를 QThread 로 감싼다 | 라벨 파일에 쓰지 않는다 (8장) |
+| 엔진 (`engine/`, 앱 밖 · `.venv-engine`) | 전사·연결·주제 흐름·시각별 전사 낱말·가상 채팅 고르기 도구 | **engine → app.core 의 순수 모듈 import 는 허용**(`textnorm`·`words_doc`·`rules`·`timecode`·`topics` 등 `app.core.*`, 그리고 `app.jsonl`) — 같은 낱말 규칙·형식 상수를 한 곳에 두려는 것(22 5-1 의 8번, D-20 3). 그 밖의 app 모듈·PySide6 는 import 하지 않는다. **앱은 engine 을 import 하지 않고** 따로 프로세스로 부르거나 엔진이 만든 파일만 읽는다(D-06). `tests/test_layers.py` 의 `ENGINE_ALLOWED_APP` 이 막는다 |
 | ui | 화면, 단축키, 폼 | 코드 값(영어 식별자)과 선택지는 core 모듈의 상수에서 가져온다. 표시명은 지금 각 core 모듈(`phase.MODE_LABELS`, `adjudicate.DECISION_KO`·`CAUSE_KO`, `origin.ORIGIN_KO`·`METHOD_KO`, `missed.REASON_NAMES` 등)과 일부 ui 파일(분류 이름이 `forms/segment_form.py`·`timeline.py`·`adjudication_view.py`·`agreement_report.py` 에 따로 있음)에 있다. 한곳에 모으는 `core/schema.py` 는 두지 않기로 했다(D-12 2). 같은 값이 여러 파일에 있으면 그 기능의 시험이 맞춰 본다 (D-13 2, 14 4-2 12번) |
 
 ### 3-2. 모듈 표

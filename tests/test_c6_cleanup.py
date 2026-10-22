@@ -178,7 +178,25 @@ def test_gui_smoke_copies_go_to_private_root_not_tmpdir(tmp_path, monkeypatch):
     # 예전 위치(TMPDIR)에 남은 사본은 세기만 한다
     (public / "chatcoach_smoke_an_zz").mkdir()
     assert gs.legacy_tmp_leftovers() == 1 and (public / "chatcoach_smoke_an_zz").is_dir()
+    # 접미 없는 예전 데이터 폴더(chatcoach_smoke)도 센다(검토 2026-10-23). 비슷한 이름의 파일·다른 폴더는 세지 않는다
+    (public / "chatcoach_smoke").mkdir()
+    (public / "chatcoach_smokey").mkdir()
+    (public / "chatcoach_smoke.txt").write_text("x", encoding="utf-8")
+    assert gs.legacy_tmp_leftovers() == 2 and (public / "chatcoach_smoke").is_dir()
     monkeypatch.setattr(gs.tempfile, "tempdir", None)
+
+
+def test_pytest_tmp_path_is_under_private_root(tmp_path):
+    """시험의 tmp_path 는 공용 TEMP 가 아니라 %LOCALAPPDATA%\\ChatCoachSmoke\\pytest 아래(conftest, 검토 2026-10-23)."""
+    from pathlib import Path
+    root = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+    if not root:
+        pytest.skip("LOCALAPPDATA 가 없는 환경")
+    assert Path(root).resolve() in Path(tmp_path).resolve().parents
+    import tempfile
+    pub = Path(tempfile.gettempdir()).resolve()
+    if pub != Path(root).resolve() and pub not in Path(root).resolve().parents:
+        assert pub not in Path(tmp_path).resolve().parents
 
 
 def test_gui_smoke_purges_only_stale_copies(tmp_path):

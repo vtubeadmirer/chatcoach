@@ -13,6 +13,12 @@
 기록 종류 topics.sealed, pair = 짝 ai-result 의 sha256). 따로 풀지 않는다 — 짝 ai-result 를 풀 때 같은 unseal 안에서
 같이 풀어 topics\\<run_id>.json 에 쓰고, ai.unsealed 기록의 topics 칸에 해시를 남긴다. '봉인됨 n건' 은 ai-result 만 센다.
 
+시각별 전사 낱말(D-20 3, 22 5-2 의 7): 엔진이 VOD 로 보정해 만든 transcript-words 도 주제 흐름과 **같은 방식**으로 짝
+봉인한다(seal_words_bytes, 기록 종류 words.sealed, 출처 engine_words·file). 짝 ai-result 를 풀 때 같이 풀어
+words\\<run_id>.json 에 쓰고 ai.unsealed 기록의 words 칸에 해시를 남긴다(read_words 로 읽는다). 낱말 파일은 전사문과
+같은 등급이다 — 검사 결과·기록·오류에 낱말을 넣지 않는다(해시·크기·코드만). 시범 프로젝트는 이 길로만 만든다
+(tools/engine_to_ai.py --from-project … --words --seal).
+
 봉인 (seal_bytes · seal_file)
 - 언제든 받는다. 받을 때 06 6-2 검사를 **들어온 바이트로** 돌려 '유효 / 거부 코드' 만 남긴다. 내용은 화면·로그·기록에
   내지 않고 해석 결과(run_id·엔진 이름·판정 수)도 남기지 않는다(06 7-2). 기록: 해시·크기·시각·사람·출처 종류·검사 결과.
@@ -65,6 +71,10 @@ TOPICS_DIR = "topics"
 SOURCE_KINDS = ("engine_link", "file")          # 출처 종류: 엔진 link 를 바로 봉인 · 받은 파일
 TOPICS_SOURCE_KINDS = ("engine_topics", "file")  # 주제 흐름 출처: 엔진을 바로 봉인 · 받은 파일
 TOPICS_MAX_BYTES = 4 << 20
+K_WORDS_SEALED = "words.sealed"                 # 시각별 전사 낱말 짝 봉인 (D-20 3, 22 5-2 의 7)
+WORDS_DIR = "words"
+WORDS_SOURCE_KINDS = ("engine_words", "file")   # 전사 낱말 출처: 엔진을 바로 봉인 · 받은 파일
+WORDS_MAX_BYTES = 16 << 20                      # app.viewer_flow.WORDS_MAX_BYTES 와 같다
 LOCK_MAX_BYTES = 4 << 20
 SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 PROJECT_ID_RE = re.compile(r"\A[0-9a-f-]{36}\Z")
@@ -77,6 +87,7 @@ __all__ = [
     "default_ai_root", "project_ai_dir", "seal_bytes", "seal_file", "seal_status", "unseal_conditions",
     "unseal", "read_run", "unseal_events", "SOURCE_KINDS",
     "seal_topics_bytes", "seal_topics_file", "read_topics", "topics_check", "TOPICS_SOURCE_KINDS",
+    "seal_words_bytes", "seal_words_file", "read_words", "words_check", "WORDS_SOURCE_KINDS",
 ]
 
 
@@ -116,6 +127,7 @@ class SealEntry:
     conditions_met: bool | None = None           # 해제 때 06 7-1 조건이 됐는지
     new: bool = False                            # 이번 호출에서 새로 봉인했는가
     topics_sha256: str | None = None             # 짝으로 봉인한 주제 흐름(검사 통과한 마지막 것, D-17 5)
+    words_sha256: str | None = None              # 짝으로 봉인한 시각별 전사 낱말(검사 통과한 마지막 것, D-20 3)
 
 
 @dataclass
@@ -387,17 +399,24 @@ def _entry(rec: Mapping, recs: Iterable[dict], first_lock: str | None) -> SealEn
         e.unsealed_at, e.run_id, e.conditions_met = u.get("at"), u.get("run_id"), u.get("conditions_met")
     t = _topics_record(recs, e.sha256)
     e.topics_sha256 = t.get("sha256") if t is not None else None
+    w = _pair_record(recs, e.sha256, K_WORDS_SEALED)
+    e.words_sha256 = w.get("sha256") if w is not None else None
     return e
+
+
+def _pair_record(recs: Iterable[dict], pair: str, kind: str) -> dict | None:
+    """pair(ai-result sha256)에 짝지은 kind 봉인 가운데 검사를 통과한 마지막 것."""
+    best = None
+    for r in recs:
+        if r.get("kind") == kind and r.get("pair") == pair and r.get("check") == "valid" \
+                and isinstance(r.get("sha256"), str):
+            best = r
+    return best
 
 
 def _topics_record(recs: Iterable[dict], pair: str) -> dict | None:
     """pair(ai-result sha256)에 짝지은 주제 흐름 봉인 가운데 검사를 통과한 마지막 것."""
-    best = None
-    for r in recs:
-        if r.get("kind") == K_TOPICS_SEALED and r.get("pair") == pair and r.get("check") == "valid" \
-                and isinstance(r.get("sha256"), str):
-            best = r
-    return best
+    return _pair_record(recs, pair, K_TOPICS_SEALED)
 
 
 # ----------------------------------------------------------------------------- 주제 흐름 짝 봉인 (D-17 5)
@@ -504,6 +523,119 @@ def _unseal_topics(d: str, recs: list[dict], pair: str, run_id: str) -> tuple[di
     os.makedirs(os.path.join(d, TOPICS_DIR), exist_ok=True)
     atomic_write(os.path.join(d, TOPICS_DIR, f"{run_id}.json"), out)
     return {"sha256": tsha, "file_sha256": hashlib.sha256(out).hexdigest()}, None
+
+
+# ----------------------------------------------------------------------------- 시각별 전사 낱말 짝 봉인 (D-20 3)
+def words_check(data: bytes, project_data: Mapping | None) -> tuple[str, list[str]]:
+    """시각별 전사 낱말 바이트 검사(app.core.words_doc — 엔진과 같은 규칙) → ('valid'|'rejected', 거부 코드).
+    내용(낱말·시각)은 돌려주지 않는다. 방송 번호·project_id 가 이 프로젝트와 다르면 거부한다."""
+    from .core import words_doc as WD
+    try:
+        doc = load_json_strict(bytes(data), WORDS_MAX_BYTES)
+    except StrictJsonError:
+        return "rejected", ["words_json"]
+    if WD.validate(doc):
+        return "rejected", ["words_format"]
+    codes: list[str] = []
+    pd = project_data or {}
+    tgt = doc.get("target") or {}
+    want = str((pd.get("broadcast") or {}).get("video_no") or "") or None
+    got = tgt.get("video_no")
+    if want is not None and got is not None and str(got) != want:
+        codes.append("words_video_mismatch")
+    want_pid = pd.get("project_id") if isinstance(pd.get("project_id"), str) else None
+    got_pid = tgt.get("project_id")
+    if want_pid is not None and got_pid is not None and got_pid != want_pid:
+        codes.append("words_project_mismatch")
+    return ("rejected" if codes else "valid"), codes
+
+
+def seal_words_bytes(project_root: str, data: bytes, *, pair_sha256: str, by: str, source: str = "file",
+                     now: datetime | None = None, ai_root: str | None = None, app_version: str | None = None,
+                     reader_kind: str | None = None) -> SealEntry:
+    """시각별 전사 낱말을 ai-result 봉인 하나(pair_sha256)의 짝으로 봉인한다(seal_topics_bytes 와 같은 규칙과 인자).
+    짝이 없거나 이미 풀렸으면 SealError(풀린 결과에 나중에 붙이면 봉인 없이 보이게 되므로). 같은 바이트를 다시 받으면
+    새 줄을 쓰지 않는다. 돌려주는 SealEntry 의 run_id·unsealed_at 은 비어 있고, sha256·size·check 만 뜻이 있다."""
+    _guard(reader_kind, unseal=False)
+    if source not in WORDS_SOURCE_KINDS:
+        raise SealError(f"전사 낱말 출처 종류는 {WORDS_SOURCE_KINDS} 가운데 하나여야 합니다")
+    _check_by(by)
+    if not isinstance(pair_sha256, str) or not SHA256_RE.match(pair_sha256):
+        raise SealError("짝 sha256 형식이 아닙니다")
+    if not isinstance(data, (bytes, bytearray)):
+        raise TypeError("data 는 bytes 여야 합니다")
+    data = bytes(data)
+    if len(data) > WORDS_MAX_BYTES:
+        raise SealError(f"전사 낱말 크기 상한({WORDS_MAX_BYTES} 바이트)을 넘어 봉인하지 않습니다")
+    proj = _project(project_root)
+    d = project_ai_dir(project_root, proj.project_id, ai_root)
+    recs, probs = _read_records(d)
+    if probs:
+        raise SealError("seal.jsonl 이 깨져 새 기록을 쓰지 않습니다: " + "; ".join(probs[:3]))
+    if _sealed_record(recs, pair_sha256) is None:
+        raise SealError("짝 AI 결과 봉인이 없습니다 — 판정 결과를 먼저 봉인하세요")
+    if _unsealed_record(recs, pair_sha256) is not None:
+        raise SealError("짝 AI 결과가 이미 해제되어 전사 낱말을 붙이지 않습니다")
+    sha = hashlib.sha256(data).hexdigest()
+    old = [r for r in recs if r.get("kind") == K_WORDS_SEALED and r.get("sha256") == sha
+           and r.get("pair") == pair_sha256]
+    os.makedirs(os.path.join(d, SEALED_DIR), exist_ok=True)
+    binp = os.path.join(d, SEALED_DIR, f"{sha}.bin")
+    if not os.path.exists(binp):
+        atomic_write(binp, data)
+    if old:
+        r = old[-1]
+        return SealEntry(sha256=sha, size=r.get("size", 0), sealed_at=r.get("at", ""), sealed_by=r.get("by", ""),
+                         source=r.get("source", ""), check=r.get("check", ""),
+                         reject_reasons=list(r.get("reject_reasons") or []))
+    chk, codes = words_check(data, proj.data)
+    rec = _append(d, {
+        "kind": K_WORDS_SEALED, "at": _now_iso(now), "by": by, "app_version": _app_version(app_version),
+        "sha256": sha, "size": len(data), "source": source, "pair": pair_sha256, "check": chk,
+        "reject_reasons": codes,
+    })
+    e = SealEntry(sha256=sha, size=len(data), sealed_at=rec["at"], sealed_by=by, source=source, check=chk,
+                  reject_reasons=codes)
+    e.new = True
+    return e
+
+
+def seal_words_file(project_root: str, path: str, *, pair_sha256: str, by: str, now: datetime | None = None,
+                    ai_root: str | None = None, app_version: str | None = None,
+                    reader_kind: str | None = None) -> SealEntry:
+    """받은 전사 낱말 파일을 읽어 seal_words_bytes(source='file'). 원본을 지우는 것은 부르는 쪽 몫이다."""
+    _guard(reader_kind, unseal=False)
+    with builtins.open(path, "rb") as f:
+        data = f.read(WORDS_MAX_BYTES + 1)
+    return seal_words_bytes(project_root, data, pair_sha256=pair_sha256, by=by, source="file", now=now,
+                            ai_root=ai_root, app_version=app_version, reader_kind=reader_kind)
+
+
+def _unseal_words(d: str, recs: list[dict], pair: str, run_id: str) -> tuple[dict | None, str | None]:
+    """짝 전사 낱말을 연다(unseal 안에서만 부른다). → (기록 칸 {sha256, file_sha256} 또는 None, 문제 코드 또는 None).
+    전사 낱말 문제로 판정 해제를 막지 않는다 — 코드만 남기고 전사 낱말은 풀지 않는다."""
+    w = _pair_record(recs, pair, K_WORDS_SEALED)
+    if w is None:
+        return None, None
+    wsha = w["sha256"]
+    try:
+        with builtins.open(os.path.join(d, SEALED_DIR, f"{wsha}.bin"), "rb") as f:
+            raw = f.read(WORDS_MAX_BYTES + 1)
+    except OSError:
+        return None, "words_unreadable"
+    if hashlib.sha256(raw).hexdigest() != wsha or len(raw) != w.get("size"):
+        return None, "words_bin_mismatch"
+    from .core import words_doc as WD
+    try:
+        doc = load_json_strict(raw, WORDS_MAX_BYTES)
+    except StrictJsonError:
+        return None, "words_json"
+    if WD.validate(doc):
+        return None, "words_format"
+    out = (json.dumps(doc, ensure_ascii=False, indent=1, allow_nan=False) + "\n").encode("utf-8")
+    os.makedirs(os.path.join(d, WORDS_DIR), exist_ok=True)
+    atomic_write(os.path.join(d, WORDS_DIR, f"{run_id}.json"), out)
+    return {"sha256": wsha, "file_sha256": hashlib.sha256(out).hexdigest()}, None
 
 
 def seal_status(project_root: str, *, ai_root: str | None = None, reader_kind: str | None = None) -> SealStatus:
@@ -650,12 +782,15 @@ def unseal(project_root: str, sha256: str, *, by: str, now: datetime | None = No
     run_path = os.path.join(d, RUNS_DIR, f"{run_id}.json")
     atomic_write(run_path, run_bytes)
     topics_rec, topics_err = _unseal_topics(d, recs, sha256, run_id)
+    words_rec, words_err = _unseal_words(d, recs, sha256, run_id)
     locks = _lock_docs(root)
     first = _first_primary_lock_at(locks)
     presealed = _is_presealed(srec.get("at", ""), first)
     extra: dict = {}
     if topics_rec is not None or topics_err is not None:
         extra = {"topics": topics_rec, "topics_error": topics_err}
+    if words_rec is not None or words_err is not None:
+        extra.update(words=words_rec, words_error=words_err)
     rec = _append(d, {
         "kind": K_UNSEALED, "at": _now_iso(now), "by": by, "app_version": _app_version(app_version),
         "sha256": sha256, "run_id": run_id,
@@ -712,3 +847,26 @@ def read_topics(project_root: str, run_id: str, *, ai_root: str | None = None,
     if hashlib.sha256(raw).hexdigest() != t["file_sha256"]:
         raise SealError("해제한 주제 흐름 파일이 기록과 다릅니다")
     return load_json_strict(raw, TOPICS_MAX_BYTES)
+
+
+def read_words(project_root: str, run_id: str, *, ai_root: str | None = None,
+               reader_kind: str | None = None) -> dict | None:
+    """해제한 run 의 시각별 전사 낱말 words\\<run_id>.json(read_topics 와 같은 규칙). 해제 기록이 없으면(해제 전) 열지 않고
+    SealError, 짝 전사 낱말이 없었으면 None. 파일 sha256 이 기록과 다르면 SealError. 분석 세션도 된다."""
+    _guard(reader_kind, unseal=True, unsealed_view=True)
+    if not isinstance(run_id, str) or not air.RUN_ID_RE.match(run_id):
+        raise SealError("run_id 형식이 아닙니다")
+    proj = _project(project_root)
+    d = project_ai_dir(project_root, proj.project_id, ai_root)
+    recs, _ = _read_records(d)
+    u = [r for r in recs if r.get("kind") == K_UNSEALED and r.get("run_id") == run_id]
+    if not u:
+        raise SealError("해제 기록이 없는 run_id 입니다(해제 전에는 열지 않습니다)")
+    w = u[-1].get("words")
+    if not isinstance(w, Mapping) or not isinstance(w.get("file_sha256"), str):
+        return None
+    with builtins.open(os.path.join(d, WORDS_DIR, f"{run_id}.json"), "rb") as f:
+        raw = f.read(WORDS_MAX_BYTES + 1)
+    if hashlib.sha256(raw).hexdigest() != w["file_sha256"]:
+        raise SealError("해제한 전사 낱말 파일이 기록과 다릅니다")
+    return load_json_strict(raw, WORDS_MAX_BYTES)

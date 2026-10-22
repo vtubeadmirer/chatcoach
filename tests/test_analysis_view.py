@@ -489,6 +489,87 @@ def test_runs_mode_opens_no_files(qapp, monkeypatch):
     assert opened == []
 
 
+# ---------------------------------------------------------------------------- 판 A 기본 = 판이 가장 높은 run (22 5-2 의 12번)
+def test_version_key_and_default_run_id():
+    assert av.version_key("link-v0.3") == (0, 3) and av.version_key("0.3.0") == (0, 3)
+    assert av.version_key("0.1.0") == (0, 1) and av.version_key("v1.10") > av.version_key("v1.9")
+    assert av.version_key("판모름") is None and av.version_key(None) is None and av.version_key("0") == (0,)
+    # engine/link.py: v0.2 규칙은 '0.1.0', v0.3 은 'link-v0.3' → v0.3 가 높다
+    choices = [{"run_id": "run-v2", "engine_version": "0.1.0"}, {"run_id": "run-v3", "engine_version": "link-v0.3"}]
+    assert av.default_run_id(choices) == "run-v3"
+    # 판을 아는 것이 없으면 맨 앞(가장 늦게 푼 것). 판을 모르는 run 은 아는 run 보다 뒤
+    assert av.default_run_id(CHOICES) == "run-new"
+    assert av.default_run_id([{"run_id": "a"}, {"run_id": "b", "engine_version": "0.1.0"}]) == "b"
+    # 같은 판이면 앞(늦게 푼) 것. 이상한 값은 판 모름
+    assert av.default_run_id([{"run_id": "a", "engine_version": "0.2"}, {"run_id": "b", "engine_version": "0.2.0"}]) == "a"
+    assert av.run_versions([{"run_id": "a", "engine_version": " 0.3"}, {"run_id": "b", "engine_version": "x" * 41},
+                            {"run_id": "c", "engine_version": 3}, "d"]) == {"a": None, "b": None, "c": None, "d": None}
+    assert av.default_run_id([]) is None and av.default_run_id(None) is None
+
+
+class _Choice:
+    """analysis_flow.RunChoice 처럼 속성으로 주는 고르기 항목(engine_version 칸이 생긴 뒤의 모양)."""
+
+    def __init__(self, run_id, label, engine_version=None):
+        self.run_id, self.label = run_id, label
+        if engine_version is not None:
+            self.engine_version = engine_version
+
+
+def test_default_pick_is_highest_engine_version(qapp):
+    new, old, rows = runs_fixture()
+    old["engine"]["version"] = "link-v0.3"          # 늦게 푼 run-new 가 v0.2(0.1.0), 먼저 푼 run-old 가 v0.3
+    new["engine"]["version"] = "0.1.0"
+    choices = [_Choice("run-new", "run-new · 최신", "0.1.0"), _Choice("run-old", "run-old", "link-v0.3")]
+    ld = FakeLoader({"run-old": old})
+    v = av.AnalysisView(run=new, final_rows=rows, runs=choices, run_loader=ld, run_id="run-new")
+    assert v.current_run_id() == "run-old" and v.run_box.currentData() == "run-old" and ld.calls == ["run-old"]
+    assert "link-v0.3" in v.header.text() and not v.is_runs_mode() and v.filter_mode() == av.FILTER_ALL
+    assert v.run_version("run-old") == "link-v0.3" and v.run_version("run-new") == "0.1.0"
+    # 견줄 것에는 넘긴 run(새로 푼 v0.2)이 있다 — 클릭 한 번이면 판끼리
+    assert [v.against_box.itemData(i) for i in range(v.against_box.count())] == ["", "run-new"]
+    assert v.compare_with("run-new") and ld.calls == ["run-old"]          # 넘긴 run 은 다시 읽지 않는다
+    # pick_default=False 면 넘긴 run 그대로
+    ld2 = FakeLoader({"run-old": old})
+    v2 = av.AnalysisView(run=new, final_rows=rows, runs=choices, run_loader=ld2, run_id="run-new", pick_default=False)
+    assert v2.current_run_id() == "run-new" and ld2.calls == []
+
+
+def test_unknown_version_labels_and_keeps_latest(qapp):
+    new, old, rows = runs_fixture()
+    ld = FakeLoader({"run-old": old})
+    v = av.AnalysisView(run=new, final_rows=rows, runs=CHOICES, run_loader=ld)      # engine_version 칸 없음(지금 기록)
+    assert v.current_run_id() == "run-new" and ld.calls == []                      # 판을 모르면 앞 판처럼 최신, 더 읽지 않음
+    texts = [v.run_box.itemText(i) for i in range(v.run_box.count())]
+    assert texts[0].endswith("chatcoach-link 0.3.0")                              # 읽은 판은 결과 파일의 판
+    assert texts[1].endswith("판 모름") and v.run_version("run-old") is None
+    # 판을 아는 run 하나만 있어도 그것이 기본, 모르는 run 은 '판 모름'
+    choices = [CHOICES[0], {**CHOICES[1], "engine_version": "0.2.0"}]
+    v2 = av.AnalysisView(run=new, final_rows=rows, runs=choices, run_loader=FakeLoader({"run-old": old}))
+    assert v2.current_run_id() == "run-old"
+    assert v2.run_box.itemText(v2.run_box.findData("run-new")).endswith("chatcoach-link 0.3.0")
+
+
+def test_default_pick_load_failure_keeps_given_run(qapp):
+    new, old, rows = runs_fixture()
+    choices = [{**CHOICES[0], "engine_version": "0.1.0"}, {**CHOICES[1], "engine_version": "link-v0.3"}]
+    v = av.AnalysisView(run=new, final_rows=rows, runs=choices, run_loader=FakeLoader({}, ["run-old"]))
+    assert v.current_run_id() == "run-new" and v.list.count() > 0
+    assert "열지 못했습니다" in v.run_msg.text() and v.run_msg.isVisibleTo(v)
+    # 아직 안 읽은 판은 목록의 판을 보인다
+    assert v.run_box.itemText(v.run_box.findData("run-old")).endswith("판 link-v0.3")
+
+
+def test_default_pick_opens_no_files(qapp, monkeypatch):
+    opened = []
+    real_open = builtins.open
+    monkeypatch.setattr(builtins, "open", lambda f, *a, **k: opened.append(str(f)) or real_open(f, *a, **k))
+    new, old, rows = runs_fixture()
+    choices = [{**CHOICES[0], "engine_version": "0.1.0"}, {**CHOICES[1], "engine_version": "link-v0.3"}]
+    v = av.AnalysisView(run=new, final_rows=rows, runs=choices, run_loader=FakeLoader({"run-old": old}))
+    assert v.current_run_id() == "run-old" and opened == []
+
+
 def test_view_is_freed_when_dropped(qapp):
     """부모 없는 화면은 이름이 사라지면 바로 지워진다(D-18 10). 자기를 잡은 람다 연결이 있으면 남아 프로세스 끝에
     QApplication 보다 늦게 지워지며 접근 위반(0xC0000005·0xC0000409)이 났다."""

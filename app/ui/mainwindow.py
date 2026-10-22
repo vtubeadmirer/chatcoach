@@ -827,7 +827,12 @@ class MainWindow(QMainWindow):
         w.deleteLater()
         res = box.get("res") if w.outcome == "done" else {"error": w.outcome or "failed"}
         self.invalidate_scenario_cache()
-        qmr = next((int(args[i + 1]) for i, a in enumerate(args[:-1]) if a == "--quiet-max-real"), 2)
+        # 상태 줄의 문턱(1분에 실제 채팅 n개 이하)은 도구가 실제로 쓴 값(출력의 fill 칸)을 먼저 본다 —
+        # --threshold test·default 프리셋이면 --quiet-max-real 인자가 없다(22 5-2 의 11). 없으면 인자, 그다음 기본 2.
+        fill = (res or {}).get("fill") if isinstance((res or {}).get("fill"), dict) else {}
+        qmr = fill.get("quiet_max_real")
+        if not isinstance(qmr, int) or isinstance(qmr, bool) or qmr < 0:
+            qmr = next((int(args[i + 1]) for i, a in enumerate(args[:-1]) if a == "--quiet-max-real"), 2)
         ok, msg = scenario_mix.describe(res or {}, quiet_max_real=qmr)
         if ok:
             self._mix_off_roots.discard(root)          # 만들었으면 섞기를 켠다(기본)
@@ -1331,9 +1336,12 @@ class MainWindow(QMainWindow):
         note = vf.WORDS_NOTE_KO.get(w_code)
         if note:                                    # 보정 전·보정 없음: 전사 낱말을 쓰지 않았다는 것을 한 줄로(숫자·코드만)
             self.statusBar().showMessage(tr(note), 8000)
-        LOG.info("시청자 훈련 열기: 구간 %s %d ms · 가상 채팅 %d줄 · 주제 덩어리 %d · 전사 창 %d(%s, 보정 %s)", seg_src,
-                 seg[1] - seg[0], view.virtual_line_count(), info["topic_blocks"], info["transcript_windows"],
-                 info["words"], info["calibration_status"])
+        LOG.info("시청자 훈련 열기: 구간 %s %d ms · 가상 채팅 %d줄 · 주제 덩어리 %d(%s) · 전사 창 %d(%s, 보정 %s) · "
+                 "벡터 창 %d(%s) · 동의어 %s · 문턱 %s", seg_src,
+                 seg[1] - seg[0], view.virtual_line_count(), info["topic_blocks"], info.get("topic_source", "-"),
+                 info["transcript_windows"], info["words"], info["calibration_status"],
+                 info.get("vector_windows", 0), info.get("vectors", "-"), info.get("synonyms", "-"),
+                 info.get("settings", "-"))
         return view
 
     def close_viewer_training(self, *_a) -> None:

@@ -13,8 +13,9 @@
 
 채점(D-20 3): 기본은 순수 모듈 app.core.viewer_score —
   score_chat(text, sent_ms, ScoreContext, history) -> ViewerScore(축마다 level·code·nums). ScoreContext 는 구간마다 한 번
-  ScoreContext.build(topic_blocks, transcript, chats) 로 만든다: topic_blocks·transcript(·settings)는 start(context=…) 의
-  같은 이름 칸(엔진이 미리 만든 주제 흐름·VOD 로 보정한 시각별 전사 낱말을 통합 담당이 읽어 넘긴다), chats 는 이 화면에
+  ScoreContext.build(topic_blocks, transcript, chats) 로 만든다: topic_blocks·transcript(·settings·topic_vectors·synonyms)는
+  start(context=…) 의 같은 이름 칸(엔진이 미리 만든 주제 흐름·VOD 로 보정한 시각별 전사 낱말·창별 벡터를 app.viewer_flow
+  .build_context 가 읽어 넘긴다), chats 는 이 화면에
   흐르는 실제·가상 줄(연습 줄은 빼고 — 내 글은 history 로). 까닭 한 줄은 viewer_score.reason_line(코드 + 숫자).
   score_fn(text, context) -> dict 로 바꿔 넣을 수도 있다(시험·다른 채점기). 그때 context = build_context(vod_ms):
   {"vod_ms", "range_ms", "window_ms", "recent_chat": [{"t_ms", "text", "virtual"}](앞 window_ms 안 화면에 나온 실제·가상,
@@ -806,8 +807,11 @@ class ViewerTrainView(QWidget):
         if self._vsc_ctx is None:
             chats = [(r["t_ms"], r["text"]) for r in self._rows
                      if _is_int(r.get("t_ms")) and isinstance(r.get("text"), str) and r.get("kind", "text") == "text"]
+            # 창별 주제 벡터·동의어(선택, G 둘째): app.viewer_flow.build_context 가 맞는 파일만 넣는다. 없으면 None(지금처럼)
             self._vsc_ctx = vsc.ScoreContext.build(self._context.get("topic_blocks") or (),
-                                                   self._context.get("transcript") or (), chats, settings=settings)
+                                                   self._context.get("transcript") or (), chats, settings=settings,
+                                                   topic_vectors=self._context.get("topic_vectors"),
+                                                   synonyms=self._context.get("synonyms"))
         res = vsc.score_chat(text, int(ctx["vod_ms"]), self._vsc_ctx, list(ctx.get("my_previous") or ()),
                              settings=settings)
         return from_viewer_score(res, getattr(vsc, "reason_line", None))

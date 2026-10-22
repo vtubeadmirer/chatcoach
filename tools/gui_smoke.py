@@ -82,6 +82,13 @@
 외부 정지 감시: 감시 스레드가 3초 넘게 멈췄고 그동안 프로세스 CPU 가 거의 늘지 않았으면 그 단계 뒤에 external_suspend=초 를
   붙이고 끝에 합계를 찍는다(보안 프로그램이 프로세스를 통째로 일시 정지한 것 — 코드 멈춤과 구별, 18 보고 4-2).
 
+--faulthandler-file <경로> (22 5-2 의 1번, D-21 5): 스택을 그 파일에 남긴다(py-spy 없이). 세 경우다.
+  ① 치명 오류(접근 위반 등) — faulthandler.enable. ② 어떤 스레드가 GIL 을 FH_HANG_S 초 넘게 쥐고 놓지 않음 — 폴링 스레드가
+  못 돌면 faulthandler 의 C 감시 스레드(GIL 없이 돈다)가 'Timeout' 덤프를 쓴다. ③ '<경로>.request' 파일이 생김 — 바깥 감시
+  tools/smoke_watch.py 가 출력이 멈추면 만든다. 폴링 스레드가 지우고 모든 스레드 스택을 쓴다('== 요청 덤프 n').
+  프로세스가 밖에서 통째로 멈췄으면(보안 프로그램) 셋 다 돌지 못한다 — 그때는 smoke_watch 가 스레드 상태(Suspended)를 적는다.
+  파일에는 파이썬 파일 이름·함수 이름·줄 번호만 들어간다(채팅 본문·닉네임 없음).
+
 지키는 것
 - 원본 프로젝트에는 쓰지 않는다: 영상 연결은 persist=False, 세션 없이(보기 전용) 열어 라벨 기록도 열지 않는다.
   열기 잠금(locks/open.lock)만 잡았다 푼다. 끝에 project.json 수정 시각과 크기가 그대로인지 확인한다.
@@ -140,7 +147,71 @@ def parse_args(argv=None):
                     help=f"스모크를 돌리지 않고 {SCREENS_DIR} 의 스크린샷(<접두어>_*.png, 기본 "
                          f"{','.join(CLEANUP_DEFAULT_PREFIXES)})을 휴지통으로 보낸다. --yes 가 없으면 개수만 보인다")
     ap.add_argument("--yes", action="store_true", help="--screenshot-cleanup 을 실제로 한다(휴지통)")
+    ap.add_argument("--faulthandler-file", metavar="경로",
+                    help="스택을 이 파일에 남긴다: 치명 오류 때, GIL 이 오래 묶일 때, '<경로>.request' 가 생길 때"
+                         "(tools/smoke_watch.py 가 만든다). 파일·함수 이름·줄 번호만")
     return ap.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------- 스택 파일 (22 5-2 의 1번, D-21 5)
+FH_REQUEST_SUFFIX = ".request"     # 바깥 감시가 만드는 요청 파일: <경로>.request
+FH_POLL_S = 0.5                    # 요청 파일을 보는 간격
+FH_HANG_S = 60.0                   # GIL 이 이만큼 묶이면 C 감시 스레드가 'Timeout' 덤프를 쓴다
+FH_REARM_S = 5.0                   # 그 감시를 다시 거는 간격(걸 때마다 스레드 하나를 새로 만든다)
+
+
+def arm_faulthandler(path: str, *, poll_s: float = FH_POLL_S, hang_s: float = FH_HANG_S,
+                     rearm_s: float = FH_REARM_S):
+    """--faulthandler-file: 스택 파일을 켠다. 돌려주는 함수를 부르면 폴링·GIL 감시를 멈춘다(치명 오류 덤프는 프로세스
+    끝까지 켜 둔다 — Qt 정리 중 접근 위반도 남게). 파일은 덧붙이기(바이너리, faulthandler 가 fd 에 바로 쓴다)."""
+    import faulthandler
+    import threading
+    path = os.path.abspath(path)
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    f = open(path, "ab", buffering=0)                       # noqa: SIM115 — 프로세스 끝까지 연다(faulthandler 가 쥔다)
+    req = path + FH_REQUEST_SUFFIX
+
+    def note(text: str) -> None:
+        f.write(f"== {text} {time.strftime('%Y-%m-%dT%H:%M:%S')} pid={os.getpid()}\n".encode("utf-8"))
+
+    note("시작")
+    faulthandler.enable(file=f, all_threads=True)
+    stop = threading.Event()
+
+    def loop() -> None:
+        n, armed = 0, -1e9
+        while not stop.wait(poll_s):
+            now = time.monotonic()
+            if hang_s and now - armed >= rearm_s:
+                faulthandler.dump_traceback_later(hang_s, repeat=False, file=f, exit=False)
+                armed = now
+            if not os.path.exists(req):
+                continue
+            try:
+                os.remove(req)
+            except OSError:
+                continue                                      # 감시가 아직 쓰는 중 — 다음 차례
+            n += 1
+            note(f"요청 덤프 {n}")
+            faulthandler.dump_traceback(file=f, all_threads=True)
+            note(f"요청 덤프 {n} 끝")
+
+    th = threading.Thread(target=loop, name="smoke-faulthandler", daemon=True)
+    th.start()
+
+    def disarm() -> None:
+        stop.set()
+        th.join(poll_s * 4 + 1)
+        faulthandler.cancel_dump_traceback_later()
+        try:
+            note("끝")
+        except (OSError, ValueError):
+            pass
+
+    print(f"== faulthandler: {path} (요청 파일 {os.path.basename(req)})", flush=True)
+    return disarm
 
 
 # ---------------------------------------------------------------------------- 스크린샷 정리 (15 5-2 의 11번)
@@ -331,7 +402,8 @@ def copy_for_training(src: str, dst: str) -> list[str]:
 
 def copy_for_viewer(src: str, dst: str) -> list[str]:
     """--viewer-flow 사본: 라벨링 흐름 사본(project.json · guide/ · chat/messages.jsonl) + 시나리오(scenarios/*.jsonl,
-    가상 채팅 섞기·'다른 시청자라면' 예시) + derived/asr.json(열 때 워커가 전사 낱말을 만드는 길을 실제로 본다).
+    가상 채팅 섞기·'다른 시청자라면' 예시) + derived/asr.json(열 때 워커가 전사 낱말을 만드는 길을 실제로 본다)
+    + 있으면 derived/asr-topic-vectors.json·asr-topic-flow.json(엔진이 미리 만든 벡터·주제 흐름, G 둘째).
     asr.json 은 보호 구역이라 사본은 흐름 끝에 shutil.rmtree 로 지운다(remove_tree_checked). 전사 낱말 파일·라벨·잠금·
     손라벨·영상·다른 파생 자료는 옮기지 않는다(시청자 훈련은 정답을 쓰지 않는다)."""
     done = copy_for_flow(src, dst)
@@ -343,11 +415,14 @@ def copy_for_viewer(src: str, dst: str) -> list[str]:
         for n in names:
             shutil.copy2(os.path.join(sdir, n), os.path.join(dst, "scenarios", n))
             done.append("scenarios/" + n)
-    asr = os.path.join(src, "derived", "asr.json")
-    if os.path.isfile(asr):
-        os.makedirs(os.path.join(dst, "derived"), exist_ok=True)
-        shutil.copy2(asr, os.path.join(dst, "derived", "asr.json"))
-        done.append("derived/asr.json")
+    # asr.json + (있으면) 엔진이 미리 만든 창별 주제 벡터·주제 흐름(G 둘째 통합 — 화면 채점까지 이어지는지 본다).
+    # 모두 보호 구역 derived/asr* 이름이고 흐름 끝에 사본째 지운다.
+    for name in ("asr.json", "asr-topic-vectors.json", "asr-topic-flow.json"):
+        p = os.path.join(src, "derived", name)
+        if os.path.isfile(p):
+            os.makedirs(os.path.join(dst, "derived"), exist_ok=True)
+            shutil.copy2(p, os.path.join(dst, "derived", name))
+            done.append("derived/" + name)
     return done
 
 
@@ -405,14 +480,20 @@ def purge_stale_copies(root: str | None = None, *, older_than_s: float = SMOKE_S
     return removed, failed
 
 
+#: 예전 위치의 스모크 앱 데이터 폴더(접미 없는 이름, settings.ini·machine.json 등). 사본 폴더(chatcoach_smoke_*)와 함께 센다
+LEGACY_DATA_NAME = SMOKE_TMP_PREFIX.rstrip("_")
+
+
 def legacy_tmp_leftovers() -> int:
-    """예전 위치(tempfile.gettempdir())에 남은 chatcoach_smoke_* 폴더 수. 세기만 한다(지우는 것은 사용자 허락 뒤)."""
+    """예전 위치(tempfile.gettempdir())에 남은 chatcoach_smoke_* 사본 폴더와 접미 없는 chatcoach_smoke 데이터 폴더 수.
+    세기만 한다(지우는 것은 사용자 허락 뒤). 접미 없는 폴더는 예전 스모크의 --data-dir 기본값이었다(검토 2026-10-23)."""
     legacy = tempfile.gettempdir()
     try:
         if os.path.normcase(os.path.abspath(legacy)) == os.path.normcase(os.path.abspath(smoke_tmp_root())):
             return 0
         return sum(1 for n in os.listdir(legacy)
-                   if n.startswith(SMOKE_TMP_PREFIX) and os.path.isdir(os.path.join(legacy, n)))
+                   if (n.startswith(SMOKE_TMP_PREFIX) or n.lower() == LEGACY_DATA_NAME)
+                   and os.path.isdir(os.path.join(legacy, n)))
     except OSError:
         return 0
 
@@ -579,7 +660,7 @@ class Smoke:
         # 사본 뿌리(%LOCALAPPDATA%\ChatCoachSmoke)의 지난 실행이 남긴 사본을 먼저 치운다(숫자만 찍는다)
         removed, failed = purge_stale_copies()
         legacy = legacy_tmp_leftovers()
-        print(f"== 스모크 사본 정리: 지난 사본 {removed}개 지움, 못 지움 {failed}개, 예전 TEMP 위치에 남은 사본 {legacy}개"
+        print(f"== 스모크 사본 정리: 지난 사본 {removed}개 지움, 못 지움 {failed}개, 예전 TEMP 위치에 남은 사본·데이터 폴더 {legacy}개"
               + (" (사용자 확인 뒤 지울 것)" if legacy else ""))
         data = a.data_dir or os.path.join(smoke_tmp_root(), "data")
         os.makedirs(data, exist_ok=True)
@@ -2439,11 +2520,19 @@ class Smoke:
                 and (view.virtual_line_count() > 0 or n_scn == 0)
             clicks += 2
             seg = view._segment if view is not None else None
+            vctx = getattr(view, "_context", None) or {}
+            n_vec_src = sum(1 for d in done if d == "derived/asr-topic-vectors.json")
+            n_vec = len(vctx.get("topic_vectors") or ())
+            # 벡터 파일을 복사했으면 화면 맥락까지 와야 한다(asr·보정이 같은 사본이므로)
+            ok = ok and (n_vec_src == 0 or n_vec > 0)
             self.check("vw_menu", ok, t1, f"enabled={enabled} reason_len={reason_len} autoplay={playing} "
                                           f"muted={view.is_muted() if view else '-'} modal_dialog={not no_dialog} "
                                           f"input_fields={n_inputs} words={w_code} windows={n_win} "
                                           f"virtual_lines={view.virtual_line_count() if view else 0} "
                                           f"range_ms={seg[1] - seg[0] if seg else 0} start_lines={len(recs0)} "
+                                          f"topic_blocks={len(vctx.get('topic_blocks') or ())} "
+                                          f"vector_windows={n_vec}(file={n_vec_src}) "
+                                          f"synonyms={'y' if vctx.get('synonyms') else 'n'} "
                                           f"fit={fit} open_to_play_ms={open_ms:.0f} "
                                           f"clicks=2(메뉴 '훈련' + '시청자 훈련')")
             if not ok:
@@ -2991,7 +3080,12 @@ def main(argv=None) -> int:
     if not args.project or not os.path.isfile(os.path.join(args.project, "project.json")):
         print("project.json 이 없습니다")
         return 2
-    return Smoke(args).run()
+    disarm = arm_faulthandler(args.faulthandler_file) if args.faulthandler_file else None
+    try:
+        return Smoke(args).run()
+    finally:
+        if disarm is not None:
+            disarm()
 
 
 if __name__ == "__main__":

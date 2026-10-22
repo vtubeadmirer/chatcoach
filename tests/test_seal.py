@@ -326,3 +326,134 @@ def test_cli_seal_status_check_unseal(proj, tmp_path, capsys):
     assert ai_seal.main(["unseal", "--project", root, "--sha256", line["sealed"], "--by", "L01"]) == 0
     u = json.loads(capsys.readouterr().out)
     assert u["run_id"] == SECRET_RUN and u["conditions_met"] is True and u["locks"] == 2
+
+
+# ============================================================================== 시각별 전사 낱말 짝 봉인 (22 5-2 의 7)
+SECRET_WORD = "합성표지낱말"          # 합성 낱말 — 기록·출력·오류에 나오면 안 된다
+
+
+def words_doc(project_id=None, video_no="777", words=("보스", SECRET_WORD), **kw):
+    d = {"schema": "chatcoach/transcript-words", "schema_version": 1, "run_id": "words-synth-1",
+         "created_at": "2026-10-23T10:00:00+09:00",
+         "engine": {"name": "transcript_words", "version": "0.1.0", "config_sha256": None, "textnorm": "textnorm-v1"},
+         "target": {"project_id": project_id, "video_no": video_no, "asr_sha256": "a" * 64},
+         "time_axis": "vod_ms",
+         "calibration": {"source": "project.json", "rev": 0, "method": "single_offset", "status": "verified",
+                         "offset_ms": 0, "file_start_in_vod_ms": 0},
+         "window_ms": 10_000, "range": {"start_ms": 0, "end_ms": 600_000},
+         "windows": [{"start_ms": 100_000, "end_ms": 110_000, "words": sorted(words), "segments": 1}]}
+    d.update(kw)
+    return d
+
+
+def _pid(root):
+    from app.project import open_project
+    return open_project(root).project_id
+
+
+def test_seal_words_pairs_and_unseals_with_ai_result(proj, monkeypatch):
+    root = proj["root"]
+    wdata = data_of(words_doc(project_id=_pid(root)))
+    with pytest.raises(seal.SealError, match="짝"):                 # 짝 판정 봉인이 없으면 받지 않는다
+        seal.seal_words_bytes(root, wdata, pair_sha256="0" * 64, by="L01")
+    e = seal.seal_bytes(root, data_of(result_doc()), source="engine_link", by="L01", now=NOW)
+    we = seal.seal_words_bytes(root, wdata, pair_sha256=e.sha256, by="L01", source="engine_words", now=NOW)
+    assert we.new and we.check == "valid" and we.reject_reasons == [] and we.sha256 == hashlib.sha256(wdata).hexdigest()
+    assert we.run_id is None and we.unsealed_at is None
+    assert seal.seal_words_bytes(root, wdata, pair_sha256=e.sha256, by="L01").new is False   # 같은 바이트는 한 번
+    st = seal.seal_status(root)
+    assert st.sealed_count == 1 and st.entries[0].words_sha256 == we.sha256 and st.entries[0].topics_sha256 is None
+    d = ai_dir(proj)
+    raw = open(os.path.join(d, "seal.jsonl"), encoding="utf-8").read()
+    recs = [json.loads(x) for x in raw.splitlines()]
+    assert [r["kind"] for r in recs] == ["ai.sealed", "words.sealed"]
+    assert set(recs[1]) == {"v", "seq", "kind", "at", "by", "app_version", "sha256", "size", "source", "pair",
+                            "check", "reject_reasons"}
+    assert recs[1]["pair"] == e.sha256 and recs[1]["source"] == "engine_words"
+    assert SECRET_WORD not in raw and "보스" not in raw                     # 낱말을 기록에 남기지 않는다
+    # 해제 전에는 읽지 않는다, 라벨링 세션은 받지도 읽지도 못한다
+    with pytest.raises(seal.SealError, match="해제 기록"):
+        seal.read_words(root, SECRET_RUN, reader_kind="analysis")
+    for kind in ("primary", "relabel_second", "origin_review"):
+        with pytest.raises(seal.SealBlindError):
+            seal.seal_words_bytes(root, wdata, pair_sha256=e.sha256, by="L01", reader_kind=kind)
+        with pytest.raises(seal.SealBlindError):
+            seal.read_words(root, SECRET_RUN, reader_kind=kind)
+    # 판정을 풀면 같이 풀린다
+    _ready(root)
+    res = seal.unseal(root, e.sha256, by="L01", now=NOW + timedelta(days=4))
+    assert res.record["words"]["sha256"] == we.sha256 and res.record["words_error"] is None
+    assert "topics" not in res.record                                      # 주제 흐름 짝이 없으면 그 칸은 없다
+    doc = seal.read_words(root, res.run_id, reader_kind="analysis")
+    assert doc == json.loads(wdata)
+    assert os.path.isfile(os.path.join(d, seal.WORDS_DIR, f"{res.run_id}.json"))
+    # 풀린 결과에는 나중에 붙이지 않는다
+    with pytest.raises(seal.SealError, match="이미 해제"):
+        seal.seal_words_bytes(root, data_of(words_doc(project_id=_pid(root), words=("공략",))),
+                              pair_sha256=e.sha256, by="L01")
+    # 해제한 파일이 바뀌면 읽지 않는다
+    with open(os.path.join(d, seal.WORDS_DIR, f"{res.run_id}.json"), "ab") as f:
+        f.write(b" ")
+    with pytest.raises(seal.SealError, match="기록과 다릅니다"):
+        seal.read_words(root, res.run_id)
+    assert not os.path.exists(os.path.join(root, "ai"))                    # 프로젝트 폴더에는 아무것도 없다
+
+
+def test_seal_words_rejects_with_codes_only(proj):
+    root = proj["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    bad_fmt = seal.seal_words_bytes(root, data_of(words_doc(window_ms=0)), pair_sha256=e.sha256, by="L01")
+    assert bad_fmt.check == "rejected" and bad_fmt.reject_reasons == ["words_format"]
+    bad_json = seal.seal_words_bytes(root, b'{"x": NaN}', pair_sha256=e.sha256, by="L01")
+    assert bad_json.reject_reasons == ["words_json"]
+    other_video = seal.seal_words_bytes(root, data_of(words_doc(video_no="999")), pair_sha256=e.sha256, by="L01")
+    assert other_video.reject_reasons == ["words_video_mismatch"]
+    other_proj = seal.seal_words_bytes(root, data_of(words_doc(project_id="0" * 8 + "-0000-0000-0000-" + "0" * 12)),
+                                       pair_sha256=e.sha256, by="L01")
+    assert other_proj.reject_reasons == ["words_project_mismatch"]
+    for x in (bad_fmt, other_video, other_proj):
+        assert SECRET_WORD not in json.dumps(x.reject_reasons, ensure_ascii=False)
+    assert seal.seal_status(root).entries[0].words_sha256 is None           # 거부된 것은 짝으로 치지 않는다
+    with pytest.raises(seal.SealError, match="출처"):
+        seal.seal_words_bytes(root, b"{}", pair_sha256=e.sha256, by="L01", source="engine_topics")
+    with pytest.raises(seal.SealError, match="sha256"):
+        seal.seal_words_bytes(root, b"{}", pair_sha256="xyz", by="L01")
+    _ready(root)
+    res = seal.unseal(root, e.sha256, by="L01")
+    assert "words" not in res.record and seal.read_words(root, res.run_id) is None
+
+
+def test_seal_words_file_and_oversize(proj, tmp_path, monkeypatch):
+    root = proj["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    f = tmp_path / "w.json"
+    f.write_bytes(data_of(words_doc()))
+    we = seal.seal_words_file(root, str(f), pair_sha256=e.sha256, by="L01")
+    assert we.source == "file" and we.check == "valid" and f.exists()    # 원본을 지우는 것은 부르는 쪽 몫
+    monkeypatch.setattr(seal, "WORDS_MAX_BYTES", 10)
+    with pytest.raises(seal.SealError, match="상한"):
+        seal.seal_words_bytes(root, b"x" * 11, pair_sha256=e.sha256, by="L01")
+
+
+def test_seal_words_unseal_problem_does_not_block_ai_result(proj):
+    """짝 전사 낱말 .bin 이 깨졌어도 판정 해제는 된다 — 코드만 남기고 낱말은 풀지 않는다."""
+    root = proj["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    we = seal.seal_words_bytes(root, data_of(words_doc()), pair_sha256=e.sha256, by="L01")
+    with open(os.path.join(ai_dir(proj), "sealed", f"{we.sha256}.bin"), "ab") as f:
+        f.write(b" ")
+    _ready(root)
+    res = seal.unseal(root, e.sha256, by="L01")
+    assert res.record["words"] is None and res.record["words_error"] == "words_bin_mismatch"
+    assert seal.read_words(root, res.run_id) is None
+    assert not os.path.exists(os.path.join(ai_dir(proj), seal.WORDS_DIR, f"{res.run_id}.json"))
+
+
+def test_engine_to_ai_finds_words_sealer():
+    """tools/engine_to_ai --words --seal 이 찾는 이름(WORDS_SEAL_FN)이 이 함수다 — 엔진 쪽은 고칠 것이 없다."""
+    from tools import engine_to_ai as e2a
+    assert e2a._words_sealer() is seal.seal_words_bytes
+    sig = inspect.signature(seal.seal_words_bytes)
+    assert list(sig.parameters)[:2] == ["project_root", "data"]
+    for k in ("pair_sha256", "by", "source", "ai_root"):
+        assert sig.parameters[k].kind is inspect.Parameter.KEYWORD_ONLY

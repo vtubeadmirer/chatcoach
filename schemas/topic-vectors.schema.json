@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/chatcoach/blob/main/schemas/topic-vectors.schema.json",
+  "title": "창별 주제 벡터 (topic-vectors)",
+  "description": "엔진(engine/topic_vectors.py)이 asr.json 을 프로젝트의 활성 보정값으로 VOD 시각에 옮겨, 고정 길이 창(기본 10초, VOD 0 에 맞춤 — transcript-words 와 같은 창)마다 그 창에서 한 말의 문장 임베딩(로컬 multilingual-e5-small, 08 D-17 6)을 정규화해 담은 파일(G 둘째, 22 7-1 의 3). G 시청자 훈련 채점기(app/core/viewer_score)가 주제 적합성의 선택 입력으로 '창 ↔ 창' 유사도(주제 경계·같은 주제 줄기·관련 앞선 창)를 볼 때 읽는다. 앱은 임베딩을 계산하지 않는다. **창 글·낱말·문장은 담지 않는다**: 창 시각, 벡터, 모델 이름·해시, asr 해시, 설정 해시, 벡터 해시만. 벡터도 전사에서 나온 값이라 전사문과 같은 등급으로 다룬다: 기본 위치 <project>\\derived\\asr-topic-vectors.json(보호 구역 derived/asr*). 시범 프로젝트(pilot-*)에서는 평문으로 만들지 않는다(D-15 8, D-20 5). 같은 규칙을 engine/topic_vectors.validate 가 손으로 검사한다.",
+  "type": "object",
+  "required": ["schema", "schema_version", "run_id", "created_at", "engine", "model", "target", "time_axis", "calibration", "window_ms", "span_ms", "encoding", "dim", "range", "stats", "vectors_sha256", "windows"],
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "vecF16": {"type": "string", "pattern": "^[A-Za-z0-9+/]+={0,2}$", "maxLength": 10924, "description": "encoding f16le-b64: dim 개의 float16(리틀엔디언) 바이트를 base64 로. 길이는 4·ceil(2·dim/3)."},
+    "vecRound4": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"type": "number", "minimum": -1.0001, "maximum": 1.0001}, "description": "encoding round4: 소수 4자리로 반올림한 dim 개의 수."}
+  },
+  "properties": {
+    "schema": {"const": "chatcoach/topic-vectors"},
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+    "created_at": {"type": "string", "minLength": 1, "description": "ISO 8601 (시간대 포함)."},
+    "engine": {
+      "type": "object",
+      "required": ["name", "version", "config_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "config_sha256": {"$ref": "#/$defs/sha256", "description": "창 길이·span·최소 글자·encoding 설정의 해시."}
+      }
+    },
+    "model": {
+      "type": "object",
+      "description": "임베딩 실행기(engine.semantic). 앱은 이름·해시가 바뀌면 벡터 분위를 다시 계산한다(파일마다 분위를 따로 잰다).",
+      "required": ["backend", "name", "repo", "revision", "model_sha256", "dim", "prefix", "pooling"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": {"type": "string", "minLength": 1, "description": "onnxruntime · lmstudio · fake(시험)."},
+        "name": {"type": "string", "minLength": 1},
+        "repo": {"type": ["string", "null"]},
+        "revision": {"type": ["string", "null"]},
+        "model_sha256": {"$ref": "#/$defs/sha256"},
+        "dim": {"type": ["integer", "null"], "minimum": 1},
+        "prefix": {"type": ["string", "null"]},
+        "pooling": {"type": ["string", "null"]}
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["project_id", "video_no", "asr_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {"type": ["string", "null"]},
+        "video_no": {"type": ["string", "null"]},
+        "asr_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "time_axis": {"const": "vod_ms", "description": "모든 시각은 VOD 밀리초(채팅 시각과 같은 축)."},
+    "calibration": {
+      "type": "object",
+      "description": "바꿀 때 쓴 보정(03 4-2: 영상 파일 시각 = VOD 시각 + offset_ms). transcript-words 와 같은 꼴. 숫자·코드만.",
+      "required": ["source", "rev", "method", "status", "offset_ms", "file_start_in_vod_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"enum": ["project.json", "project.json+cli_file_start", "cli", "default"]},
+        "rev": {"type": ["integer", "null"], "minimum": 0},
+        "method": {"enum": ["single_offset", "piecewise_linear"]},
+        "status": {"enum": ["verified", "unverified", "skipped"]},
+        "offset_ms": {"type": "integer"},
+        "file_start_in_vod_ms": {"type": "integer"}
+      }
+    },
+    "window_ms": {"type": "integer", "minimum": 1},
+    "span_ms": {"type": "integer", "minimum": 1, "description": "창 하나의 벡터가 덮는 길이(창 끝에서 앞으로). window_ms 의 배수."},
+    "encoding": {"enum": ["f16le-b64", "round4"]},
+    "dim": {"type": "integer", "minimum": 0, "maximum": 4096, "description": "벡터 차원(e5-small 384). 창이 없으면 0 일 수 있다."},
+    "range": {
+      "type": "object",
+      "required": ["start_ms", "end_ms"],
+      "additionalProperties": false,
+      "properties": {"start_ms": {"type": "integer", "minimum": 0}, "end_ms": {"type": "integer", "minimum": 0}}
+    },
+    "stats": {"type": "object", "additionalProperties": {"type": "number"}, "description": "숫자만(창 수·건너뛴 수·걸린 초)."},
+    "vectors_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "[[start_ms, end_ms, v], …] 를 공백 없는 ASCII JSON 으로 바꾼 바이트의 sha256."},
+    "windows": {
+      "type": "array",
+      "maxItems": 200000,
+      "description": "말이 있는(공백·기호 뺀 글자 min_chars 이상) 창만, start_ms 순. 창은 VOD 0 에 맞춘 [k×window_ms, (k+1)×window_ms). 벡터는 L2 정규화.",
+      "items": {
+        "type": "object",
+        "required": ["start_ms", "end_ms", "v"],
+        "additionalProperties": false,
+        "properties": {
+          "start_ms": {"type": "integer", "minimum": 0},
+          "end_ms": {"type": "integer", "minimum": 1},
+          "v": {"oneOf": [{"$ref": "#/$defs/vecF16"}, {"$ref": "#/$defs/vecRound4"}]}
+        }
+      }
+    }
+  }
+}

@@ -19,7 +19,11 @@
 - 오른쪽 위: 고른 채팅의 두 판정(등급·확신도·반응 시각·근거)과 증거 7종(엔진: 연결 후보의 present·at_ms, 사람: 연결 발화의
   강·중·약 목록).
 - 오른쪽 아래: 합계 표(비교 결과 건수, 엔진 × 사람 등급 혼동표)와 ai_compare 점수 표.
-- 맨 위(해제된 run 이 둘 이상일 때만, 17 6-1 4번): '엔진 판' 고르기(최신이 기본)와 '견줄 것'(사람 최종 세트 · 다른 판).
+- 맨 위(해제된 run 이 둘 이상일 때만, 17 6-1 4번): '엔진 판' 고르기와 '견줄 것'(사람 최종 세트 · 다른 판).
+  판 A 기본은 **엔진 판이 가장 높은 run**이다(18 5-2 의 7번, 21 4-2 의 15번, 22 5-2 의 12번 — default_run_id). 판은
+  고르기 목록 항목의 engine_version(seal.jsonl 의 ai.unsealed 기록에서 온 값)만 본다. 판을 아는 run 이 없으면 지금처럼
+  가장 늦게 푼 run(목록 맨 앞)이고, 판을 모르는 run 은 고르기 글에 '판 모름' 을 붙인다(한 번 읽은 run 은 결과 파일의
+  엔진 이름·판).
   다른 판을 고르면 판끼리 견준다 — 위 트랙 = 판 A, 아래 = 판 B, 필터는 '다름만'(같은 채팅에 다른 등급 · 한쪽만 반응)으로
   바뀌고, 결과 이름은 A만·B만, 고른 건 칸에는 사람 최종을 참고 열로 더한다. 점수 표는 두 판의 점수(각각 사람과 견준 것)를
   나란히 둔다. 다른 판은 받은 run_loader 로만 읽는다(이 파일은 디스크를 열지 않는다). 다른 곳 규칙과 대상 영상 검사는
@@ -40,6 +44,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -499,12 +504,68 @@ def _run_entries(runs) -> list[tuple[str, str]]:
     return out
 
 
+ENGINE_VERSION_MAX = 40          # ai-result 스키마 engine.version 의 maxLength 와 같다
+_VER_NUM = re.compile(r"\d+")
+
+
+def _choice_version(r) -> str | None:
+    """고르기 항목의 engine_version(dict 키 또는 RunChoice 류의 속성). 없거나 이상하면 None(= 판 모름)."""
+    v = r.get("engine_version") if isinstance(r, Mapping) else getattr(r, "engine_version", None)
+    if isinstance(v, str) and 0 < len(v) <= ENGINE_VERSION_MAX and v.isprintable() and v.strip() == v:
+        return v
+    return None
+
+
+def run_versions(runs) -> dict[str, str | None]:
+    """고르기 목록 → {run_id: 엔진 판 또는 None}. 같은 run_id 는 첫 항목(_run_entries 와 같은 규칙)."""
+    out: dict[str, str | None] = {}
+    for r in runs or ():
+        rid = r if isinstance(r, str) else r.get("run_id") if isinstance(r, Mapping) else getattr(r, "run_id", None)
+        if isinstance(rid, str) and rid and rid not in out:
+            out[rid] = None if isinstance(r, str) else _choice_version(r)
+    return out
+
+
+def version_key(ver: str | None) -> tuple[int, ...] | None:
+    """엔진 판 글 → 견줄 숫자 묶음(뒤의 0 은 뗀다). 'link-v0.3' → (0, 3), '0.3.0' → (0, 3),
+    '0.1.0'(engine/link.py 의 v0.2 규칙 판 — 판 번호를 올리지 않았다) → (0, 1). 숫자가 없으면 None(판 모름과 같다)."""
+    if not isinstance(ver, str):
+        return None
+    nums = [int(n) for n in _VER_NUM.findall(ver)[:6]]
+    if not nums:
+        return None
+    while len(nums) > 1 and nums[-1] == 0:
+        nums.pop()
+    return tuple(nums)
+
+
+def default_run_id(runs, versions: Mapping[str, str | None] | None = None) -> str | None:
+    """판 고르기 A 기본 (18 5-2 의 7번, 21 4-2 의 15번): 판을 아는 run 가운데 **가장 높은 판**, 같은 판이면 목록에서 앞
+    (늦게 푼) 것. 판을 아는 run 이 없으면 목록 맨 앞(가장 늦게 푼 것, 앞 판과 같은 동작). 목록이 비면 None.
+
+    runs: _run_entries 의 [(run_id, 글)] 또는 고르기 목록 그대로. versions: {run_id: 판}(없으면 runs 에서 읽음)."""
+    runs = list(runs or ())
+    if runs and all(isinstance(r, tuple) for r in runs):
+        ids = [r[0] for r in runs]
+    else:
+        ids = list(run_versions(runs))
+    if not ids:
+        return None
+    vers = versions if versions is not None else run_versions(runs)
+    best, best_key = None, None
+    for rid in ids:
+        k = version_key(vers.get(rid))
+        if k is not None and (best_key is None or k > best_key):
+            best, best_key = rid, k
+    return best if best is not None else ids[0]
+
+
 # ---------------------------------------------------------------------------- 화면
 class AnalysisView(QWidget):
     """나란히 보기. 해제 전(run=None)이면 '봉인됨 n건' 만 보인다.
 
     해제된 run 이 여럿이면(runs 2개 이상 + run_loader) 맨 위에 '엔진 판' 과 '견줄 것' 고르기가 보인다(17 6-1 4번).
-    열면 최신 판 ↔ 사람 최종이 바로 보이고, '견줄 것' 에서 다른 판을 고르면 두 판의 다른 곳만(같은 채팅에 다른 등급 ·
+    열면 판이 가장 높은 run(판을 모르면 최신) ↔ 사람 최종이 바로 보이고, '견줄 것' 에서 다른 판을 고르면 두 판의 다른 곳만(같은 채팅에 다른 등급 ·
     한쪽만 반응) 보인다. run_loader(run_id) 는 부르는 쪽(app.analysis_flow.RunLoader)이 준다 — 이 화면은 파일을 열지 않는다."""
     chatSelected = Signal(str)       # 고른 chat_id
     seekRequested = Signal(int)      # 고른 채팅의 VOD 시각 (플레이어를 옮길 때)
@@ -513,7 +574,8 @@ class AnalysisView(QWidget):
     def __init__(self, parent=None, *, run: Mapping | None = None, final_rows: Iterable[Mapping] | None = None,
                  sealed_count: int = 0, scores: Mapping | None = None, chat_times: Mapping[str, int] | None = None,
                  duration_ms: int | None = None, runs: Sequence | None = None,
-                 run_loader: Callable[[str], Mapping] | None = None, run_id: str | None = None):
+                 run_loader: Callable[[str], Mapping] | None = None, run_id: str | None = None,
+                 pick_default: bool = True):
         super().__init__(parent)
         self._cmp = Comparison([], {}, {})
         self._visible: list[CompareItem] = []
@@ -522,6 +584,7 @@ class AnalysisView(QWidget):
         self._sealed = True
         self._sealed_count = 0
         self._runs: list[tuple[str, str]] = []
+        self._versions: dict[str, str | None] = {}  # run_id → 엔진 판(고르기 목록에서, 없으면 None = 판 모름)
         self._loader: Callable[[str], Mapping] | None = None
         self._loaded: dict[str, dict] = {}          # run_id → {run, scores}
         self._run_id: str | None = None             # 판 A (위)
@@ -532,7 +595,8 @@ class AnalysisView(QWidget):
         self._build()
         self._install_shortcuts()
         self.set_data(run=run, final_rows=final_rows, sealed_count=sealed_count, scores=scores,
-                      chat_times=chat_times, duration_ms=duration_ms, runs=runs, run_loader=run_loader, run_id=run_id)
+                      chat_times=chat_times, duration_ms=duration_ms, runs=runs, run_loader=run_loader, run_id=run_id,
+                      pick_default=pick_default)
 
     # ------------------------------------------------------------------ 만들기
     def _build(self) -> None:
@@ -695,11 +759,15 @@ class AnalysisView(QWidget):
     def set_data(self, *, run: Mapping | None = None, final_rows: Iterable[Mapping] | None = None,
                  sealed_count: int = 0, scores: Mapping | None = None, chat_times: Mapping[str, int] | None = None,
                  duration_ms: int | None = None, runs: Sequence | None = None,
-                 run_loader: Callable[[str], Mapping] | None = None, run_id: str | None = None) -> None:
+                 run_loader: Callable[[str], Mapping] | None = None, run_id: str | None = None,
+                 pick_default: bool = True) -> None:
         """자료를 바꾼다. run 이 None 이면 봉인 상태 — 최종 세트도 계산하지 않고 '봉인됨 n건' 만 보인다.
 
-        runs: 해제된 run 고르기 목록(최신 먼저. str · {run_id, label} · RunChoice). run_loader(run_id) →
-        {run, scores} — 다른 판을 고를 때만 부른다. run_id: 지금 run 의 ID(없으면 run['run_id'])."""
+        runs: 해제된 run 고르기 목록(최신 먼저. str · {run_id, label, engine_version} · RunChoice — engine_version
+        속성이 있으면 읽는다). run_loader(run_id) → {run, scores} — 다른 판을 고를 때만 부른다. run_id: 넘긴 run 의
+        ID(없으면 run['run_id']). pick_default: 고를 수 있으면(run 2개 이상 + run_loader) 판 A 를 default_run_id(판이
+        가장 높은 run)로 연다 — 넘긴 run 과 다르면 run_loader 로 한 번 읽고, 못 읽으면 넘긴 run 으로 두고 까닭을 보인다.
+        False 면 넘긴 run 이 판 A 다."""
         self._current = None
         self._sealed_count = max(0, int(sealed_count)) if _is_int(sealed_count) else 0
         self._loaded = {}
@@ -709,6 +777,7 @@ class AnalysisView(QWidget):
             self._cmp = Comparison([], {}, {})
             self._visible = []
             self._runs, self._loader, self._run_id = [], None, None
+            self._versions = {}
             self._final_rows, self._chat_times, self._duration = [], None, None
             self._clear_content()
             self._fill_run_bar()
@@ -724,13 +793,25 @@ class AnalysisView(QWidget):
         self._run_id = rid
         self._loaded[rid] = {"run": run, "scores": scores}
         self._runs = _run_entries(runs)
+        self._versions = run_versions(runs)
         if self._runs and rid not in (r for r, _ in self._runs):
             self._runs.insert(0, (rid, rid))
         self._loader = run_loader
         if self._filter != FILTER_ALL and self._filter_auto:
             self._filter = FILTER_ALL
         self._filter_auto = False
+        msg = ""
+        if pick_default and self._can_pick():
+            best = default_run_id(self._runs, self._versions)
+            if best is not None and best != rid:
+                if self._get(best) is not None:
+                    self._run_id = best
+                    LOG.info("나란히 보기: 판 A 기본 = 판이 가장 높은 run (넘긴 run 과 다름)")
+                else:
+                    msg = self.run_msg.text()           # _fill_run_bar 가 지우므로 다시 보인다
         self._fill_run_bar()
+        if msg:
+            self._show_run_msg(msg)
         self._render()
 
     # ------------------------------------------------------------------ 판 고르기 (17 6-1 4번)
@@ -774,13 +855,19 @@ class AnalysisView(QWidget):
         self.run_msg.setVisible(False)
 
     def _run_label(self, rid: str, label: str) -> str:
-        """고르기 글. 한 번 읽은 판은 엔진 이름·판을 덧붙인다."""
+        """고르기 글. 한 번 읽은 판은 결과 파일의 엔진 이름·판을, 아직 안 읽은 판은 고르기 목록의 engine_version
+        ('판 …')을, 그것도 없으면 '판 모름' 을 덧붙인다(해제 기록에 판이 없던 run)."""
         got = self._loaded.get(rid)
         run = got.get("run") if got else None
         eng = run.get("engine") if isinstance(run, Mapping) and isinstance(run.get("engine"), Mapping) else None
         if eng:
             return f"{label} · {eng.get('name', '?')} {eng.get('version', '?')}"
-        return label
+        ver = self._versions.get(rid)
+        return f"{label} · " + (tr("판 {0}").format(ver) if ver else tr("판 모름"))
+
+    def run_version(self, run_id: str) -> str | None:
+        """고르기 목록이 알려 준 엔진 판(없으면 None = 판 모름)."""
+        return self._versions.get(run_id)
 
     def _get(self, rid: str) -> dict | None:
         """판 하나를 읽는다(기억해 둔 것 먼저). 못 읽으면 None 과 함께 까닭을 보인다."""

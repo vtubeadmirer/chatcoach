@@ -27,11 +27,16 @@
 종료 1, words_seal_unsupported), --out a.json 이면 a.words.json 에 쓴다. 낱말 파일은 전사문과 같은 등급이라 a.words.json 이
 그 프로젝트 보호 구역 안(예: --out <프로젝트>\\derived\\asr-link.json)일 때만 쓰고, 아니면 엔진을 돌리기 전에 종료 2
 (words_out_unprotected). --asr 가 시범 폴더 안이면 --out 은 거부(pilot_needs_seal).
+--vectors 를 주면 같은 asr·보정으로 창별 주제 벡터(topic-vectors, G 둘째 22 7-1 의 3, engine.topic_vectors — 로컬 e5-small,
+--models-dir·--semantic-backend 를 같이 쓴다)도 메모리로 만들어 --seal 이면 판정 봉인의 짝으로 봉인하고
+(app.seal.seal_vectors_bytes — **그 함수가 있을 때만**. 없으면 엔진을 돌리기 전에 아무것도 봉인하지 않고 종료 1,
+vectors_seal_unsupported), --out a.json 이면 a.vectors.json 에 쓴다. 벡터도 전사에서 나온 값이라 낱말 파일과 같이 그 프로젝트
+보호 구역 안일 때만 쓴다(아니면 종료 2, vectors_out_unprotected). 임베딩 모델이 없으면 아무것도 봉인·쓰지 않고 종료 1.
 
 사용
   python tools/engine_to_ai.py --in link.json --out ai.json
   python tools/engine_to_ai.py --from-project <폴더> --seal --by L01 [--start-ms ..] [--end-ms ..] [--ai-root <폴더>]
-        [--engine v0.3] [--topics] [--words]
+        [--engine v0.3] [--topics] [--words] [--vectors]
 종료 코드: 0 정상 · 1 거부(4단계 아님·검사 거부·시범에 파일 출력) · 2 입력 오류
 """
 from __future__ import annotations
@@ -263,6 +268,49 @@ def _run_words(project_dir: str, ns) -> dict:
                            allow_pilot=bool(ns.seal))
 
 
+VECTORS_SEAL_FN = "seal_vectors_bytes"   # app.seal 에 이 이름의 짝 봉인 함수가 생기면 --vectors --seal 이 된다
+
+
+def vectors_out_path(out: str) -> str:
+    """--out a.json 일 때 창별 주제 벡터 파일 이름: a.vectors.json."""
+    stem, ext = os.path.splitext(out)
+    return stem + ".vectors" + (ext or ".json")
+
+
+def vectors_out_protected(project_dir: str, out: str) -> bool:
+    """--vectors --out 의 벡터 파일(<out>.vectors.json)이 그 프로젝트 보호 구역 안인가(낱말 파일과 같은 규칙).
+
+    임베딩은 어느 정도 거꾸로 풀 수 있어 전사문과 같은 등급으로 둔다. 예: --out <프로젝트>\\derived\\asr-link.json."""
+    from app import backup
+    vp = os.path.abspath(vectors_out_path(out))
+    root = os.path.abspath(project_dir)
+    try:
+        rel = os.path.relpath(vp, root)
+    except ValueError:          # 다른 드라이브
+        return False
+    if rel == os.curdir or rel.startswith(os.pardir) or os.path.isabs(rel):
+        return False
+    return backup.in_protected_zone(rel, backup.DEFAULT_PROTECTED_ZONE)
+
+
+def _vectors_sealer():
+    """app.seal 의 주제 벡터 짝 봉인 함수(seal_words_bytes 와 같은 인자) 또는 None."""
+    from app import seal
+    fn = getattr(seal, VECTORS_SEAL_FN, None)
+    return fn if callable(fn) else None
+
+
+def _run_vectors(project_dir: str, ns) -> dict:
+    """창별 주제 벡터(engine.topic_vectors)를 메모리로. 범위·보정·asr 는 판정과 같은 인자, 모델은 --models-dir.
+
+    시범 프로젝트는 봉인할 때만 만든다(평문 --out 은 main 이 먼저 거부한다). 모델이 없으면 VectorsError."""
+    from engine import topic_vectors as TV
+    backend = "lmstudio" if getattr(ns, "semantic_backend", None) == "lmstudio" else "onnx"
+    return TV.from_project(project_dir, models_dir=getattr(ns, "models_dir", None), backend=backend,
+                           asr_path=getattr(ns, "asr", None), offset_ms=ns.offset_ms, file_start_ms=ns.file_start_ms,
+                           start_ms=ns.start_ms, end_ms=ns.end_ms, allow_pilot=bool(ns.seal))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python tools/engine_to_ai.py", description="엔진 link 출력 → ai-result 1판")
     src = ap.add_mutually_exclusive_group(required=True)
@@ -294,6 +342,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--words", action="store_true",
                     help="--from-project 에서 시각별 전사 낱말(transcript-words)도 만든다. --seal 이면 판정 봉인의 짝으로 "
                          "봉인(app.seal.seal_words_bytes 가 있을 때만), --out 이면 <out>.words.json")
+    ap.add_argument("--vectors", action="store_true",
+                    help="--from-project 에서 창별 주제 벡터(topic-vectors, 로컬 e5-small)도 만든다. --seal 이면 판정 봉인의 "
+                         "짝으로 봉인(app.seal.seal_vectors_bytes 가 있을 때만), --out 이면 <out>.vectors.json")
     ap.add_argument("--allow-fallback", action="store_true",
                     help="--engine v0.3 --seal 에서 의미 비교가 돌지 못해 v0.2 로 물러나도 봉인한다(기본은 봉인하지 않고 종료 1)")
     ns = ap.parse_args(argv)
@@ -302,6 +353,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if ns.words and not ns.from_project:
         print(json.dumps({"error": "args", "detail": "--words 는 --from-project 와 함께 씁니다"}, ensure_ascii=False))
+        return 2
+    if ns.vectors and not ns.from_project:
+        print(json.dumps({"error": "args", "detail": "--vectors 는 --from-project 와 함께 씁니다"}, ensure_ascii=False))
+        return 2
+    if ns.vectors and ns.semantic_backend == "off":
+        print(json.dumps({"error": "args", "detail": "--vectors 는 임베딩이 필요합니다(--semantic-backend off 와 함께 못 씀)"},
+                         ensure_ascii=False))
         return 2
     project = ns.project or ns.from_project
     if ns.out and (_is_pilot(project) or _is_pilot(ns.from_project) or _inside_pilot(ns.asr)):
@@ -314,6 +372,12 @@ def main(argv: list[str] | None = None) -> int:
                           "detail": "--words --out 의 낱말 파일은 프로젝트 보호 구역 안이어야 합니다 "
                                     "(예: --out <프로젝트>\\derived\\asr-link.json)"}, ensure_ascii=False))
         return 2
+    if ns.vectors and ns.out and not vectors_out_protected(ns.from_project, ns.out):
+        # 엔진을 돌리기 전에 멈춘다(평문 벡터 파일이 보호 구역 밖에 생기지 않게)
+        print(json.dumps({"error": "vectors_out_unprotected",
+                          "detail": "--vectors --out 의 벡터 파일은 프로젝트 보호 구역 안이어야 합니다 "
+                                    "(예: --out <프로젝트>\\derived\\asr-link.json)"}, ensure_ascii=False))
+        return 2
     if ns.seal and (not project or not ns.by):
         print(json.dumps({"error": "args", "detail": "--seal 에는 --project(또는 --from-project)와 --by 가 필요합니다"},
                          ensure_ascii=False))
@@ -324,8 +388,15 @@ def main(argv: list[str] | None = None) -> int:
                           "detail": f"app.seal.{WORDS_SEAL_FN} 가 없어 전사 낱말을 짝으로 봉인할 수 없습니다"},
                          ensure_ascii=False))
         return 1
+    if ns.vectors and ns.seal and _vectors_sealer() is None:
+        # 짝 봉인 함수가 없으면 판정만 봉인되고 벡터가 빠진다 — 엔진을 돌리기 전에, 아무것도 봉인하지 않고 멈춘다
+        print(json.dumps({"error": "vectors_seal_unsupported",
+                          "detail": f"app.seal.{VECTORS_SEAL_FN} 가 없어 주제 벡터를 짝으로 봉인할 수 없습니다"},
+                         ensure_ascii=False))
+        return 1
     tbox: dict | None = {} if ns.topics else None
     wdoc = None
+    vdoc = None
     try:
         if ns.inp:
             with open(ns.inp, "rb") as f:
@@ -338,6 +409,13 @@ def main(argv: list[str] | None = None) -> int:
                     wdoc = _run_words(ns.from_project, ns)
                 except TW.WordsError as we:
                     print(json.dumps({"error": "words", "code": we.code}, ensure_ascii=False))
+                    return 1
+            if ns.vectors:
+                from engine import topic_vectors as TV
+                try:
+                    vdoc = _run_vectors(ns.from_project, ns)
+                except TV.VectorsError as ve:   # 모델 없음 포함 — 아무것도 봉인·쓰지 않았다
+                    print(json.dumps({"error": "vectors", "code": ve.code}, ensure_ascii=False))
                     return 1
         v1, info = to_ai_result(doc, graded_none=ns.graded_none)
     except (air.AiResultError, ConvertError) as e:
@@ -360,6 +438,10 @@ def main(argv: list[str] | None = None) -> int:
     if wdoc is not None:
         from engine import transcript_words as TW
         wdata = TW.dump(wdoc)
+    vdata = None
+    if vdoc is not None:
+        from engine import topic_vectors as TV
+        vdata = TV.dump(vdoc)
     if ns.seal:
         from app import seal
         try:
@@ -368,6 +450,8 @@ def main(argv: list[str] | None = None) -> int:
                                         ai_root=ns.ai_root) if tdata is not None else None
             we = _words_sealer()(project, wdata, pair_sha256=e.sha256, by=ns.by, source="engine_words",
                                  ai_root=ns.ai_root) if wdata is not None else None
+            ve = _vectors_sealer()(project, vdata, pair_sha256=e.sha256, by=ns.by, source="engine_vectors",
+                                   ai_root=ns.ai_root) if vdata is not None else None
         except seal.SealError as ex:
             print(json.dumps({"error": type(ex).__name__, "detail": str(ex)[:300]}, ensure_ascii=False))
             return 1
@@ -381,9 +465,12 @@ def main(argv: list[str] | None = None) -> int:
         if we is not None:
             out.update(words_sealed=we.sha256, words_size=we.size, words_check=we.check,
                        words_reject_reasons=we.reject_reasons)
+        if ve is not None:
+            out.update(vectors_sealed=ve.sha256, vectors_size=ve.size, vectors_check=ve.check,
+                       vectors_reject_reasons=ve.reject_reasons)
         print(json.dumps(out, ensure_ascii=False))
         return 0 if e.check == "valid" and (te is None or te.check == "valid") \
-            and (we is None or we.check == "valid") else 1
+            and (we is None or we.check == "valid") and (ve is None or ve.check == "valid") else 1
     os.makedirs(os.path.dirname(os.path.abspath(ns.out)), exist_ok=True)
     with open(ns.out, "wb") as f:
         f.write(data)
@@ -395,6 +482,10 @@ def main(argv: list[str] | None = None) -> int:
         with open(words_out_path(ns.out), "wb") as f:
             f.write(wdata)
         info = {**info, "words_out": words_out_path(ns.out), "word_windows": len(wdoc["windows"])}
+    if vdata is not None:
+        with open(vectors_out_path(ns.out), "wb") as f:
+            f.write(vdata)
+        info = {**info, "vectors_out": vectors_out_path(ns.out), "vector_windows": len(vdoc["windows"])}
     print(json.dumps({"out": ns.out, **info, **run_meta, "engine_fallback": fell_back}, ensure_ascii=False))
     return 0
 

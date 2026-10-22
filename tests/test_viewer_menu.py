@@ -306,6 +306,158 @@ def test_spec_bundles_runtime_schemas():
         assert f"('schemas\\\\{rel[-1]}', 'schemas')" in spec, m
 
 
+# ----------------------------------------------------------------------------- 22 5-2 의 5: 문턱을 기준서에서 읽기
+def _with_viewer_score(pdata, values):
+    import copy
+    d = copy.deepcopy(pdata)
+    for g in d["guides"]:
+        if g["guide_version"] == d["active_guide_version"]:
+            g["thresholds"] = {**(g.get("thresholds") or {}), "viewer_score": values}
+    return d
+
+
+def test_score_settings_from_active_guide(proj):  # noqa: F811
+    from app import project as pm
+    from app.core import viewer_score as vsc
+    pdata = pm.open_project(proj["root"]).data
+    # 시범 중인 기준서 v0.1 에는 viewer_score 칸이 없다 → 기본값(D-14 7: 그 파일은 그대로)
+    assert vf.score_settings(pdata) == (vsc.DEFAULT_SETTINGS, [], "default")
+    assert vf.score_settings(None) == (vsc.DEFAULT_SETTINGS, [], "default")
+    s, notes, src = vf.score_settings(_with_viewer_score(pdata, {"copy_window_sec": 60, "self_ok_pct": 30}))
+    assert src == "guide" and notes == [] and s.copy_window_ms == 60_000 and s.self_ok_pct == 30
+    s, notes, src = vf.score_settings(_with_viewer_score(pdata, {"copy_window_sec": 999, "ngram": "x"}))
+    assert src == "guide" and s.copy_window_ms == vsc.DEFAULT_SETTINGS.copy_window_ms and s.ngram == vsc.DEFAULT_NGRAM
+    assert len(notes) == 2 and all(n.startswith("viewer_score.") for n in notes)
+    # 현재 기준서가 아닌 판의 값은 보지 않는다
+    other = _with_viewer_score(pdata, {"copy_window_sec": 60})
+    other["active_guide_version"] = "9.9"
+    assert vf.score_settings(other)[2] == "default"
+    # 기준서 맨 위의 같은 이름 칸(viewer_score 밖)은 채점 문턱으로 읽지 않는다
+    import copy
+    top = copy.deepcopy(pdata)
+    for g in top["guides"]:
+        g["thresholds"] = {**(g.get("thresholds") or {}), "copy_window_sec": 60}
+    assert vf.score_settings(top) == (vsc.DEFAULT_SETTINGS, [], "default")
+
+
+def test_build_context_settings_change_score(proj):  # noqa: F811
+    """설정을 바꾸면 결과가 바뀐다(22 7-1 의 2): 55초 앞 채팅 베끼기는 기본(45초)이면 새 말, 기준서 60초면 같은 말."""
+    from app import project as pm
+    from app.core import viewer_score as vsc
+    root = proj["root"]
+    pdata = pm.open_project(root).data
+    chats = [(100_000, "합성 베끼기 문장")]
+    results = {}
+    for name, pd in (("default", pdata), ("guide", _with_viewer_score(pdata, {"copy_window_sec": 60}))):
+        ctx_, info = vf.build_context(root, pd)
+        assert info["settings"] == name and info["settings_notes"] == 0
+        sc = vsc.ScoreContext.build(ctx_["topic_blocks"], ctx_["transcript"], chats, settings=ctx_["settings"])
+        results[name] = vsc.score_chat("합성 베끼기 문장", 155_000, sc, settings=ctx_["settings"]).repeat.code
+    assert results == {"default": vsc.REPEAT_FRESH, "guide": vsc.REPEAT_COPY_SAME}
+
+
+def test_viewer_view_gets_guide_settings(win, proj):  # noqa: F811
+    """메인 창이 연 시청자 훈련 화면이 기준서 문턱을 받는다(build_context → start(context=…))."""
+    root = proj["root"]
+    win.words_runner = lambda c, cancelled: {}
+    wb = _open(win, root, None)
+    wb.project.data = _with_viewer_score(wb.project.data, {"copy_window_sec": 60})
+    view = win.viewer_training()
+    assert view is not None and view._context["settings"].copy_window_ms == 60_000
+    win.close_viewer_training()
+    win.show_home()
+
+
+# ----------------------------------------------------------------------------- 22 5-2 의 8: 같은 asr 의 실패 기억
+def test_words_failure_remembered_per_asr_hash(proj, monkeypatch):  # noqa: F811
+    from app import project as pm
+    from app import scenario_mix
+    root = proj["root"]
+    pdata = pm.open_project(root).data
+    vf.forget_failure()
+    try:
+        _write_asr(root)
+        assert vf.words_status(root, pdata)[0] == vf.W_MISSING
+        cmd = ["python", "-I", "-c", "x", "repo", "transcript-words", "--project", os.path.abspath(root)]
+        outs = iter([{"error": "cancelled", "rc": None}, {"error": "engine_failed", "rc": 4}])
+        calls = []
+        monkeypatch.setattr(scenario_mix, "run_make", lambda c, **k: calls.append(1) or next(outs))
+        vf.run_words(cmd)                                               # 취소는 실패로 세지 않는다
+        assert vf.words_status(root, pdata)[0] == vf.W_MISSING
+        vf.run_words(cmd)                                               # 실패 → 이 asr 로는 다시 띄우지 않는다
+        code, doc = vf.words_status(root, pdata)
+        assert (code, doc) == (vf.W_BUILD_FAILED, None)
+        assert vf.W_BUILD_FAILED not in vf.REBUILD and vf.WORDS_NOTE_KO[vf.W_BUILD_FAILED]
+        _ctx, info = vf.build_context(root, pdata)
+        assert info["words"] == vf.W_BUILD_FAILED and info["transcript_windows"] == 0
+        _write_asr(root, segs=((100_000, 104_000, "다른 합성 문장"),))   # asr 이 바뀌면 다시 시도
+        assert vf.words_status(root, pdata)[0] == vf.W_MISSING
+        _write_asr(root)
+        assert vf.words_status(root, pdata)[0] == vf.W_BUILD_FAILED
+        # 성공하면 기억을 지운다
+        monkeypatch.setattr(scenario_mix, "run_make", lambda c, **k: _build_words_inprocess(c, None))
+        vf.run_words(cmd)
+        assert vf.words_status(root, pdata)[0] == vf.W_OK and not vf._FAILED
+        assert calls == [1, 1]
+        # 판정 함수
+        assert vf.words_failed(None) and vf.words_failed({"rc": 1}) and vf.words_failed({"error": "timeout"})
+        assert not vf.words_failed({"rc": 0, "windows": 3}) and not vf.words_failed({"error": "cancelled"})
+        # 시범 이름·asr 없음은 기억하지 않는다
+        assert vf.remember_failure(str(proj["root"]) + "-없음") is False
+        assert vf.remember_failure(os.path.join(os.path.dirname(root), "pilot-합성")) is False
+    finally:
+        vf.forget_failure()
+
+
+def test_menu_does_not_rerun_failed_words(win, proj, monkeypatch):  # noqa: F811
+    """메인 창: 전사 낱말 만들기가 실패하면 같은 실행에서 다시 열 때 엔진을 다시 띄우지 않는다(상태 줄 한 줄)."""
+    from app import scenario_mix
+    if vf.words_command(proj["root"]) is None:
+        pytest.skip("엔진 파일 없음(묶은 exe)")
+    root = proj["root"]
+    _write_asr(root)
+    vf.forget_failure()
+    calls = []
+    monkeypatch.setattr(scenario_mix, "run_make", lambda c, **k: calls.append(1) or {"error": "engine_failed", "rc": 4})
+    win.words_runner = None                                            # 실제 길(vf.run_words)
+    try:
+        _open(win, root, None)
+        v1 = win.viewer_training()
+        assert v1 is not None and calls == [1]
+        win.close_viewer_training()
+        v2 = win.viewer_training()
+        assert v2 is not None and calls == [1]                         # 두 번째는 띄우지 않는다
+        assert win.statusBar().currentMessage() == vf.WORDS_NOTE_KO[vf.W_BUILD_FAILED]
+        win.close_viewer_training()
+        win.show_home()
+    finally:
+        vf.forget_failure()
+
+
+# ----------------------------------------------------------------------------- 22 5-2 의 11: 상태 줄 문턱은 도구 출력의 fill
+def test_make_virtual_status_uses_tool_fill(win, proj):  # noqa: F811
+    from app import scenario_mix
+    root = proj["root"]
+    seen = []
+
+    def runner(cmd, cancelled):
+        seen.append(list(cmd))
+        return {"scenario_id": "SC-20261023-zz01", "counts": {"retrieved": 0}, "written": False,
+                "reason": "nothing_to_fill", "fill": {"quiet_max_real": 45, "target_per_min": 60}, "rc": 0}
+    win.scenario_runner = runner
+    _open(win, root, None)
+    win.make_virtual_chat(extra_args=("--threshold", "test"))           # --quiet-max-real 인자가 없다
+    assert seen and "--quiet-max-real" not in seen[0]
+    assert win.statusBar().currentMessage() == scenario_mix.MSG_NOTHING.format(45)
+    # 출력에 fill 이 없으면(옛 도구) 인자, 그것도 없으면 기본 2
+    win.scenario_runner = lambda c, k: {"counts": {"retrieved": 0}, "reason": "nothing_to_fill", "rc": 0}
+    win.make_virtual_chat(extra_args=("--quiet-max-real", "7"))
+    assert win.statusBar().currentMessage() == scenario_mix.MSG_NOTHING.format(7)
+    win.make_virtual_chat(extra_args=())
+    assert win.statusBar().currentMessage() == scenario_mix.MSG_NOTHING.format(2)
+    win.show_home()
+
+
 def test_blocked_viewer_start_leaves_no_empty_file(win, proj, monkeypatch):  # noqa: F811
     from app.ui import viewer_train_view as vtv
     root = proj["root"]

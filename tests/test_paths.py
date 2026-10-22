@@ -55,7 +55,10 @@ def test_path_issues_onedrive_unc_long_missing(tmp_path, monkeypatch, no_onedriv
     got = codes(paths.path_issues(str(long), "project"))
     assert ("long", "warn") in got and ("missing", "error") in got
     assert ("long", "warn") in codes(paths.path_issues(str(tmp_path / ("x" * 130)), "app", check_write=False))
-    assert ("long", "warn") not in codes(paths.path_issues(str(tmp_path / ("x" * 10)), "app", check_write=False))
+    # 짧은 경로는 tmp_path 뿌리 길이에 기대지 않게 드라이브 바로 아래로 본다(tmp_path 뿌리가 %LOCALAPPDATA%\ChatCoachSmoke\pytest
+    # 아래라 앱 문턱보다 길 수 있다, conftest). check_write=False 라 그 폴더를 만들지 않는다
+    short = os.path.join(os.path.splitdrive(str(tmp_path))[0] + os.sep, "x" * 10)
+    assert ("long", "warn") not in codes(paths.path_issues(short, "app", check_write=False))
     with pytest.raises(ValueError):
         paths.path_issues(str(tmp_path), "nope")
 

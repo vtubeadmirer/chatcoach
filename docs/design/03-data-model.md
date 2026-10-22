@@ -79,9 +79,14 @@
 ├─ origin\OT-<yyyymmdd>-<4자>.json   출처 판정 대상 파일(chat_id 목록만, 6-11, D-13 5)   [원본 · 불변]
 ├─ origin\                           ★보호 구역: 가상 채팅 생성 기록·대조 결과 (v1)
 ├─ training\<session_id>.jsonl       스트리머 훈련 기록(training-event, 6-16). 라벨 기록과 다른 폴더   [원본 · 추가만]
+├─ viewer\<session_id>.jsonl         시청자 훈련 기록(viewer-event, 6-18). 시청자가 쓴 연습 글이 있다   [원본 · 추가만 · ★보호]
 ├─ scenarios\SC-<yyyymmdd>-<4자>.jsonl  가상 채팅 시나리오(H-1, 형식은 [20](20-plan-virtual-chat.md) 3장·`schemas/scenario.schema.json`, 저장 규칙 6-17). `messages.jsonl`·`labels\` 와 섞지 않는다   [원본 · 불변 · ★보호]
-└─ derived\                          비싼 파생: asr.json · vad.json · ocr.jsonl · asr-words.json     [파생 · ★asr*·ocr 는 보호]
+└─ derived\                          비싼 파생: asr.json · vad.json · ocr.jsonl · asr-words.json · asr-topic-vectors.json · asr-topic-flow.json     [파생 · ★asr*·ocr 는 보호]
 ```
+
+- `derived\asr-topic-vectors.json`(창별 주제 벡터, `engine/topic_vectors.py`, `schemas/topic-vectors.schema.json`, G 둘째)과
+  `derived\asr-topic-flow.json`(해제된 run 이 없는 개발 프로젝트용 주제 흐름, `python -m engine.topics --out`)도 전사에서 나온 값이라
+  `asr*` 이름으로 보호 구역에 둔다. 시범 프로젝트는 둘 다 쓰지 않는다(벡터는 엔진이 거부, 주제 흐름은 봉인 경로로만, D-17 5).
 
 - `derived\asr-words.json`(시각별 전사 낱말, `engine/transcript_words.py`, D-20 3)은 순서·되풀이는 없지만 10초마다 한 말이
   낱말 수준으로 거의 그대로 남는다. 그래서 **전사문(asr.json)과 같은 등급의 자료**로 다룬다: 보호 구역 `derived/asr*` 안에만
@@ -107,7 +112,7 @@
 
 ### 2-3. 보호 구역 기본값
 
-`project.json` 의 `protected_zone` 기본값: `chat/protected/`, `derived/asr*`, `derived/ocr*`, `origin/`. H-1 에서 `scenarios/` 를 더했다([20](20-plan-virtual-chat.md) 3장 — 가상 채팅은 내보내기·패키지에 넣지 않는다, D-05. 옛 project.json 에도 합집합으로 적용, 21 4-1 25번).
+`project.json` 의 `protected_zone` 기본값: `chat/protected/`, `derived/asr*`, `derived/ocr*`, `origin/`. H-1 에서 `scenarios/` 를 더했다([20](20-plan-virtual-chat.md) 3장 — 가상 채팅은 내보내기·패키지에 넣지 않는다, D-05. 옛 project.json 에도 합집합으로 적용, 21 4-1 25번). G 첫 묶음에서 `viewer/` 를 더했다(시청자가 쓴 연습 글, 08 D-20 4, 6-18. `app/project.py`·`app/backup.py` 의 `DEFAULT_PROTECTED_ZONE`).
 
 보호 구역은 라벨러 패키지·정답 세트·일반 백업에서 빠진다. 넣으려면 '보호 포함' 을 켜야 하고, 켜면 경고 후 매니페스트에 기록된다(16장, [05](05-security.md)).
 
@@ -767,6 +772,34 @@ flowchart LR
 | 금칙어 | 목록은 저장소 밖 `<데이터 폴더>\config\blocklist-ko.txt`(UTF-8, 한 줄에 하나, '#' 줄·빈 줄 무시, 공백·기호 뺀 뒤 부분 일치, D-20 6). 시나리오 머리 `filters.blocklist_sha256` 에 **파일 바이트의 sha256 만** 적고 낱말은 어디에도 적지 않는다(통계에는 낱말 수만). 파일이 없으면 거르기 0낱말로 만들고 경고만(`blocklist_missing`), 있는데 읽지 못하면 만들지 않는다(`bad_blocklist`) |
 | 불변·같은 시나리오 | 한 번 쓰면 고치지 않는다. 같은 project_id·구간·`lines_sha256` 이면 새로 쓰지 않고 그 ID 를 준다(`created_at` 은 보지 않음) |
 | 시범 | 대상이 시범이면 읽기 전에 거부(`pilot_locked`), 같은 채널 후보의 시범 프로젝트는 열지 않는다 |
+
+### 6-18. 시청자 훈련 기록 — `viewer/<session_id>.jsonl` ([스키마](../../schemas/viewer-event.schema.json))
+
+시청자 훈련(G, 08 D-01 '시청자 훈련', D-20 2·4)의 기록이다. 라벨 기록(`labels/`, label-event)·스트리머 훈련 기록(`training/`, training-event)과 **다른 폴더·다른 종류**다. label-event 스키마는 그대로다(D-14 7). 쓰기는 `app/viewer_store.py`(`ViewerLog`, 한 줄 = 기록 1건, 8-1 과 같은 덧붙이기, 쓰기 전에 스키마 검사 — 맞지 않으면 쓰지 않음). 어긋나면 스키마가 맞다. 채점은 순수 모듈 `app/core/viewer_score.py`, 화면은 `app/ui/viewer_train_view.py`, 자료 모으기는 `app/viewer_flow.py`([22](22-progress-2026-10-22-g1.md)).
+
+- **세션 ID** `<labeler_id>-VW-<yyyymmdd>-<4자>`. 라벨 세션 종류 코드(P·RS·R2·AD·OR·AN)·스트리머 훈련(TR)과 겹치지 않고, label-event 의 세션 정규식에는 넣지 않는다. labeler_id 는 묻지 않고 스트리머 훈련(6-16)과 같은 순서로 정한다(D-16).
+- **시청자가 쓴 연습 글(`viewer.write` 의 `text`)이 들어 있는 유일한 파일이다.** 그래서 `viewer/` 는 보호 구역이다(2-3) — 내보내기·보호 구역 없는 백업·패키지에 들어가지 않는다. 글은 로그·상태 줄·보고·예외 문장에 넣지 않고(글자 수 `chars` 만), **시나리오·LLM 입력에도 넣지 않는다**([20](20-plan-virtual-chat.md) 6장, D-20 4).
+- **다른 사람의 글은 칸이 없다.** 채팅 본문·닉네임·전사문 칸이 없고 스키마가 모르는 칸을 거부한다. 세 축 단계·까닭 코드·VOD 시각(ms)·숫자만(D-17 8). 화면의 까닭 한 줄(글)도 저장하지 않는다 — 맞은 낱말이 들어갈 수 있어서다.
+- **합계 점수가 없다**(D-20 2). 축마다 `good`·`ok`·`weak` 와 까닭 코드 하나(`topic.flow_hit` 처럼 영문 소문자·숫자·`_`·`.`, 40자 이하).
+- **시범 프로젝트**(`pilot-*` 등)는 시범 세션이 모두 잠기기 전에는 새 세션을 만들지 않는다(`ViewerLog.create` 가 `reference_set` 으로 한 번 더 본다, D-20 5).
+
+| 칸 (공통) | 뜻 |
+|---|---|
+| `v`(1), `id`(UUID v4), `seq`(파일 안 1부터), `kind`, `session_id`, `labeler_id`, `created_at`(벽시계·오프셋), `app_version`, `body` | 모든 줄 |
+
+| kind | `body` 칸 | 뜻 |
+|---|---|---|
+| `viewer.start` | `mode`(`viewer`), `project_id`, `source`(`replay`), `audio`(`on` — 시청자 자리라 소리를 켬), `range`(`start_ms`·`end_ms`), 선택 `scenario_id`·`scenario_sha256`·`virtual_lines`(가상 채팅을 섞었을 때) | 훈련을 연 순간 |
+| `viewer.write` | `vod_ms`(Enter 를 누른 재생 위치), `text`(본인 글, 1~200자), `chars`, `scores`(`topic`·`expand`·`repeat` 마다 `level`·`code`, 채점기를 못 쓰면 null), 선택 `score_error`(까닭 코드 꼴), 선택 `scorer`(`viewer_score/<판>`) | 쓰기 칸에 쓰고 Enter 한 번 |
+| `viewer.end` | `reason`(`segment_end`·`summary`·`closed`), `writes`, `levels`(축마다 `good`·`ok`·`weak` 건수, 채점된 쓰기만), 선택 `examples`('다른 시청자라면' 예시 수) | 구간 끝·[요약]·닫기 |
+
+- **노출로 세지 않는다**(D-20 5, 22 5-2 의 14번). 첫 판은 원래 반응·엔진 판정·사람 라벨을 보이지 않는다. 노출 계산(6-16 '노출 규칙 5', `app/exposure_io`)은 `training/` 만 보고 `viewer/` 는 보지 않는다. 화면에 보정 자료(사람 라벨에서 온 것)를 보이기 시작하면 그때 노출 규칙에 `viewer/` 를 더한다.
+- **채점 자료**: 주제 흐름(해제된 run 의 짝 topic-flow, 6-14)과 시각별 전사 낱말 `derived/asr-words.json`(2-1 의 주, 보호 구역 `derived/asr*`, 활성 보정이 verified·skipped 일 때만). 둘 다 엔진이 미리 만든 파일이고 앱은 엔진을 import 하지 않는다(D-06, [02](02-architecture.md) 3-1 층 표). 시범은 봉인 경로로만.
+  G 둘째 통합(`app/viewer_flow.build_context`)에서 선택 자료 셋을 더했다 — 해제된 run 이 없으면 `derived/asr-topic-flow.json`(asr 해시가
+  같을 때만), 전사 낱말을 쓸 때 `derived/asr-topic-vectors.json`(asr 해시·보정이 전사 낱말 문서와 같을 때만), 데이터 폴더의
+  `config\synonyms-ko.txt`(있으면). 어느 것이 쓰였는지는 앱 로그에 코드·개수만 남는다(`viewer-event` 에는 없다).
+- 채점 문턱은 지금 기준서(`project.json` 의 `active_guide_version`)의 **선택 칸** `viewer_score` 에서 읽는다(`app/viewer_flow.score_settings` → `viewer_score.settings_from_values`, 22 5-2 의 5번). 칸이 없으면 기본값(`viewer_score` 의 `DEFAULT_*`), 틀린 칸은 그 칸만 기본값. 시범 중인 기준서 v0.1 파일(`assets/guide-config.v0.1.json`)은 그대로다(D-21 4, D-14 7).
+- 채점기 판이 바뀌면 같은 글도 단계·코드가 달라질 수 있다. 판끼리 견줄 때는 `scorer` 로 나눠 본다(`scorer` 가 없는 줄은 첫 판).
 
 ---
 
@@ -1431,6 +1464,7 @@ MVP 에는 4단계(`missed_candidate`) 입력 화면이 없다(v1). 그래서 �
 | [`schemas/topic-flow.schema.json`](../../schemas/topic-flow.schema.json) | 엔진 주제 흐름 `<이름>.topics.json` (AI 결과와 짝으로 봉인, 6-14 'AI 봉인 기록', 08 D-17 5) |
 | [`schemas/training-event.schema.json`](../../schemas/training-event.schema.json) | `training/<session_id>.jsonl` 한 줄 (6-16, 08 D-18 8) |
 | [`schemas/scenario.schema.json`](../../schemas/scenario.schema.json) | `scenarios/SC-*.jsonl` 가상 채팅 시나리오 (H-1, [20](20-plan-virtual-chat.md) 3장) |
+| [`schemas/viewer-event.schema.json`](../../schemas/viewer-event.schema.json) | `viewer/<session_id>.jsonl` 한 줄 (6-18, 08 D-20 4) |
 
 **아직 없는 스키마** — 만들 때 이 묶음에 넣는다. 파일 이름은 가칭이다. (D-12 1: 위 세 스키마는 이미 있어 이 표에서 옮겼다.)
 
