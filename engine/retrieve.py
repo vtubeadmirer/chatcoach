@@ -3,7 +3,8 @@
 훈련 구간 안에서 실제 채팅이 드문 1분 창을 찾고, 같은 방송의 **훈련 구간 밖** 채팅과 같은 채널(`project.json`
 broadcast.channel_id 가 같은)의 다른 프로젝트 채팅에서 그 창에 넣을 후보를 고른다. AI·모델·외부 호출은 없다.
 
-표준 라이브러리만 쓴다(엔진 venv 의 무거운 의존성도, app 모듈도 import 하지 않는다). 그래서 앱 venv 에서도,
+표준 라이브러리와 순수 모듈 app.core.textnorm(낱말 정규화, 앱 채점기와 같이 씀 — D-20 3)만 쓴다(엔진 venv 의 무거운
+의존성도, 입출력 app 모듈도 import 하지 않는다). 그래서 앱 venv 에서도,
 엔진 venv 에서도 그대로 부를 수 있다. 이 모듈은 header 칸과 scenario.chat 줄(dict)만 만든다. 줄 목록 조립은
 `app.core.scenario.assemble(header, chats, yyyymmdd=…)`, 검사·쓰기는 `app.scenario_store.write_scenario(project_root, records)`
 (H-1 담당) 가 하고, tools/make_scenario.py 가 셋을 잇는다.
@@ -11,8 +12,13 @@ broadcast.channel_id 가 같은)의 다른 프로젝트 채팅에서 그 창에 
 지키는 것(20 1장·8장):
   - 본문을 시나리오에 복사하지 않는다. retrieved 줄에는 원 프로젝트 ID·chat_id·시각만 적고, 앱이 원 messages.jsonl 에서 읽는다.
   - 이름은 원 가림 닉네임이 아니라 이 모듈이 새로 붙인 가림 이름(display_mask). 실제 가림 닉네임과 겹치면 다시 뽑는다.
+    **줄마다 다른 가림 이름**이다(D-20 7): 같은 원 시청자에게서 가져온 여러 줄도 서로 다른 이름을 단다 — 같은 이름으로
+    묶어 보이면 말버릇·시각으로 실제 시청자를 짚는 단서가 된다. 시나리오 안에서 두 줄이 같은 이름을 쓰지 않는다.
   - 다른 시청자 닉네임(보호 구역 identities.jsonl 의 원 닉네임)·멘션·링크·전화번호 꼴·후원 문구·시스템 줄·
     너무 짧은/긴 줄·금칙어 목록에 걸린 줄은 후보에서 뺀다. 원 닉네임 목록은 메모리에서만 쓰고 결과에는 건수만 남긴다.
+  - 금칙어 목록은 저장소 밖 파일(기본 <데이터 폴더>\\config\\blocklist-ko.txt, D-20 6)에서 읽는다. 시나리오에는 그 파일의
+    sha256 만 적고 낱말은 적지 않는다(통계에도 낱말 수만). 파일이 없으면 0낱말로 진행하고 통계의 blocklist_found=false
+    (도구가 경고 한 줄을 낸다). 파일이 있는데 읽을 수 없으면(깨진 UTF-8 등) 거르지 않은 채로 만들지 않고 멈춘다(bad_blocklist).
   - 시범 프로젝트(폴더 이름 pilot-*)는 대상이면 **읽기 전에** 거부하고(pilot_locked), 같은 채널 후보에서는 열지도 않고 뺀다.
   - 반환하는 통계·오류에는 숫자·코드만 넣는다(본문·닉네임 없음).
 결정적: 같은 입력과 seed 면 같은 줄이 나온다(random.Random(str) 은 판 사이에 같은 값을 낸다).
@@ -26,13 +32,14 @@ import os
 import random
 import re
 import time
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Iterable, Sequence
 
+from app.core import textnorm as TN   # 순수 모듈(표준 라이브러리만). 앱 채점기와 같은 낱말 규칙(D-20 3)
+
 TOOL_NAME = "engine retrieve"
-TOOL_VERSION = "0.1.0"
+TOOL_VERSION = "0.2.0"    # 0.2.0: 줄마다 다른 가림 이름(D-20 7), 금칙어 파일을 읽지 못하면 멈춤
 SCENARIO_SCHEMA = "chatcoach-scenario-v1"
 FILTER_VERSIONS = ("nickname-v1", "copy-v1", "block-v1")
 RETRIEVE_SCOPES = ("same_broadcast", "same_channel")
@@ -227,19 +234,29 @@ def find_same_channel_projects(project_dir: str, projects_root: str | None, chan
 
 
 def load_blocklist(path: str | None) -> tuple[tuple[str, ...], str | None]:
-    """금칙어 목록(한 줄에 하나, '#' 은 주석). (정규화한 낱말들, 파일 sha256). 경로가 없으면 ((), None)."""
+    """금칙어 목록(UTF-8, 한 줄에 하나, '#' 줄·빈 줄 무시). (정규화한 낱말들, 파일 sha256). 경로가 없거나 파일이 없으면
+    ((), None) — 부르는 쪽이 경고만 내고 진행한다(D-20 6). 비교는 _squash(공백·기호 뺌) 뒤 부분 일치(reject_reason).
+
+    해시는 읽은 바이트 그대로의 sha256(같은 바이트를 한 번만 읽어 낱말과 해시가 어긋나지 않게).
+    파일이 있는데 읽을 수 없거나 UTF-8 이 아니면 RetrieveError('bad_blocklist') — 거르지 않은 시나리오를 만들지 않는다.
+    낱말은 메모리에서만 쓴다(반환값을 로그·통계·시나리오에 옮기지 않는다)."""
     if not path or not os.path.isfile(path):
         return (), None
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+        text = raw.decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        raise RetrieveError("bad_blocklist", "금칙어 목록 파일을 읽지 못했습니다(UTF-8 텍스트여야 합니다)") from None
     words = []
-    with open(path, "r", encoding="utf-8-sig") as f:
-        for line in f:
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            k = _squash(s)
-            if k:
-                words.append(k)
-    return tuple(sorted(set(words))), _sha256_file(path)
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        k = _squash(s)
+        if k:
+            words.append(k)
+    return tuple(sorted(set(words))), hashlib.sha256(raw).hexdigest()
 
 
 def load_topic_flow(path: str | None) -> tuple[list[tuple[int, int, tuple[str, ...]]], str | None]:
@@ -264,11 +281,11 @@ def load_topic_flow(path: str | None) -> tuple[list[tuple[int, int, tuple[str, .
 
 # ───────────────────────────────────────────────────────────── 정규화·거르기
 
-_EMOTE = re.compile(r"\{:[^{}:]{1,40}:\}")
-_JAMO_RUN = re.compile(r"[ㄱ-ㆎ]+")
-_NON_WORD = re.compile(r"[^0-9a-z가-힣\s]+")
-_PARTICLES = ("에서는", "으로는", "에서", "으로", "한테", "까지", "부터", "처럼", "보다", "이랑",
-              "은", "는", "이", "가", "을", "를", "에", "도", "로", "랑", "의", "만", "와", "과")
+# 낱말 나누기·정규화는 앱 채점기(G)와 같이 쓰도록 순수 모듈 app/core/textnorm.py 로 옮겼다(D-20 3). 이름은 그대로 둔다.
+_EMOTE = TN.EMOTE_RE
+_JAMO_RUN = TN.JAMO_RUN_RE
+_NON_WORD = TN.NON_WORD_RE
+_PARTICLES = TN.PARTICLES
 
 _MENTION = re.compile(r"@\S")
 _LINK = re.compile(r"(https?://|www\.|[a-z0-9-]+\.(com|net|org|kr|io|gg|tv|me|ly|co|xyz|link|site)\b)", re.I)
@@ -277,31 +294,9 @@ _DONATION = re.compile(r"(후원|도네|구독|치즈|풍선|별풍|기부|\d[\d
 _SYSTEM_TEXT = re.compile(r"^\s*[\[【(](공지|알림|시스템|system|notice)[\]】)]", re.I)
 
 
-def _squash(s: str) -> str:
-    """대조용: NFKC, 소문자, 공백·기호 없앰(한글·영문·숫자만)."""
-    s = unicodedata.normalize("NFKC", s or "").lower()
-    return re.sub(r"[^0-9a-z가-힣]+", "", s)
-
-
-def visible_len(text: str) -> int:
-    """이모티콘 코드와 공백을 뺀 글자 수."""
-    return len(re.sub(r"\s+", "", _EMOTE.sub("", text or "")))
-
-
-def tokens(text: str) -> frozenset[str]:
-    """점수용 낱말(2자 이상). 조사를 뗀 꼴과 원래 꼴을 둘 다 넣는다."""
-    s = _EMOTE.sub(" ", unicodedata.normalize("NFKC", text or ""))
-    s = _JAMO_RUN.sub(" ", s).lower()
-    s = _NON_WORD.sub(" ", s)
-    out = set()
-    for w in s.split():
-        cand = {w}
-        for p in _PARTICLES:
-            if len(w) > len(p) + 1 and w.endswith(p):
-                cand.add(w[: -len(p)])
-                break
-        out.update(x for x in cand if len(x) >= 2)
-    return frozenset(out)
+_squash = TN.squash            # 대조용: NFKC, 소문자, 공백·기호 없앰(한글·영문·숫자만)
+visible_len = TN.visible_len   # 이모티콘 코드와 공백을 뺀 글자 수
+tokens = TN.tokens             # 점수용 낱말(2자 이상). 조사를 뗀 꼴과 원래 꼴을 둘 다 넣는다
 
 
 def reject_reason(chat: Chat, *, nicknames: Iterable[str] | None, blocklist: Sequence[str], cfg: RetrieveConfig) -> str | None:
@@ -468,13 +463,21 @@ def build_pool(target: ProjectChats, others: Sequence[ProjectChats], from_ms: in
     return pool, {"removed": dict(sorted(removed.items())), "projects_without_nicknames": nick_missing}
 
 
-def _masks(viewer_keys: Sequence[str], taken: set[str], seed) -> dict[str, str]:
-    """원 시청자마다 새 가림 이름(첫 글자 + '*' 2~5개, scenario.schema displayMask 모양). 실제 가림 닉네임·서로와
-    겹치지 않게. 다 찼으면(시청자 약 280명 넘게) '시청자N' 가명으로 넘어간다."""
+def _line_key(c: Candidate) -> str:
+    """가림 이름을 정하는 열쇠: 원 프로젝트·chat_id(한 시나리오에서 한 채팅은 한 번만 고른다 — 줄마다 하나)."""
+    return f"{c.project_id}|{c.chat_id}"
+
+
+def _masks(keys: Sequence[str], taken: set[str], seed) -> dict[str, str]:
+    """열쇠(줄)마다 새 가림 이름(첫 글자 + '*' 2~5개, 다 차면 2~7개 — scenario.schema displayMask 모양). 실제 가림
+    닉네임·서로와 겹치지 않게. 별 모양이 다 찼으면 '시청자N' 가명으로 넘어간다.
+
+    D-20 7 부터 열쇠는 **줄**이다(_line_key). 같은 원 시청자의 여러 줄도 서로 다른 이름을 받는다. 이름은 원 시청자와
+    상관없이 seed·줄 열쇠로만 정해진다(viewer_id 가 이름에 스며들지 않는다)."""
     out: dict[str, str] = {}
     used = set(taken)
     n_plain = 0
-    for vk in viewer_keys:
+    for vk in keys:
         rng = random.Random(f"{seed}|mask|{vk}")
         m = None
         for _ in range(200):
@@ -537,14 +540,15 @@ def select_retrieved(target: ProjectChats, others: Sequence[ProjectChats], from_
     taken = set(target.masks)
     for o in others:
         taken.update(o.masks)
-    vkeys = sorted({c.viewer_key for _, c, _ in picked}, key=lambda v: _hkey(seed, "vk", v))
-    mask = _masks(vkeys, taken, seed)
+    # 줄마다 다른 가림 이름(D-20 7). 이름 뽑는 차례는 seed·줄 열쇠의 해시 순(보일 시각·원 시청자 순이 이름에 드러나지 않게)
+    lkeys = sorted({_line_key(c) for _, c, _ in picked}, key=lambda k: _hkey(seed, "ln", k))
+    mask = _masks(lkeys, taken, seed)
     lines = []
     for i, (show, c, s) in enumerate(picked, 1):
         lines.append({
             "kind": "scenario.chat", "line_id": f"s{i:04d}", "source": "retrieved", "chat_kind": "text",
             "show_vod_ms": int(show), "from_project_id": c.project_id, "from_chat_id": c.chat_id,
-            "from_t_ms": c.t_ms, "from_scope": c.scope, "retrieval_score": s, "display_mask": mask[c.viewer_key],
+            "from_t_ms": c.t_ms, "from_scope": c.scope, "retrieval_score": s, "display_mask": mask[_line_key(c)],
             "checks": {"nickname_hit": 0, "blocked": 0},
         })
     stats = {
@@ -552,6 +556,8 @@ def select_retrieved(target: ProjectChats, others: Sequence[ProjectChats], from_
         "virtual_wanted": sum(max(0, w.target - w.real) for w in ws if w.quiet), "virtual_allowed": sum(alloc),
         "virtual_filled": len(lines), "pool": len(pool), "below_floor": below_floor, "viewer_capped": viewer_capped,
         "from_scope": {s: sum(1 for ln in lines if ln["from_scope"] == s) for s in RETRIEVE_SCOPES},
+        "masks_distinct": len({ln["display_mask"] for ln in lines}),
+        "masks_pseudonym": sum(1 for ln in lines if ln["display_mask"].startswith("시청자")),
         **pst,
     }
     return lines, stats
@@ -617,11 +623,12 @@ def make_retrieved_scenario(project_dir: str, from_ms: int, to_ms: int, *, proje
     t0 = time.perf_counter()
     _refuse_pilot(project_dir)
     cfg = cfg or RetrieveConfig()
+    # 금칙어 목록을 먼저 읽는다: 깨졌으면(bad_blocklist) 채팅을 읽기 전에 멈춘다. 없으면 ((), None) — 경고는 부르는 쪽(D-20 6)
+    blocklist, bl_sha = load_blocklist(blocklist_path)
     target = load_project(project_dir)
     root = projects_root if projects_root is not None else os.path.dirname(os.path.abspath(project_dir))
     dirs, pilots = find_same_channel_projects(project_dir, root, target.channel_id, exclude=exclude)
     others = [load_project(d) for d in dirs]
-    blocklist, bl_sha = load_blocklist(blocklist_path)
     topic, tf_sha = load_topic_flow(topic_flow_path)
     lines, stats = select_retrieved(target, others, from_ms, to_ms, seed=seed, blocklist=blocklist, topic=topic, cfg=cfg)
     used = {ln["from_project_id"] for ln in lines if ln["from_scope"] == "same_channel"}
@@ -629,6 +636,7 @@ def make_retrieved_scenario(project_dir: str, from_ms: int, to_ms: int, *, proje
                           blocklist_sha256=bl_sha, topic_flow_sha256=tf_sha, now=now)
     stats.update({"same_channel_projects": len(others), "same_channel_used": len(used), "pilot_skipped": pilots,
                   "channel_known": target.channel_id is not None, "blocklist_words": len(blocklist),
+                  "blocklist_found": bl_sha is not None,
                   "topic_blocks": len(topic), "selection_sha256": selection_sha256(lines),
                   "elapsed_ms": int((time.perf_counter() - t0) * 1000)})
     return header, lines, stats

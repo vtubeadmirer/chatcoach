@@ -11,6 +11,10 @@
   link --project <P> --out <json> …        engine.link 의 main 을 그대로 부른다(인자도 그대로)
                                            기본 --engine v0.3(의미 비교), 모델이 없으면 v0.2 로 물러남
   topics --project <P> --out <json> …      engine.topics 의 main 을 그대로 부른다(주제 흐름, 숫자만 출력)
+  transcript-words --project <P> [--out <json>] …
+                                           engine.transcript_words 의 main(asr.json 을 VOD 로 보정한 시각별 전사 낱말,
+                                           기본 <P>/derived/asr-words.json, 시범은 거부, 숫자만 출력)
+  scenario --project <P> --from T --to T … tools/make_scenario.py 의 main 을 그대로 부른다(가상 채팅 시나리오)
   semantic-info [--models-dir D] [--lmstudio]
                                            의미 비교 실행기 상태(모델 이름·해시·실행기). 받지 않는다.
                                            --lmstudio 면 이 PC 의 LM Studio 서버(localhost)도 본다
@@ -38,12 +42,24 @@ _PASSTHROUGH = {
     "score": ("score", "손라벨 csv ↔ link 결과 채점"),
     "link": ("link", "채팅 ↔ 발화 연결 시험판(engine.link)"),
     "topics": ("topics", "주제 흐름(topic-flow) 만들기(engine.topics)"),
+    "transcript-words": ("transcript_words", "VOD 로 보정한 시각별 전사 낱말 만들기(engine.transcript_words)"),
+    "scenario": ("tools/make_scenario.py", "가상 채팅 시나리오(retrieved) 만들기(tools/make_scenario.py)"),
 }
 
 
 def _passthrough(cmd: str, rest: list[str]) -> int:
     import importlib
-    mod = importlib.import_module(f"{__package__ or 'engine'}.{_PASSTHROUGH[cmd][0]}")
+    target = _PASSTHROUGH[cmd][0]
+    if target.endswith(".py"):
+        # 저장소 tools/ 의 도구(패키지가 아니다): 파일 경로로 불러 main 을 부른다
+        import importlib.util
+        import os
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), *target.split("/"))
+        spec = importlib.util.spec_from_file_location("_engine_tool_" + cmd.replace("-", "_"), path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.main(rest)
+    mod = importlib.import_module(f"{__package__ or 'engine'}.{target}")
     return mod.main(rest)
 
 

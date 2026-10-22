@@ -79,9 +79,14 @@
 ├─ origin\OT-<yyyymmdd>-<4자>.json   출처 판정 대상 파일(chat_id 목록만, 6-11, D-13 5)   [원본 · 불변]
 ├─ origin\                           ★보호 구역: 가상 채팅 생성 기록·대조 결과 (v1)
 ├─ training\<session_id>.jsonl       스트리머 훈련 기록(training-event, 6-16). 라벨 기록과 다른 폴더   [원본 · 추가만]
-├─ scenarios\SC-<yyyymmdd>-<4자>.jsonl  가상 채팅 시나리오(H-1, 형식은 [20](20-plan-virtual-chat.md) 3장·`schemas/scenario.schema.json`). `messages.jsonl`·`labels\` 와 섞지 않는다   [원본 · 불변 · ★보호]
-└─ derived\                          비싼 파생: asr.json · vad.json · ocr.jsonl     [파생 · ★asr·ocr 는 보호]
+├─ scenarios\SC-<yyyymmdd>-<4자>.jsonl  가상 채팅 시나리오(H-1, 형식은 [20](20-plan-virtual-chat.md) 3장·`schemas/scenario.schema.json`, 저장 규칙 6-17). `messages.jsonl`·`labels\` 와 섞지 않는다   [원본 · 불변 · ★보호]
+└─ derived\                          비싼 파생: asr.json · vad.json · ocr.jsonl · asr-words.json     [파생 · ★asr*·ocr 는 보호]
 ```
+
+- `derived\asr-words.json`(시각별 전사 낱말, `engine/transcript_words.py`, D-20 3)은 순서·되풀이는 없지만 10초마다 한 말이
+  낱말 수준으로 거의 그대로 남는다. 그래서 **전사문(asr.json)과 같은 등급의 자료**로 다룬다: 보호 구역 `derived/asr*` 안에만
+  두고, 평문 사본을 보호 구역 밖에 쓰지 않는다(`tools/engine_to_ai.py --words --out` 은 보호 구역 안만 받는다), 시범은 봉인으로만.
+  채점에는 활성 보정이 verified·skipped 일 때 만든 것만 쓴다(4-2 와 같은 기준, `app/viewer_flow.words_status`). (검토 2026-10-23)
 
 ### 2-2. 앱 data 폴더 (프로젝트 밖)
 
@@ -102,7 +107,7 @@
 
 ### 2-3. 보호 구역 기본값
 
-`project.json` 의 `protected_zone` 기본값: `chat/protected/`, `derived/asr*`, `derived/ocr*`, `origin/`. H-1 에서 `scenarios/` 를 더한다([20](20-plan-virtual-chat.md) 3장 — 가상 채팅은 내보내기·패키지에 넣지 않는다, D-05).
+`project.json` 의 `protected_zone` 기본값: `chat/protected/`, `derived/asr*`, `derived/ocr*`, `origin/`. H-1 에서 `scenarios/` 를 더했다([20](20-plan-virtual-chat.md) 3장 — 가상 채팅은 내보내기·패키지에 넣지 않는다, D-05. 옛 project.json 에도 합집합으로 적용, 21 4-1 25번).
 
 보호 구역은 라벨러 패키지·정답 세트·일반 백업에서 빠진다. 넣으려면 '보호 포함' 을 켜야 하고, 켜면 경고 후 매니페스트에 기록된다(16장, [05](05-security.md)).
 
@@ -748,6 +753,20 @@ flowchart LR
 - 기록 형식이 바뀐 판의 점수는 `reference.source`·`sha256` 로 나눠 본다. 손라벨 기준과 최종 세트 기준을 섞어 평균내지 않는다(19 5-3 3번).
 
 **노출 규칙 5 (훈련을 엶)** — `app/core/exposure.py`, 읽기는 `app/exposure_io.project_trainings`. 훈련 세션의 `training.start` 줄 `created_at` 에 **아직 잠기지 않았던 이 프로젝트의 라벨링 세션(1차·재라벨)과 그 뒤에 만든 라벨링 세션**은 사람 라벨 노출(what = `other_session_labels`, 사유 `training_opened`)로 본다. 단위는 **프로젝트 전체**이고 누가 훈련했는지는 가리지 않는다(D-17 3, 19 5-1 10번 — 18 6-5 3번의 '연 라벨러' 는 이 규칙으로 바뀌었다). start 줄의 시각을 읽지 못하면 맨 처음으로 본다(이미 잠긴 세션도 노출, 블라인드 쪽으로 안전). start 줄이 없는 파일(만들다 실패)은 세지 않는다. 노출 세션은 `view_exposed` 로 대표값에서 빠지고 숫자는 남는다([06](06-evaluation-and-agreement.md) 3-4·7-5). 이 노출은 `view.exposed` 줄을 쓰지 않고 훈련 기록에서 계산한다 — label-event 는 그대로다.
+
+### 6-17. 가상 채팅 시나리오 — `scenarios/SC-<yyyymmdd>-<4자>.jsonl` ([스키마](../../schemas/scenario.schema.json))
+
+형식(머리·가상 줄·끝 줄)은 [20](20-plan-virtual-chat.md) 3장. 여기에는 저장 규칙만 적는다. 만드는 곳은 엔진 고르기 `engine/retrieve.py` + 도구 `tools/make_scenario.py`, 검사·원자 쓰기는 앱 모듈 `app/scenario_store.write_scenario`(20 3-1), 읽기는 훈련 화면만이다. 라벨링 세션은 이 폴더를 열지 않는다(12장, 20 8장 6번).
+
+| 규칙 | 내용 |
+|---|---|
+| 자리 | 보호 구역(`protected_zone` 기본값에 `scenarios/`, 2장). 내보내기·패키지에 넣지 않는다(D-05) |
+| 본문 | `retrieved` 줄은 본문을 적지 않는다. 원 프로젝트 ID·`chat_id`·`from_t_ms` 만 적고 앱이 원 `messages.jsonl` 에서 읽어 화면에만 보인다 |
+| 표시 이름 | `display_mask` 는 시나리오가 새로 정한 가명('시청자N' 또는 '한 글자 + 별 2~7개'). 원 가림 닉네임을 옮기지 않는다. **줄마다 다른 이름** — 같은 원 시청자에게서 가져온 여러 줄도 서로 다른 이름이고, 한 시나리오 안에서 두 줄이 같은 이름을 쓰지 않는다(D-20 7, `engine retrieve` 0.2.0 부터. 0.1.0 은 원 시청자마다 한 이름). 별 모양이 다 차면 '시청자N'. 화면에서 실제 가림 이름과 겹치면 앱이 '시청자N' 으로 바꾼다 |
+| 닉네임 대조 | 보호 구역 `identities.jsonl` 의 원 닉네임(정규화 2자 이상)이 든 채팅은 후보에서 뺀다. **한 글자 닉네임은 대조하지 않는다**(거의 모든 줄에 걸린다, 21 4-2 5번). `identities.jsonl` 이 없는 프로젝트는 '@' 멘션 거르기만 된다(통계 `projects_without_nicknames`) |
+| 금칙어 | 목록은 저장소 밖 `<데이터 폴더>\config\blocklist-ko.txt`(UTF-8, 한 줄에 하나, '#' 줄·빈 줄 무시, 공백·기호 뺀 뒤 부분 일치, D-20 6). 시나리오 머리 `filters.blocklist_sha256` 에 **파일 바이트의 sha256 만** 적고 낱말은 어디에도 적지 않는다(통계에는 낱말 수만). 파일이 없으면 거르기 0낱말로 만들고 경고만(`blocklist_missing`), 있는데 읽지 못하면 만들지 않는다(`bad_blocklist`) |
+| 불변·같은 시나리오 | 한 번 쓰면 고치지 않는다. 같은 project_id·구간·`lines_sha256` 이면 새로 쓰지 않고 그 ID 를 준다(`created_at` 은 보지 않음) |
+| 시범 | 대상이 시범이면 읽기 전에 거부(`pilot_locked`), 같은 채널 후보의 시범 프로젝트는 열지 않는다 |
 
 ---
 

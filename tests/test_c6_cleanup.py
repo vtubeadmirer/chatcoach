@@ -163,6 +163,43 @@ def test_screenshot_cleanup_counts_then_trashes_only_prefixed_png(tmp_path, caps
     assert (folder / "c7_new.png").exists()                          # 휴지통이 안 되면 지우지 않는다
 
 
+def test_gui_smoke_copies_go_to_private_root_not_tmpdir(tmp_path, monkeypatch):
+    """스모크 사본은 TMPDIR(공용 폴더일 수 있음)이 아니라 %LOCALAPPDATA%\\ChatCoachSmoke 아래에 생긴다(검토 2026-10-23)."""
+    gs = _smoke()
+    local = tmp_path / "local"
+    public = tmp_path / "public"
+    public.mkdir()
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("TMPDIR", str(public))
+    monkeypatch.setattr(gs.tempfile, "tempdir", None)               # gettempdir 가 TMPDIR 을 다시 읽게
+    d = gs.smoke_mkdtemp("vw")
+    assert os.path.dirname(d) == os.path.join(str(local), "ChatCoachSmoke")
+    assert os.path.basename(d).startswith("chatcoach_smoke_vw_") and not os.listdir(public)
+    # 예전 위치(TMPDIR)에 남은 사본은 세기만 한다
+    (public / "chatcoach_smoke_an_zz").mkdir()
+    assert gs.legacy_tmp_leftovers() == 1 and (public / "chatcoach_smoke_an_zz").is_dir()
+    monkeypatch.setattr(gs.tempfile, "tempdir", None)
+
+
+def test_gui_smoke_purges_only_stale_copies(tmp_path):
+    gs = _smoke()
+    root = tmp_path / "smoke"
+    root.mkdir()
+    old = root / "chatcoach_smoke_adj_old"
+    (old / "chat").mkdir(parents=True)
+    (old / "chat" / "messages.jsonl").write_text("{}\n", encoding="utf-8")   # 합성
+    new = root / "chatcoach_smoke_vw_new"
+    new.mkdir()
+    keep = root / "data"
+    keep.mkdir()
+    now = 1_000_000_000.0
+    os.utime(old, (now - 7200, now - 7200))
+    os.utime(new, (now - 10, now - 10))
+    os.utime(keep, (now - 7200, now - 7200))
+    assert gs.purge_stale_copies(str(root), now=now) == (1, 0)
+    assert not old.exists() and new.is_dir() and keep.is_dir()       # 동시에 도는 실행의 새 사본·데이터 폴더는 둔다
+
+
 def test_gui_smoke_project_not_required_for_cleanup():
     gs = _smoke()
     a = gs.parse_args(["--screenshot-cleanup"])
@@ -185,7 +222,7 @@ def test_step_list_matches_c5_49_with_renames():
     pref = set(re.findall(r'self\.check\(f"\{p\}_([a-z_0-9]+)"', src))
     names |= {f"{p}_{s}" for s in pref for p in ("agree", "adj", "an")}
     names -= {"labeling_flow", "agreement_flow", "adjudication_flow", "analysis_flow",
-              "training_flow"}                                      # 건너뜀·예외 때만 찍는 묶음 이름
+              "training_flow", "viewer_flow"}                       # 건너뜀·예외 때만 찍는 묶음 이름
     names -= {"agree_b_missed", "agree_tools", "agree_cancel_plan", "agree_origin", "agree_adjudicate",
               "adj_analysis"}                                       # 도우미가 흐름마다 다르게 찍는 것
     # 흐름 머리글자 f"{p}_…" 는 흐름마다 자기 단계만 찍는다: agree·adj 는 E 분석 단계를, an 은 agree·adj 전용 단계를 찍지 않는다
@@ -198,10 +235,13 @@ def test_step_list_matches_c5_49_with_renames():
     assert len(want_an) == 49 + len(gs.STEPS_ANALYSIS) and want_an[-1] == "cache_drop"
     want_all = gs.expected_steps(analysis=True, training=True)     # F 훈련 흐름(--training-flow) 단계도 cache_drop 앞
     assert len(want_all) == len(want_an) + len(gs.STEPS_TRAINING) and want_all[-1] == "cache_drop"
-    assert names <= set(want_all), sorted(names - set(want_all))
+    want_vw = gs.expected_steps(analysis=True, training=True, viewer=True)   # G 시청자 훈련(--viewer-flow)도 그 뒤
+    assert len(want_vw) == len(want_all) + len(gs.STEPS_VIEWER) and want_vw[-1] == "cache_drop"
+    assert names <= set(want_vw), sorted(names - set(want_vw))
     assert set(gs.STEPS_ANALYSIS) <= names                          # 분석 흐름 단계가 모두 gui_smoke 안에 있다
     assert set(gs.STEPS_TRAINING) <= names                          # 훈련 흐름 단계도
-    assert gs.compare_steps(want + ["analysis_flow", "training_flow"]) == ([], [])   # 건너뜀 표시는 대조하지 않는다
+    assert set(gs.STEPS_VIEWER) <= names                            # 시청자 훈련 흐름 단계도
+    assert gs.compare_steps(want + ["analysis_flow", "training_flow", "viewer_flow"]) == ([], [])   # 건너뜀 표시는 대조 안 함
 
 
 # ---------------------------------------------------------------------------- 12. 잠그기 직전 구간표가 바뀌면 다시 계산

@@ -225,11 +225,37 @@ def test_masks_new_and_not_real(tmp_path):
     masks = [ln["display_mask"] for ln in recs[1:]]
     assert masks and not set(masks) & set(real_masks)
     assert all(m[0] in R._MASK_SYLLABLES and set(m[1:]) == {"*"} for m in masks)
-    # 같은 원 시청자는 같은 가림 이름, 다른 시청자는 다른 이름
-    by_v = {}
-    for ln in recs[1:]:
-        by_v.setdefault(ln["display_mask"], set()).add(ln["from_chat_id"])
-    assert len(by_v) == len(masks)        # 시청자마다 한 줄씩 골랐으니 이름도 줄 수만큼
+    assert len(set(masks)) == len(masks)        # 줄마다 다른 이름(D-20 7)
+
+
+def test_masks_differ_per_line_even_same_viewer(tmp_path):
+    """D-20 7: 같은 원 시청자에게서 가져온 여러 줄도 줄마다 다른 가림 이름. 같은 seed 면 같은 이름(결정적)."""
+    ms = busy(600000, 5) + busy(720000, 5) + [msg(670000, "드문 창 실제", viewer=viewer(950))]
+    # 시청자 4명이 3줄씩(max_per_viewer 3) — 한 시청자의 줄이 여러 개 뽑히게
+    ms += [msg(i * 1000, f"같은 시청자 합성 {i}", viewer=viewer(i % 4)) for i in range(12)]
+    tgt = make_project(tmp_path / "projects", "p-mask2", ms)
+    recs, st = make(tgt, FROM, TO, seed=2, now=NOW)
+    lines = recs[1:]
+    src_viewer = {m["chat_id"]: m["viewer_id"] for m in ms}
+    by_viewer: dict = {}
+    for ln in lines:
+        by_viewer.setdefault(src_viewer[ln["from_chat_id"]], []).append(ln["display_mask"])
+    assert any(len(v) >= 2 for v in by_viewer.values())                       # 한 시청자에게서 2줄 이상
+    for v in by_viewer.values():
+        assert len(set(v)) == len(v)                                          # 그 줄들의 이름이 모두 다르다
+    masks = [ln["display_mask"] for ln in lines]
+    assert len(set(masks)) == len(masks) == st["masks_distinct"] and st["masks_pseudonym"] == 0
+    again, _ = make(tgt, FROM, TO, seed=2, now=NOW)
+    assert [ln["display_mask"] for ln in again[1:]] == masks
+
+
+def test_masks_overflow_to_pseudonym_unique():
+    """별 모양이 다 차면 '시청자N'. 그래도 줄마다 다르고, 실제 가림 이름과 겹치지 않는다."""
+    taken = {f"{a}{'*' * k}" for a in R._MASK_SYLLABLES for k in range(2, 8)}   # 별 모양 전부를 실제 이름으로
+    keys = [f"p|c{i}" for i in range(5)]
+    got = R._masks(keys, taken, seed=0)
+    assert sorted(got.values()) == sorted(f"시청자{i}" for i in range(1, 6))
+    assert SC.DISPLAY_MASK_RE.match(got["p|c0"])
 
 
 def test_no_nickname_or_text_in_output(tmp_path):
@@ -397,21 +423,116 @@ def test_tool_store_missing(tmp_path, capsys, monkeypatch):
     assert json.loads(capsys.readouterr().out)["error"] == "scenario_store_missing"
 
 
+def _data_layout(tmp_path):
+    """<데이터>\\projects\\p-target + <데이터>\\config\\ (도구 기본 금칙어 경로 = <데이터>\\config\\blocklist-ko.txt)."""
+    tgt = basic_target(tmp_path, extra=[msg(200000 + i, f"합성금칙 섞인 후보 {i}", viewer=viewer(600 + i))
+                                        for i in range(3)])
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(exist_ok=True)
+    return tgt, cfg_dir / "blocklist-ko.txt"
+
+
+def test_tool_default_blocklist_read_and_hashed(tmp_path, capsys):
+    """D-20 6: 기본 경로의 금칙어 파일을 읽어 거르고, 머리 filters 에는 파일 sha256 만. 낱말은 출력·파일 어디에도 없다."""
+    import hashlib
+    tgt, bl = _data_layout(tmp_path)
+    assert MS.default_blocklist(tgt) == str(bl)
+    bl.write_text("# 합성 주석 줄\n합성금칙\n", encoding="utf-8")
+    assert MS.main(["--project", tgt, "--from", "600000", "--to", "840000"], now=NOW) == 0
+    cap = capsys.readouterr()
+    out = json.loads(cap.out.strip())
+    assert out["blocklist_found"] is True and "warnings" not in out and cap.err == ""
+    assert out["stats"]["blocklist_found"] is True and out["stats"]["blocklist_words"] == 1
+    assert out["stats"]["removed"].get("blocked") == 3
+    s = STORE.read_scenario(STORE.scenario_path(tgt, out["scenario_id"]), project_id=uid("p-target"))
+    assert s.header["filters"]["blocklist_sha256"] == hashlib.sha256(bl.read_bytes()).hexdigest()
+    with open(STORE.scenario_path(tgt, out["scenario_id"]), encoding="utf-8") as f:
+        body = f.read()
+    assert "합성금칙" not in body and "합성금칙" not in cap.out and "합성 주석" not in body
+
+
+def test_tool_blocklist_missing_warns_only(tmp_path, capsys):
+    """파일이 없으면 지금처럼 진행하고 경고만(출력 warnings, 표준 오류 한 줄). 해시 칸 없음."""
+    tgt, bl = _data_layout(tmp_path)
+    assert not bl.exists()
+    assert MS.main(["--project", tgt, "--from", "600000", "--to", "840000", "--dry-run"], now=NOW) == 0
+    cap = capsys.readouterr()
+    out = json.loads(cap.out.strip())
+    assert out["blocklist_found"] is False and out["warnings"] == ["blocklist_missing"]
+    assert "blocklist_missing" in cap.err and str(bl) not in cap.err and out["valid"] is True
+    assert out["stats"]["blocklist_found"] is False and out["stats"]["blocklist_words"] == 0
+    # 빈 값(--blocklist "")은 '목록 없이' 를 일부러 고른 것 — 경고 없음
+    assert MS.main(["--project", tgt, "--from", "600000", "--to", "840000", "--dry-run", "--blocklist", ""],
+                   now=NOW) == 0
+    cap = capsys.readouterr()
+    assert "warnings" not in json.loads(cap.out.strip()) and cap.err == ""
+
+
+def test_tool_blocklist_unreadable_refuses(tmp_path, capsys):
+    """파일이 있는데 UTF-8 이 아니면 거르지 않은 시나리오를 만들지 않는다(bad_blocklist, rc 1, 채팅 읽기 전)."""
+    tgt, bl = _data_layout(tmp_path)
+    bl.write_bytes(b"\xff\xfe\x00\xd8 broken")
+    assert MS.main(["--project", tgt, "--from", "600000", "--to", "840000"], now=NOW) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "bad_blocklist"
+    assert not os.path.exists(os.path.join(tgt, "scenarios"))
+    with pytest.raises(R.RetrieveError) as e:
+        R.load_blocklist(str(bl))
+    assert e.value.code == "bad_blocklist"
+
+
+def test_tool_threshold_option(tmp_path, capsys):
+    """--threshold Q/T · test(45/60) · default(2/6). 따로 주는 칸과 같이 쓰면 bad_argument."""
+    assert MS.parse_threshold("45/60") == (45, 60) and MS.parse_threshold(" 3 / 9 ") == (3, 9)
+    assert MS.parse_threshold("test") == (45, 60) and MS.parse_threshold("DEFAULT") == (2, 6)
+    for bad in ("45", "a/b", "-1/5", "45/60/1", ""):
+        with pytest.raises(ValueError):
+            MS.parse_threshold(bad)
+    tgt = basic_target(tmp_path)
+    base = ["--project", tgt, "--from", "600000", "--to", "840000", "--blocklist", "", "--dry-run"]
+    assert MS.main(base + ["--threshold", "test"], now=NOW) == 0
+    o = json.loads(capsys.readouterr().out)
+    assert o["fill"] == {"quiet_max_real": 45, "target_per_min": 60}
+    assert o["stats"]["quiet_windows"] == 4                     # 45 이하면 바쁜 창(5개)도 채울 자리
+    assert MS.main(base + ["--threshold", "45/60"], now=NOW) == 0
+    assert json.loads(capsys.readouterr().out)["fill"] == {"quiet_max_real": 45, "target_per_min": 60}
+    assert MS.main(base, now=NOW) == 0                           # 주지 않으면 기본 2/6
+    o = json.loads(capsys.readouterr().out)
+    assert o["fill"] == {"quiet_max_real": 2, "target_per_min": 6} and o["stats"]["quiet_windows"] == 2
+    assert MS.main(base + ["--quiet-max-real", "45", "--target-per-min", "60"], now=NOW) == 0   # 옛 칸도 그대로
+    assert json.loads(capsys.readouterr().out)["fill"] == {"quiet_max_real": 45, "target_per_min": 60}
+    assert MS.main(base + ["--threshold", "45/60", "--quiet-max-real", "3"], now=NOW) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "bad_argument"
+    assert MS.main(base + ["--threshold", "x"], now=NOW) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "bad_argument"
+
+
 def test_parse_ms():
     assert MS.parse_ms("1:02:03.5") == 3723500 and MS.parse_ms("10:00") == 600000 and MS.parse_ms("42") == 42
 
 
 # ───────────────────────────────────────────────────────────── 표준 라이브러리만
 
-def test_retrieve_stdlib_only():
-    path = os.path.join(ROOT, "engine", "retrieve.py")
+def _imports(path: str) -> set[str]:
+    """파일의 import 대상(점까지 다). 상대 import 는 없어야 한다."""
     with open(path, encoding="utf-8") as f:
         tree = ast.parse(f.read())
     mods = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            mods.update(a.name.split(".")[0] for a in node.names)
+            mods.update(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom):
             assert node.level == 0, "상대 import 없음"
-            mods.add((node.module or "").split(".")[0])
-    assert mods <= set(sys.stdlib_module_names) | {"__future__"}, mods - set(sys.stdlib_module_names)
+            mod = node.module or ""
+            mods.update(f"{mod}.{a.name}" if mod == "app.core" else mod for a in node.names)
+    return mods
+
+
+def test_retrieve_stdlib_only():
+    """표준 라이브러리 + 순수 모듈 app.core.textnorm(낱말 규칙을 앱 채점기와 같이 씀, D-20 3)만. textnorm 도 표준만."""
+    std = set(sys.stdlib_module_names) | {"__future__"}
+    mods = _imports(os.path.join(ROOT, "engine", "retrieve.py"))
+    extra = {m for m in mods if m.split(".")[0] not in std}
+    assert extra <= {"app.core.textnorm"}, extra
+    if extra:
+        tn = _imports(os.path.join(ROOT, "app", "core", "textnorm.py"))
+        assert {m.split(".")[0] for m in tn} <= std, tn

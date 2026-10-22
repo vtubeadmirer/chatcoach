@@ -3,13 +3,19 @@
 사용:
   python tools/make_scenario.py --project <프로젝트 폴더> --from <시각> --to <시각>
          [--projects-root <폴더>] [--blocklist <txt>] [--topic-flow <topic-flow.json>] [--seed N] [--dry-run]
-         [--quiet-max-real 2] [--target-per-min 6] [--max-virtual-ratio 0.5]
+         [--threshold Q/T | test | default] [--quiet-max-real 2] [--target-per-min 6] [--max-virtual-ratio 0.5]
 
   --from/--to : 훈련 구간(VOD 시각). 1:02:03(.5) 형식 또는 정수 ms.
   --projects-root : 같은 채널(project.json broadcast.channel_id) 프로젝트를 찾을 곳. 기본은 프로젝트 폴더의 부모.
                     channel_id 가 없으면 같은 방송만 쓴다. pilot-* 폴더는 열지 않는다.
-  --blocklist : 금칙어 목록(한 줄에 하나, '#' 주석). 기본 <데이터 폴더>\\config\\blocklist-ko.txt (20 11-6). 없으면
-                금칙어 거르기 0낱말로 진행하고 시나리오 머리 filters 에 blocklist_sha256 을 적지 않는다(출력 blocklist_found=false).
+  --blocklist : 금칙어 목록(UTF-8, 한 줄에 하나, '#' 주석). 기본 <데이터 폴더>\\config\\blocklist-ko.txt (20 11-6, D-20 6).
+                있으면 그 낱말이 든 줄을 빼고 시나리오 머리 filters.blocklist_sha256 에 파일 해시만 적는다(낱말은 어디에도
+                적지 않는다). 없으면 금칙어 거르기 0낱말로 진행하고 경고만 낸다(출력 blocklist_found=false,
+                warnings=["blocklist_missing"], 표준 오류에 한 줄). 있는데 읽지 못하면 만들지 않는다(bad_blocklist, rc 1).
+                빈 값(--blocklist "")은 '목록 없이' — 시험용.
+  --threshold : 채우기 문턱 한 번에. 'Q/T' = --quiet-max-real Q --target-per-min T (예: 45/60). 'test' = 45/60
+                (시험 문턱, 21 보고 1-3 · gui_smoke), 'default' = 2/6(기본). --quiet-max-real·--target-per-min 과 같이 쓰면
+                bad_argument.
   --seed : 0 이상 정수. 같은 입력·seed 면 같은 줄.
   --dry-run : 파일을 쓰지 않고 숫자만 낸다.
 
@@ -21,7 +27,8 @@
 items[])에 적힌 프로젝트는 app.reference_set 으로 거른다 — 대상이면 거부, 같은 채널 후보면 열지 않는다(stats.pilot_skipped).
 AI·외부 호출·모델 없음. messages.jsonl 은 읽기만.
 출력: 표준 출력에 JSON 한 줄(숫자·ID·코드만. 본문·닉네임 없음).
-종료 코드: 0 정상(이미 있음·채울 것 없음 포함) · 1 입력 오류 · 2 시범 거부 · 3 scenario_store 없음 · 4 만들 수 없음
+종료 코드: 0 정상(이미 있음·채울 것 없음 포함) · 1 입력 오류(금칙어 파일 깨짐 포함) · 2 시범 거부 · 3 scenario_store 없음 ·
+  4 만들 수 없음
 """
 from __future__ import annotations
 
@@ -85,6 +92,20 @@ def parse_ms(text: str) -> int:
     return ms
 
 
+THRESHOLD_PRESETS = {"test": (45, 60), "default": (R.RetrieveConfig().quiet_max_real, R.RetrieveConfig().target_per_min)}
+
+
+def parse_threshold(text: str) -> tuple[int, int]:
+    """'Q/T' 또는 'test'·'default' → (quiet_max_real, target_per_min). 둘 다 0 이상 정수."""
+    s = str(text).strip().lower()
+    if s in THRESHOLD_PRESETS:
+        return THRESHOLD_PRESETS[s]
+    m = re.fullmatch(r"(\d{1,4})\s*/\s*(\d{1,4})", s)
+    if not m:
+        raise ValueError("문턱 형식은 Q/T (예: 45/60) 또는 test·default")
+    return int(m.group(1)), int(m.group(2))
+
+
 def default_blocklist(project_dir: str) -> str:
     """<데이터 폴더>\\config\\blocklist-ko.txt. 데이터 폴더 = projects 폴더의 부모(…\\chatcoach-data)."""
     projects = os.path.dirname(os.path.abspath(project_dir))
@@ -106,8 +127,10 @@ def main(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     ap.add_argument("--topic-flow")
     ap.add_argument("--seed", default="0")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--quiet-max-real", type=int, default=d.quiet_max_real, help="이 수 이하인 1분 창을 채운다")
-    ap.add_argument("--target-per-min", type=int, default=d.target_per_min, help="채운 창의 실제+가상 목표")
+    ap.add_argument("--threshold", help="채우기 문턱 'Q/T'(예: 45/60) · test(45/60) · default(2/6)")
+    ap.add_argument("--quiet-max-real", type=int, default=None,
+                    help=f"이 수 이하인 1분 창을 채운다(기본 {d.quiet_max_real})")
+    ap.add_argument("--target-per-min", type=int, default=None, help=f"채운 창의 실제+가상 목표(기본 {d.target_per_min})")
     ap.add_argument("--max-virtual-ratio", type=float, default=d.max_virtual_ratio)
     ns = ap.parse_args(argv)
 
@@ -120,8 +143,13 @@ def main(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         seed = int(ns.seed)
         if seed < 0:
             raise ValueError
-        cfg = R.RetrieveConfig(quiet_max_real=ns.quiet_max_real, target_per_min=ns.target_per_min,
-                               max_virtual_ratio=ns.max_virtual_ratio)
+        qmr = d.quiet_max_real if ns.quiet_max_real is None else ns.quiet_max_real
+        tpm = d.target_per_min if ns.target_per_min is None else ns.target_per_min
+        if ns.threshold is not None:
+            if ns.quiet_max_real is not None or ns.target_per_min is not None:
+                raise ValueError("--threshold 와 --quiet-max-real·--target-per-min 은 같이 쓰지 않는다")
+            qmr, tpm = parse_threshold(ns.threshold)
+        cfg = R.RetrieveConfig(quiet_max_real=qmr, target_per_min=tpm, max_virtual_ratio=ns.max_virtual_ratio)
     except ValueError:
         _emit({"error": "bad_argument"})
         return 1
@@ -152,12 +180,19 @@ def main(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
                                                          seed=seed, cfg=cfg, now=now, exclude=is_pilot)
     except R.RetrieveError as e:
         _emit({"error": e.code})
-        return 2 if e.code == "pilot_locked" else (1 if e.code in ("bad_range", "no_messages", "bad_seed") else 4)
+        return 2 if e.code == "pilot_locked" else (
+            1 if e.code in ("bad_range", "no_messages", "bad_seed", "bad_blocklist") else 4)
     when = now or datetime.now().astimezone()
     records = assemble(header, chats, yyyymmdd=when.strftime("%Y%m%d"))
     head = records[0]
+    found = "blocklist_sha256" in head.get("filters", {})
     out = {"scenario_id": head["scenario_id"], "counts": head["counts"], "stats": stats,
-           "blocklist_found": "blocklist_sha256" in head.get("filters", {}), "written": False}
+           "blocklist_found": found, "written": False,
+           "fill": {"quiet_max_real": cfg.quiet_max_real, "target_per_min": cfg.target_per_min}}
+    if not found and bl:
+        # 지금처럼 경고만 하고 진행한다(D-20 6). 경로·낱말은 적지 않는다(코드만)
+        out["warnings"] = ["blocklist_missing"]
+        print("경고: 금칙어 목록 파일이 없어 금칙어 거르기 없이 만듭니다 (blocklist_missing)", file=sys.stderr)
     if ns.dry_run:
         problems = st.validate(records)
         out["valid"] = not problems

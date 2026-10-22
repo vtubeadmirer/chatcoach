@@ -17,6 +17,13 @@ a = Analysis(
         # project.json 검사는 app/core/validate.py 안의 사본으로 하므로 project.schema.json 은 번들하지 않는다.
         ('schemas\\label-event.schema.json', 'schemas'),
         ('schemas\\export-row.schema.json', 'schemas'),
+        # 그 밖에 앱 모듈이 SCHEMA_REL 로 실행 중에 읽는 기록 스키마(없으면 그 기록을 쓰거나 읽지 못한다 —
+        # tests/test_viewer_menu.py::test_spec_bundles_runtime_schemas 가 목록을 대조한다)
+        ('schemas\\session-lock.schema.json', 'schemas'),
+        ('schemas\\ai-result.schema.json', 'schemas'),
+        ('schemas\\scenario.schema.json', 'schemas'),
+        ('schemas\\training-event.schema.json', 'schemas'),
+        ('schemas\\viewer-event.schema.json', 'schemas'),
         ('VERSION', '.'),
     ],
     # mpv(python-mpv)는 main.py 가 직접 import 하지 않고 selftest·player 가 importlib 로 늦게 부른다 → 명시

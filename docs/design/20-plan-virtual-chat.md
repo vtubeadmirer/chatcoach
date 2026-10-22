@@ -66,7 +66,7 @@
 | 스키마 | `schemas/scenario.schema.json` 새로 (`chatcoach-scenario-v1`) |
 | 불변 | 한 번 쓰면 고치지 않는다. 다시 만들면 새 ID. 같은 해시면 새로 만들지 않는다(origin 대상 파일과 같은 방식) |
 | 보호 구역 | `scenarios/` 를 `project.json` 의 `protected_zone` 기본값에 더한다. 내보내기·패키지에 넣지 않는다 |
-| 쓰는 곳 | 엔진 도구만. 앱은 읽기만(훈련 세션) |
+| 쓰는 곳 | 도구 `tools/make_scenario.py`(고르기는 `engine/retrieve.py`)가 앱 모듈 `app/scenario_store.write_scenario` 로 검사·원자 쓰기를 한다(검사 규칙이 앱과 한 곳에 있게, 21 4-1 7번). 앱 화면은 읽기만(훈련 세션). 메뉴 '훈련 → 가상 채팅 만들기' 는 이 도구를 따로 프로세스로 부른다 |
 | 첫 줄 | `scenario.header` 1줄 |
 | 나머지 | `scenario.chat` 줄, 보일 시각 순 |
 | 마지막 줄 | `scenario.end` 1줄(건수·해시). 없으면 쓰다 끊긴 파일로 보고 열지 않는다 |
@@ -79,12 +79,12 @@
 | `scenario_id` | `SC-20261023-a1b2` 모양 |
 | `project_id` | 이 시나리오가 붙는 프로젝트 |
 | `range` | `vod_from_ms`·`vod_to_ms` (훈련 구간) |
-| `created_at`, `created_by` | 시각, 도구 이름·판(`engine scenario 0.1.0`) |
+| `created_at`, `created_by` | 시각, 도구 이름·판(`engine retrieve 0.2.0` — 0.2.0 부터 줄마다 다른 가림 이름, D-20 7) |
 | `inputs` | `messages_sha256`, `asr_sha256`(있으면), `topic_flow_sha256`(있으면), 다른 프로젝트에서 가져왔으면 그 `project_id`·`messages_sha256` 목록 |
 | `fill` | 채우기 규칙 시작값: `quiet_window_ms`(60000), `quiet_max_real`(2), `target_per_min`(6), `max_virtual_ratio`(0.5) |
 | `retrieval` | `method`(`topic_words`·`topic_words+e5`), 점수 하한, 같은 원 시청자 최대 횟수 |
 | `generator` | `backend`(`none`·`lmstudio`·`external`), `model_id`, `model_sha256`(알 수 있으면), `prompt_template_id`·`prompt_sha256`, `temperature`, `seed`, `context_ms`(앞 몇 초를 넣었나) |
-| `filters` | 거르기 판(`nickname-v1`·`copy-v1`·`block-v1`·`llm-check-v1`)과 걸러 낸 수 |
+| `filters` | 거르기 판(`nickname-v1`·`copy-v1`·`block-v1`·`llm-check-v1`)과 걸러 낸 수, 금칙어 파일을 읽었으면 그 파일의 `blocklist_sha256`(낱말은 적지 않음, D-20 6) |
 | `external` | `enabled`(기본 false). true 면 `log_ref`(보낸 기록 파일) |
 | `counts` | 출처별 줄 수 |
 
@@ -101,18 +101,18 @@
 | `retrieval_score` | — | ● | — |
 | `gen_id`, `text` (최대 100자) | — | — | ● |
 | `context` (`asr_from_ms`·`asr_to_ms`·`topic_id`) | — | — | ● |
-| `display_mask` (가림 이름, 예 `하**`) | — | ● | ● |
+| `display_mask` (가림 이름, 예 `하**`. **줄마다 다름**, D-20 7) | — | ● | ● |
 | `emotes` (합성 코드만 허용 목록) | — | — | ● |
 | `checks` (`nickname_hit`·`copy_max`·`blocked`·`llm_flag`) | — | ● | ● |
 
 - `replay` 줄은 "이 구간의 실제 채팅을 다 보인다" 는 뜻으로 **적지 않아도 된다.** 앱이 구간의 실제 채팅을 읽고 시나리오 줄을 끼운다. 다만 실제 채팅을 일부만 보일 때(예: 너무 많은 구간 줄이기)는 `replay` 줄로 적는다. 첫 판은 '다 보임' 하나만 한다.
 - 06 4-7·03 5-6 의 `generation_ref` 는 `{file: "scenarios/SC-….jsonl", gen_id}` 로 이 파일을 가리킨다.
 
-예 (합성):
+예 (합성. `project_id` 는 실제 형식인 UUID 모양, `from_chat_id` 는 `c` + 16진 20자 — 21 4-1 5번. 줄 예는 칸 뜻을 보이려고 줄였다 — 실제 머리의 필수 칸은 스키마):
 
 ```json
-{"kind": "scenario.header", "schema": "chatcoach-scenario-v1", "scenario_id": "SC-20261023-a1b2", "project_id": "p00000000", "range": {"vod_from_ms": 1200000, "vod_to_ms": 2400000}, "generator": {"backend": "lmstudio", "model_id": "synthetic-model-7b", "temperature": 0.8, "seed": 7}, "external": {"enabled": false}, "counts": {"retrieved": 12, "generated": 18}}
-{"kind": "scenario.chat", "line_id": "s0001", "source": "retrieved", "show_vod_ms": 1263000, "from_project_id": "p00000000", "from_chat_id": "c-synth-0042", "from_t_ms": 3901000, "from_scope": "same_broadcast", "retrieval_score": 0.41, "display_mask": "하**"}
+{"kind": "scenario.header", "schema": "chatcoach-scenario-v1", "scenario_id": "SC-20261023-a1b2", "project_id": "00000000-0000-4000-8000-000000000000", "range": {"vod_from_ms": 1200000, "vod_to_ms": 2400000}, "generator": {"backend": "lmstudio", "model_id": "synthetic-model-7b", "temperature": 0.8, "seed": 7}, "external": {"enabled": false}, "counts": {"retrieved": 12, "generated": 18}}
+{"kind": "scenario.chat", "line_id": "s0001", "source": "retrieved", "chat_kind": "text", "show_vod_ms": 1263000, "from_project_id": "00000000-0000-4000-8000-000000000000", "from_chat_id": "c0000000000000000002a", "from_t_ms": 3901000, "from_scope": "same_broadcast", "retrieval_score": 0.41, "display_mask": "하**"}
 {"kind": "scenario.chat", "line_id": "s0002", "source": "generated", "show_vod_ms": 1271500, "gen_id": "g0001", "text": "오늘 점심은 뭐 드셨어요 {:zz_test_01:}", "context": {"asr_from_ms": 1151500, "asr_to_ms": 1271500, "topic_id": "t03"}, "display_mask": "두*", "checks": {"nickname_hit": 0, "copy_max": 0.12, "blocked": 0, "llm_flag": 0}}
 {"kind": "scenario.end", "lines": 30, "lines_sha256": "…"}
 ```
@@ -135,9 +135,11 @@
 2. 실제 채팅이 `quiet_max_real` 이하인 창이 **채울 자리**다(5-1).
 3. 채울 자리의 '그때 주제' 를 정한다: 주제 흐름의 낱말(있으면) + 그 앞 60초 전사문의 낱말.
 4. 후보 채팅: (가) 같은 방송에서 **훈련 구간 밖** (나) `project.json` 의 `channel_id` 가 같은 다른 프로젝트. **`pilot-*` 는 잠기기 전 후보에서 뺀다.**
-5. 뺄 것: 일반 채팅이 아닌 것(후원·구독·공지 등), 다른 시청자 닉네임이 든 것, 금칙어(8장), 너무 짧은 것(이모티콘만·한 글자).
+5. 뺄 것: 일반 채팅이 아닌 것(후원·구독·공지 등), 다른 시청자 닉네임이 든 것(정규화 2자 이상만 대조 — 한 글자 닉네임은 대조하지 않음), 금칙어(8장 4번 — 저장소 밖 `chatcoach-data\config\blocklist-ko.txt`, 시나리오에는 해시만, D-20 6), 너무 짧은 것(이모티콘만·한 글자).
 6. 점수 = 주제 낱말 겹침(+ e5-small 유사도가 있으면 섞음). 하한 넘는 것 가운데 위에서 고른다. 같은 원 시청자는 시나리오 하나에 최대 3번.
 7. 보일 시각은 창 안에서 고르게 흩는다(seed 고정, 다시 돌려도 같다).
+8. 가림 이름은 **줄마다 새로** 붙인다(D-20 7). 같은 원 시청자에게서 가져온 줄도 서로 다른 이름이라, 이름으로 묶어 실제 시청자를 짚을 수 없다. H-5 가려내기에서 '이름이 너무 다 다르다' 가 어색함으로 나오면 다시 본다(21 4-3 3번).
+9. 문턱: 기본은 2/6(창마다 실제 2개 이하, 1분 목표 6). 큰 방송은 기본 문턱이면 드문 창이 0 일 수 있어(21 1-3), 시험·개발용은 `--threshold test`(45/60). 문턱은 시범 뒤 guide-config 로 옮긴다(21 4-2 1번).
 
 ### 4-3. ② 로컬 LLM 으로 만드는 법
 
@@ -203,7 +205,7 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 
 | 주제 | 정한 것 (제안) |
 |---|---|
-| 같이 쓰는 것 | 시나리오 파일 형식, 거르기(8장), 가림 이름, `training-event` 의 source 칸 |
+| 같이 쓰는 것 | 시나리오 파일 형식, 거르기(8장), 가림 이름(줄마다 다름, D-20 7), `training-event` 의 source 칸, 낱말 나누기·정규화(순수 모듈 `app/core/textnorm.py` — `engine/retrieve` 와 G 채점기가 같은 규칙을 씀, D-20 3) |
 | G 가 H 를 쓰는 곳 | (1) 한 시점의 '다른 시청자라면' 예시로 `retrieved` 채팅을 보인다(실제 말투) (2) G 의 축별 점수(주제 적합성·대화 확장성·반복)를 H 생성 채팅의 **품질 거르기**에 다시 쓴다(주제에서 벗어난 생성 채팅을 뺌) |
 | G 가 하지 않는 것 | 시청자가 쓴 채팅을 시나리오에 '실제' 로 넣지 않는다. 시청자 연습 글은 LLM 입력에도 넣지 않는다(G 의 기록은 G 의 파일) |
 | 순서 | H 는 F 와 같이(D-14 8). G 는 F·H 뒤. G 를 만들 때 G 의 점수기를 H 거르기에 붙이는 것은 G 묶음에서 |
@@ -257,8 +259,8 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 |---|---|---|---|
 | 1 | **실제 시청자 닉네임**이 생성 본문·이름에 나온다 | 엔진이 그 프로젝트(와 가져온 프로젝트)의 원 닉네임·가림 닉네임 목록으로 대조. 한 글자라도 닉네임 전체가 들어 있으면 그 줄 버림. 목록은 엔진 메모리에서만, 결과는 건수만 | 합성 닉네임을 일부러 넣은 LLM 가짜 응답으로 0줄 남는지 |
 | 2 | **사칭** — 가상 채팅이 실제 사람·스트리머·운영자인 척한다 | 이름은 시나리오의 가림 이름만(`하**` 모양, 실제 가림 닉네임과 겹치면 다시 뽑음). 후원·구독·운영자 표시·배지를 만들지 않는다(`kind` 는 일반 채팅만). 지시문에 '실제 사람 이름을 부르지 말 것' | 스키마가 다른 kind·배지 칸을 막는지 |
-| 3 | 옮겨 온 실제 채팅이 다른 맥락에서 실제 시청자 이름과 붙는다 | `retrieved` 도 가림 이름을 새로 붙이고, 다른 시청자 닉네임이 든 채팅은 뺀다. 훈련 화면은 가상 채팅을 섞을 때 실제 채팅을 **훈련 구간 안만** 싣는다(같은 방송 구간 밖의 원 채팅이 같은 표에 원 가림 닉네임으로 보이면 본문 대조로 가명이 이어진다). 남은 실제 줄과 본문이 같은 가상 줄은 한 번 더 뺀다(`trainer_view._clip_mixed`, 2026-10-22 검토 수정) | 합성 데이터 시험 · '가상 줄 본문과 같은 실제 줄 0개'(`test_trainer_view`·`test_training_menu`) |
-| 4 | **혐오·괴롭힘·성적 표현** | (1) 로컬 금칙어 목록으로 1차 거름 (2) 같은 LM Studio 로 '예/아니오' 확인 한 번 더 (3) 걸린 줄은 버리고 건수만. `retrieved` 도 (1) 을 거친다 | 합성 금칙어로 버려지는지 |
+| 3 | 옮겨 온 실제 채팅이 다른 맥락에서 실제 시청자 이름과 붙는다 | `retrieved` 도 가림 이름을 새로 붙이고, 다른 시청자 닉네임이 든 채팅은 뺀다. 훈련 화면은 가상 채팅을 섞을 때 실제 채팅을 **훈련 구간 안만** 싣는다(같은 방송 구간 밖의 원 채팅이 같은 표에 원 가림 닉네임으로 보이면 본문 대조로 가명이 이어진다). 남은 실제 줄과 본문이 같은 가상 줄은 한 번 더 뺀다(`trainer_view._clip_mixed`, 2026-10-22 검토 수정). core 쪽도 막는다: `core.training.split_mixed` 는 섞기 결과(`merge_for_display` 의 MergeResult·DisplayRow)를 받으면 실제 줄이 0개여도 실제 채팅을 다시 붙이지 않는다(21 4-2 18번). 가명은 줄마다 달라(D-20 7) 이름으로 줄을 묶을 수도 없다 | 합성 데이터 시험 · '가상 줄 본문과 같은 실제 줄 0개'(`test_trainer_view`·`test_training_menu`) · 섞기 결과에 실제 줄을 다시 붙이지 않음·같은 시청자 줄도 이름이 다름(`test_training`·`test_retrieve`) |
+| 4 | **혐오·괴롭힘·성적 표현** | (1) 로컬 금칙어 목록으로 1차 거름 (2) 같은 LM Studio 로 '예/아니오' 확인 한 번 더 (3) 걸린 줄은 버리고 건수만. `retrieved` 도 (1) 을 거친다. 목록 파일은 저장소 밖(11장 6번)에 있고 2026-10-22 에 Claude 가 짧게 만들었다(D-20 6). 파일이 없으면 경고만 내고 거르기 0낱말로 만들고, 있는데 읽지 못하면 만들지 않는다(`bad_blocklist`) | 합성 금칙어로 버려지는지, 기본 경로를 읽고 해시만 적는지, 없을 때 경고·깨졌을 때 거부(`test_retrieve`) |
 | 5 | 생성 글이 실제 채팅을 거의 그대로 베낀다(실제 시청자 말이 '가짜' 로 둔갑) | 같은 프로젝트 실제 채팅과 정규화 뒤 같거나 글자 5-gram 겹침 0.8 이상이면 버림(`copy_max`) | 합성 |
 | 6 | 가상 채팅이 정답지에 섞인다 | `scenarios\` 는 라벨링 세션이 열지 않는다(열기 감시 시험). 라벨 형식 고정 시험 통과. 내보내기는 `scenarios\` 를 읽지 않는다 | test_blind 류 + frozen + pilot_freeze |
 | 7 | 시범 프로젝트 오염 | 엔진 `pilot_locked` 거부, 앱 메뉴 꺼짐, retrieved 후보에서 `pilot-*` 뺌 | 폴더 이름 시험 |
@@ -294,6 +296,7 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 | H-6 | 문서 맞추기: 03(시나리오·generation_ref·protected_zone), 05(새 파일 등급), 06 4-7(가려내기 한 줄), README-tools(LM Studio 켜는 법) | 문서와 코드가 같은 말. 7장 관문 통과 여부를 적음(실패여도 '끝' — 결과를 적었으면) | 0.5 |
 | **합계** | | | **5~7.5** (D-03 의 H 5~8 안) |
 
+- 진행(2026-10-22, 21 1-4): H-1·H-2·H-4 됨. 다만 H-1 의 '라벨링 세션 4종이 `scenarios\` 를 0번 연다' 는 **일부** — 메인 창 라벨링 세션 시험 1개와 시범 막기 시험만 있다. 4종(`primary`·`relabel_same`·`relabel_second`·`adjudication`, 출처 판정도) 각각에 `os.listdir`·`open` 감시를 붙이는 것이 남았다(21 4-2 6번, 02 11-1).
 - 전체 시험은 앱 `.venv` + `QT_QPA_PLATFORM=offscreen`, 엔진 시험은 엔진 venv. LM Studio 가 필요한 시험은 `local_only` 로 표시하고 꺼져 있으면 건너뛴다.
 - 실제 데이터 시험은 `<P>` 의 **사본**에서만 하고 사본은 `shutil.rmtree` 로 지운다(휴지통 금지).
 
@@ -308,11 +311,11 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 | 3 | 실제 채팅이 하나도 없는 영상(예: 혼자 녹화한 연습 영상) | 첫 판은 하지 않는다. replay 가 없으면 견줄 것이 없다. 수요가 있으면 H 뒤 '전부 가상' 모드를 따로 정한다 |
 | 4 | 기준(최종 세트·손라벨 CSV)이 없는 구간에서 가상 채팅 연습 | 첫 판은 F 처럼 끈다(D-18 7 과 같은 관문). 작은 방송 연습이 필요하면 '점수 없이 고른 수만' 을 다음 판에서 연다 |
 | 5 | 외부 AI 를 H 에 넣나 | 넣지 않는다. 7-3 관문을 두 번 실패하고 05 11-3 확인이 끝난 뒤 사용자에게 묻는다 |
-| 6 | 금칙어 목록을 어디 두나 | 저장소 밖 `chatcoach-data\config\blocklist-ko.txt`, 엔진이 해시를 시나리오 `filters` 에 적는다. 시험은 합성 낱말 목록으로 한다 |
+| 6 | 금칙어 목록을 어디 두나 | 저장소 밖 `chatcoach-data\config\blocklist-ko.txt`, 엔진이 해시를 시나리오 `filters` 에 적는다. 시험은 합성 낱말 목록으로 한다. **됨**(D-20 6): 파일은 Claude 가 짧게 만들었고(내용은 저장소·보고에 옮기지 않음), 도구 기본 경로가 이 파일이다 |
 | 7 | LLM 입력에 실제 채팅 본문을 넣나(9장 4번) | 기본 끔. 7-3 관문을 못 넘으면 켜서 견준다(로컬, 닉네임 빼고) |
 | 8 | 어느 LLM 을 쓰나 | 이미 있는 2개 가운데 한국어가 나은 쪽 하나를 H-3 처음에 합성 문장 10개로 보고 설정에 고정. 새로 받지 않는다(18 6-5 6번) |
-| 9 | 시나리오를 앱 단추로 만들게 하나 | 첫 판은 엔진 도구만(Claude 가 돌림, 사용자 0번). 사용자가 직접 만들고 싶어 하면 '훈련 → 가상 채팅 만들기' 메뉴 1번이 엔진 도구를 부르게 한다(H 뒤) |
-| 10 | `retrieved` 도 가림 이름을 새로 붙이나 | 붙인다(8장 3번). 원 가림 닉네임을 쓰면 가려내기에서 바로 드러나고, 다른 맥락에 실제 이름을 붙이게 된다 |
+| 9 | 시나리오를 앱 단추로 만들게 하나 | 첫 판은 엔진 도구만(Claude 가 돌림, 사용자 0번). 사용자가 직접 만들고 싶어 하면 '훈련 → 가상 채팅 만들기' 메뉴 1번이 엔진 도구를 부르게 한다(H 뒤). **F 둘째 묶음에서 메뉴를 앞당겨 넣었다**(21 4-1 14번, 클릭 2). 개발용 `<P>`(`p15767532`)에는 시험 문턱으로 Claude 가 미리 1개 만들어 두었다(D-20 8, 사용자 0클릭) |
+| 10 | `retrieved` 도 가림 이름을 새로 붙이나 | 붙인다(8장 3번). 원 가림 닉네임을 쓰면 가려내기에서 바로 드러나고, 다른 맥락에 실제 이름을 붙이게 된다. **줄마다 다른 이름**으로 붙인다(D-20 7, 4-2 8번) |
 | 11 | training-event 스키마에 선택 칸을 더하는 때 | F 첫 묶음이 스키마를 만든 뒤 H-4 에서 선택 칸만 더한다. F 의 옛 기록은 그대로 읽힌다 |
 
 ---
@@ -340,7 +343,7 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 | 단계 | 파일 (새로 = ✚) |
 |---|---|
 | H-1 | ✚ `schemas/scenario.schema.json`, ✚ `app/core/scenario.py`(읽기·검사), `app/store.py`(읽기 범위), `schemas/project.schema.json`(protected_zone 기본값 설명) |
-| H-2·H-3 | ✚ `engine/scenario.py`, `engine/__main__.py`(하위 명령), ✚ `engine/lmstudio.py`(localhost 만) |
+| H-2·H-3 | ✚ `engine/scenario.py`, `engine/__main__.py`(하위 명령), ✚ `engine/lmstudio.py`(localhost 만). **실제(H-2)**: ✚ `engine/retrieve.py`(고르기) + ✚ `tools/make_scenario.py`(들어오는 곳, 앱 메뉴도 이것을 따로 프로세스로 부름). `python -m engine scenario …` 는 `engine/__main__.py` 의 `_PASSTHROUGH` 가 `tools/make_scenario.main` 에 같은 인자를 넘긴다(21 4-2 23번). 따로 `engine/scenario.py` 는 두지 않았다 |
 | H-4 | F 의 훈련 화면·`schemas/training-event.schema.json`(선택 칸) |
 | H-5 | ✚ 가려내기 화면, `app/core/origin.py` 는 **고치지 않고 부르기만** |
 | H-6 | `docs/design/03`·`05`·`06`, `README-tools` |

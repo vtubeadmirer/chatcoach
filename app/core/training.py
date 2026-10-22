@@ -13,7 +13,7 @@
     센다(구간 끝 전에 '견주기' 를 누른 경우 — 아직 지나가지 않은 채팅을 '원래만' 으로 세지 않는다).
 - 견주기 화면 도움: next_orig_only(N / Shift+N), listen_start_ms(행을 누르면 소리를 켜고 재생할 자리).
 
-- 가상 채팅(H-4, 20 5장): split_mixed 가 core.scenario.mix 결과를 화면 줄로 고르고(가림 이름·'v:' id),
+- 가상 채팅(H-4, 20 5장): split_mixed 가 core.scenario.merge_for_display 결과를 화면 줄로 고르고(가림 이름·'v:' id),
   compare_virtual 이 가상 채팅 고르기를 견주기 점수와 따로 센다('가상 채팅 m개 가운데 k개 고름').
 
 core 층: 파일·시계·난수·Qt 를 쓰지 않는다. 채팅 본문·닉네임은 다루지 않는다(chat_id·시각·숫자만, D-17 8).
@@ -409,19 +409,24 @@ def split_mixed(mixed: Iterable[Mapping], real: Sequence[Mapping] | None = None
     - 실제 줄은 그대로(같은 dict). 가상 줄은 화면용 dict 로 새로 만든다:
       {chat_id: 'v:'+line_id, t_ms: show_vod_ms, text, nickname_masked: 가림 이름 또는 '시청자N',
        viewer_id: 'virtual-N'(가명 번호용, 실제 viewer_id 모양 아님), kind: 'text', role: 'viewer', source}.
-    - mix 결과에 실제 줄이 하나도 없고 real 을 주면 real 을 앞에 더한다(가상 줄만 돌려주는 mix 도 받게).
+    - dict 목록(가상 줄만 돌려주는 mix)에 실제 줄이 하나도 없고 real 을 주면 real 을 앞에 더한다.
+      **merge_for_display 의 결과(MergeResult, 또는 DisplayRow 가 하나라도 든 목록)면 더하지 않는다** — 그 결과의 실제 줄
+      0개는 '섞기가 구간으로 잘라 남은 실제 줄이 없다' 는 뜻이다(clip_to_range). 여기서 실제 채팅 전부를 다시 붙이면
+      같은 방송 구간 밖의 원 채팅이 원 가림 닉네임으로 가상 줄과 같은 표에 보여 가명이 이어진다(20 8장 3번, 21 4-2 18번).
     - line_id 가 없거나 겹치는 가상 줄, 시각이 없는 가상 줄은 뺀다.
     """
     out: list[dict] = []
     virt: dict[str, VirtualLine] = {}
     n_real = 0
     pseudo: dict[str, int] = {}
+    from_merge = hasattr(mixed, "rows")            # core.scenario.MergeResult
     rows = getattr(mixed, "rows", mixed)           # core.scenario.MergeResult 도 받는다
     for rec in rows or ():
         if not isinstance(rec, Mapping):
             rec = _row_to_mapping(rec)
             if rec is None:
                 continue
+            from_merge = True                      # DisplayRow 목록도 섞기 결과다(실제 줄은 섞기가 이미 골랐다)
         src = _virtual_source(rec)
         if src is None:
             out.append(rec)            # 실제 채팅 — 고치지 않는다
@@ -444,7 +449,7 @@ def split_mixed(mixed: Iterable[Mapping], real: Sequence[Mapping] | None = None
                     "nickname_masked": mask or VIRTUAL_PSEUDONYM.format(n), "viewer_id": f"virtual-{n}",
                     "kind": "text", "role": "viewer", "source": src})
         virt[vid] = VirtualLine(vid, lid, src, int(t))
-    if n_real == 0 and real:
+    if n_real == 0 and real and not from_merge:
         out = [r for r in real if isinstance(r, Mapping)] + out
     return out, virt
 

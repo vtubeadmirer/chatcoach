@@ -87,7 +87,11 @@
   열기 잠금(locks/open.lock)만 잡았다 푼다. 끝에 project.json 수정 시각과 크기가 그대로인지 확인한다.
 - 사본(--store-copy·--labeling-flow)은 끝나면 지우고, 남으면 FAIL 과 경로를 찍는다. 보호 구역(chat/protected·
   derived·origin)·기존 라벨·영상은 복사하지 않는다.
-- 설정·machine.json 은 임시 데이터 폴더(--data-dir, 기본 %TEMP%\\chatcoach_smoke)에 둔다.
+- 설정·machine.json 은 임시 데이터 폴더(--data-dir, 기본 %LOCALAPPDATA%\\ChatCoachSmoke\\data)에 둔다.
+- 사본은 %LOCALAPPDATA%\\ChatCoachSmoke\\chatcoach_smoke_* 에 만든다(이 사용자만 읽는 곳, 앱의 data 폴백
+  %LOCALAPPDATA%\\ChatCoach 와는 다른 폴더). TMPDIR·%TEMP% 를 따르지 않는다 —
+  TMPDIR 이 공용 폴더를 가리키는 PC 가 있다(검토 2026-10-23). 시작할 때 1시간 넘은 지난 사본(중간에 죽은 실행이 남긴 것)을
+  shutil.rmtree 로 지우고 개수만 찍는다. 예전 위치(tempfile.gettempdir())에 남은 사본은 세기만 한다.
 - 출력은 숫자와 통과 여부만. 채팅 본문·닉네임·제목은 찍지 않는다(02 10장).
 - 스크린샷은 저장소 밖 <저장소 옆>\\chatcoach-data\\screens\\ 안에만 저장한다. 다른 곳을 주면 거부한다.
 
@@ -126,8 +130,11 @@ def parse_args(argv=None):
     ap.add_argument("--training-flow", action="store_true",
                     help="사본(+ labels\\manual-*.csv)에서 메뉴로 스트리머 훈련 열기→채팅 5개 고르기(1개 취소)→견주기→행 듣기"
                          "→기록 줄 확인")
+    ap.add_argument("--viewer-flow", action="store_true",
+                    help="사본(+ scenarios·derived\\asr.json)에서 메뉴로 시청자 훈련 열기(전사 낱말을 워커로 만듦)→합성 채팅 3개 "
+                         "쓰기(Enter)→축 단계→구간 끝 요약→닫기→기록 줄·보호 구역·노출 0 확인")
     ap.add_argument("--window-size", help="--labeling-flow 동안 메인 창 크기 (예: 1366x768, 테두리 포함)")
-    ap.add_argument("--data-dir", help="임시 데이터 폴더 (기본 %%TEMP%%\\chatcoach_smoke)")
+    ap.add_argument("--data-dir", help="임시 데이터 폴더 (기본 %%LOCALAPPDATA%%\\ChatCoachSmoke\\data)")
     ap.add_argument("--timeout", type=float, default=60.0, help="단계 하나의 대기 상한(초)")
     ap.add_argument("--screenshot-cleanup", nargs="?", const=",".join(CLEANUP_DEFAULT_PREFIXES), metavar="접두어",
                     help=f"스모크를 돌리지 않고 {SCREENS_DIR} 의 스크린샷(<접두어>_*.png, 기본 "
@@ -235,29 +242,35 @@ STEPS_TRAINING = ("tr_copy", "tr_open", "tr_menu", "tr_space", "tr_pick", "tr_co
                   "tr_cleanup")
 # 가상 채팅 만들기의 시험 문턱(스모크만). 기본값(1분에 실제 2개 이하만 채움)이면 <P> 처럼 채팅이 많은 방송은 채울 곳이 0이다
 SMOKE_SCENARIO_ARGS = ("--quiet-max-real", "45", "--target-per-min", "60")
-SKIP_MARKS = ("analysis_flow", "training_flow")
+# --viewer-flow (G 시청자 훈련 첫 묶음, 08 D-20 2·4·5, 21 6-1·6-4 5번) 의 단계. 켜면 훈련 단계 뒤(cache_drop 앞)에 붙는다.
+STEPS_VIEWER = ("vw_copy", "vw_open", "vw_menu", "vw_write", "vw_summary", "vw_close", "vw_log", "vw_privacy",
+                "vw_cleanup")
+SKIP_MARKS = ("analysis_flow", "training_flow", "viewer_flow")
 
 
-def expected_steps(analysis: bool = False, training: bool = False) -> list[str]:
+def expected_steps(analysis: bool = False, training: bool = False, viewer: bool = False) -> list[str]:
     """지금 판에서 네 흐름을 다 켰을 때 찍혀야 하는 단계 이름(c5 목록을 STEPS_RENAMED 로 바꾸고 STEPS_ADDED 를 더함).
-    analysis=True(--analysis-flow 도 켬)면 cache_drop 앞에 STEPS_ANALYSIS 를, training=True 면 그 뒤에 STEPS_TRAINING 을."""
+    analysis=True(--analysis-flow 도 켬)면 cache_drop 앞에 STEPS_ANALYSIS 를, training=True 면 그 뒤에 STEPS_TRAINING 을,
+    viewer=True 면 그 뒤에 STEPS_VIEWER 를."""
     out: list[str] = []
     for s in STEPS_C5:
         s = STEPS_RENAMED.get(s, s)
         if s not in out:
             out.append(s)
     out += [s for s in STEPS_ADDED if s not in out]
-    for on, extra in ((analysis, STEPS_ANALYSIS), (training, STEPS_TRAINING)):
+    for on, extra in ((analysis, STEPS_ANALYSIS), (training, STEPS_TRAINING), (viewer, STEPS_VIEWER)):
         if on:
             i = out.index("cache_drop") if "cache_drop" in out else len(out)
             out[i:i] = [s for s in extra if s not in out]
     return out
 
 
-def compare_steps(names, analysis: bool = False, training: bool = False) -> tuple[list[str], list[str]]:
-    """찍힌 단계 이름 → (빠진 것, 목록에 없는 것). 건너뜀 표시('analysis_flow'·'training_flow')는 대조하지 않는다."""
+def compare_steps(names, analysis: bool = False, training: bool = False,
+                  viewer: bool = False) -> tuple[list[str], list[str]]:
+    """찍힌 단계 이름 → (빠진 것, 목록에 없는 것). 건너뜀 표시('analysis_flow'·'training_flow'·'viewer_flow')는 대조하지
+    않는다."""
     seen = [s for s in dict.fromkeys(names) if s not in SKIP_MARKS]
-    want = expected_steps(analysis, training)
+    want = expected_steps(analysis, training, viewer)
     return [s for s in want if s not in seen], [s for s in seen if s not in want]
 
 
@@ -314,6 +327,94 @@ def copy_for_training(src: str, dst: str) -> list[str]:
         shutil.copy2(os.path.join(src, "labels", n), os.path.join(dst, "labels", n))
         done.append("labels/" + n)
     return done
+
+
+def copy_for_viewer(src: str, dst: str) -> list[str]:
+    """--viewer-flow 사본: 라벨링 흐름 사본(project.json · guide/ · chat/messages.jsonl) + 시나리오(scenarios/*.jsonl,
+    가상 채팅 섞기·'다른 시청자라면' 예시) + derived/asr.json(열 때 워커가 전사 낱말을 만드는 길을 실제로 본다).
+    asr.json 은 보호 구역이라 사본은 흐름 끝에 shutil.rmtree 로 지운다(remove_tree_checked). 전사 낱말 파일·라벨·잠금·
+    손라벨·영상·다른 파생 자료는 옮기지 않는다(시청자 훈련은 정답을 쓰지 않는다)."""
+    done = copy_for_flow(src, dst)
+    sdir = os.path.join(src, "scenarios")
+    if os.path.isdir(sdir):
+        names = sorted(n for n in os.listdir(sdir) if n.lower().endswith(".jsonl"))
+        if names:
+            os.makedirs(os.path.join(dst, "scenarios"), exist_ok=True)
+        for n in names:
+            shutil.copy2(os.path.join(sdir, n), os.path.join(dst, "scenarios", n))
+            done.append("scenarios/" + n)
+    asr = os.path.join(src, "derived", "asr.json")
+    if os.path.isfile(asr):
+        os.makedirs(os.path.join(dst, "derived"), exist_ok=True)
+        shutil.copy2(asr, os.path.join(dst, "derived", "asr.json"))
+        done.append("derived/asr.json")
+    return done
+
+
+def vsc_version() -> str:
+    """기본 채점기(app.core.viewer_score)의 판 — 기록 scorer 칸 'viewer_score/<판>' 대조용."""
+    from app.core import viewer_score
+    return viewer_score.VERSION
+
+
+SMOKE_TMP_PREFIX = "chatcoach_smoke_"
+SMOKE_STALE_S = 3600.0          # 이보다 오래된 사본만 지운다(동시에 도는 다른 스모크의 사본은 건드리지 않게)
+
+
+def smoke_tmp_root() -> str:
+    """스모크 임시 사본·데이터 폴더의 뿌리: %LOCALAPPDATA%\\ChatCoachSmoke (이 사용자만 읽는 곳. 앱의 data 폴백
+    %LOCALAPPDATA%\\ChatCoach 와 섞이지 않게 다른 폴더).
+
+    tempfile.gettempdir() 는 TMPDIR 을 먼저 따르는데, 이 PC 처럼 TMPDIR 이 모든 계정이 읽는 공용 폴더(예:
+    C:\\Users\\Public\\…)를 가리키면 실제 채팅·전사문 사본이 그곳에 생긴다(검토 2026-10-23). 그래서 TMPDIR 을 따르지 않는다."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    root = os.path.join(base, "ChatCoachSmoke")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def smoke_mkdtemp(kind: str) -> str:
+    """스모크 사본 폴더 하나(smoke_tmp_root 아래, 이름 chatcoach_smoke_<kind>_…)."""
+    return tempfile.mkdtemp(prefix=f"{SMOKE_TMP_PREFIX}{kind}_", dir=smoke_tmp_root())
+
+
+def purge_stale_copies(root: str | None = None, *, older_than_s: float = SMOKE_STALE_S,
+                       now: float | None = None) -> tuple[int, int]:
+    """root(기본 smoke_tmp_root) 바로 아래의 오래된 chatcoach_smoke_* 폴더를 shutil.rmtree 로 지운다(휴지통 아님).
+    중간에 죽은 스모크가 남긴 사본(실제 채팅 사본)을 다음 실행이 치운다. (지운 수, 못 지운 수). 링크는 건드리지 않는다."""
+    root = root or smoke_tmp_root()
+    now = time.time() if now is None else now
+    removed = failed = 0
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return 0, 0
+    for name in names:
+        p = os.path.join(root, name)
+        if not name.startswith(SMOKE_TMP_PREFIX) or os.path.islink(p) or not os.path.isdir(p):
+            continue
+        try:
+            if now - os.path.getmtime(p) < older_than_s:
+                continue
+        except OSError:
+            continue
+        if remove_tree_checked(p):
+            failed += 1
+        else:
+            removed += 1
+    return removed, failed
+
+
+def legacy_tmp_leftovers() -> int:
+    """예전 위치(tempfile.gettempdir())에 남은 chatcoach_smoke_* 폴더 수. 세기만 한다(지우는 것은 사용자 허락 뒤)."""
+    legacy = tempfile.gettempdir()
+    try:
+        if os.path.normcase(os.path.abspath(legacy)) == os.path.normcase(os.path.abspath(smoke_tmp_root())):
+            return 0
+        return sum(1 for n in os.listdir(legacy)
+                   if n.startswith(SMOKE_TMP_PREFIX) and os.path.isdir(os.path.join(legacy, n)))
+    except OSError:
+        return 0
 
 
 def remove_tree_checked(path: str) -> list[str]:
@@ -475,7 +576,12 @@ class Smoke:
             os.environ["QT_QPA_PLATFORM"] = "offscreen"
         sys.path.insert(0, ROOT)
         from app import paths
-        data = a.data_dir or os.path.join(tempfile.gettempdir(), "chatcoach_smoke")
+        # 사본 뿌리(%LOCALAPPDATA%\ChatCoachSmoke)의 지난 실행이 남긴 사본을 먼저 치운다(숫자만 찍는다)
+        removed, failed = purge_stale_copies()
+        legacy = legacy_tmp_leftovers()
+        print(f"== 스모크 사본 정리: 지난 사본 {removed}개 지움, 못 지움 {failed}개, 예전 TEMP 위치에 남은 사본 {legacy}개"
+              + (" (사용자 확인 뒤 지울 것)" if legacy else ""))
+        data = a.data_dir or os.path.join(smoke_tmp_root(), "data")
         os.makedirs(data, exist_ok=True)
         paths.set_data_root(data)
         self.data_root = data
@@ -694,7 +800,7 @@ class Smoke:
         from app import session as sess
         from app.ui import project_view as pvm
         from app.ui.workbench import Workbench
-        tmp = tempfile.mkdtemp(prefix="chatcoach_smoke_store_")
+        tmp = smoke_mkdtemp("store")
         dst = os.path.join(tmp, "p")
         leftover: list[str] = []
         try:
@@ -796,7 +902,7 @@ class Smoke:
             return self.check("labeling_flow", True, t0, "skip (--labeling-flow 없음)")
         from app import session as sess
         from app.core import phase as ph
-        tmp = tempfile.mkdtemp(prefix="chatcoach_smoke_flow_")
+        tmp = smoke_mkdtemp("flow")
         dst = os.path.join(tmp, "한글 사본", "프로젝트")
         out_zip = os.path.join(tmp, "내보내기", "labels.zip")
         ok_all = True
@@ -1166,7 +1272,7 @@ class Smoke:
     def _flow_copy(self, prefix: str) -> tuple[str, str, str, list[str]]:
         """한글 임시 사본(…\\projects\\프로젝트)을 만들고 시험 라벨러 둘을 명부에 넣는다. (tmp, dst, out_root, 복사한 파일)."""
         from app import session as sess
-        tmp = tempfile.mkdtemp(prefix=f"chatcoach_smoke_{prefix}_")
+        tmp = smoke_mkdtemp(prefix)
         dst = os.path.join(tmp, "한글 사본", "projects", "프로젝트")
         out_root = os.path.join(tmp, "보고서")             # 사본 옆 임시 폴더 (프로젝트 밖)
         done = copy_for_flow(self.args.project, dst)
@@ -1998,7 +2104,7 @@ class Smoke:
         from app import training_store as ts
         from app.core import exposure as ex
         from app.core import training as trc
-        tmp = tempfile.mkdtemp(prefix="chatcoach_smoke_tr_")
+        tmp = smoke_mkdtemp("tr")
         dst = os.path.join(tmp, "한글 사본", "projects", "프로젝트")
         clicks_total = 0
         try:
@@ -2207,6 +2313,279 @@ class Smoke:
                 self.check("tr_cleanup", False, t0, f"임시 사본을 다 지우지 못함({len(leftover)}개, {tmp}) — 직접 지우세요")
             else:
                 self.check("tr_cleanup", True, time.perf_counter(), f"사본 지움 (흐름 전체 {time.perf_counter() - t0:.1f}초)")
+
+    # ---------------------------------------------------------------- G 시청자 훈련 (08 D-20 2·4·5, 21 6-1·6-4 5번)
+    @staticmethod
+    def _viewer_topic_words(dst: str, seg) -> tuple[int | None, list[str]]:
+        """전사 낱말 파일에서 구간 안 창 하나와 그 창의 낱말 2개(주제 맞는 질문을 합성할 재료) → (쓸 VOD 시각, 낱말).
+        낱말은 화면·기록(사본 안)에만 쓰고 찍지 않는다. 흔한 낱말·말버릇·열린 질문 낱말·조사 붙은 꼴은 뺀다."""
+        import re
+        from app import viewer_flow as vf
+        from app.core import ko_cues, textnorm
+        try:
+            doc = vf.read_words(dst)
+        except (OSError, ValueError):
+            doc = None
+        from app.core import viewer_score as vsc
+        skip = set(ko_cues.GENERIC_WORDS) | set(ko_cues.FILLER_WORDS) | set(ko_cues.OPEN_QUESTION_WORDS)
+        wins = (doc or {}).get("windows") or ()
+        # 채점기가 문서 빈도로 빼는 흔한 낱말(전사 창 20% 이상)도 뺀다(viewer_score 0.2 의 _drop_common 과 같은 문턱)
+        s = vsc.DEFAULT_SETTINGS
+        if len(wins) >= s.talk_common_min_windows:
+            df: dict[str, int] = {}
+            for w in wins:
+                for x in set(w["words"]):
+                    df[x] = df.get(x, 0) + 1
+            skip |= {x for x, n in df.items() if n * 100 >= len(wins) * s.talk_common_pct}
+        hangul = re.compile(r"\A[가-힣]{2,6}\Z")
+        for w in wins:
+            if not (seg[0] + 30_000 <= w["start_ms"] and w["end_ms"] + 30_000 <= seg[1]):
+                continue
+            words = [x for x in w["words"] if hangul.match(x) and x not in skip and textnorm.strip_particle(x) == x]
+            pick: list[str] = []
+            for x in words:
+                if all(x[:2] != y[:2] and x not in y and y not in x for y in pick):
+                    pick.append(x)
+                if len(pick) == 2:
+                    return w["end_ms"] + 3_000, pick
+        return None, []
+
+    def step_viewer_flow(self) -> bool:
+        """메뉴로 시청자 훈련 열기(전사 낱말은 열 때 워커로) → 합성 채팅 3개를 쓰기 칸에 넣고 진짜 Enter(주제 맞는 질문 ·
+        이모티콘만 · 앞 글 베끼기) → 축 단계 → 구간 끝까지 재생해 요약 → 닫기 → 기록 줄·본문 새는 곳·보호 구역·백업 제외·
+        노출 0. 사람 클릭 수(D-16)를 단계마다 clicks= 로 찍는다(키는 keys= 따로). 본문·낱말·닉네임은 찍지 않는다."""
+        t0 = time.perf_counter()
+        if not self.args.viewer_flow:
+            return self.check("viewer_flow", True, t0, "skip (--viewer-flow 없음)")
+        if not self.args.video or not os.path.isfile(self.args.video):
+            return self.check("viewer_flow", False, t0, "영상(--video)이 있어야 합니다 — 시청자 훈련은 소리 켠 다시보기")
+        import json
+        import logging
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication
+        from app import backup, exposure_io
+        from app import reference_set as rsm
+        from app import training_store as ts
+        from app import viewer_flow as vf
+        from app import viewer_store as vs
+        from app.core import exposure as ex
+        from app.ui.viewer_train_view import input_fields
+        tmp = smoke_mkdtemp("vw")
+        dst = os.path.join(tmp, "한글 사본", "projects", "프로젝트")
+        clicks, keys = 0, 0
+        texts: list[str] = []
+        emitted: list = []
+        logged: list[str] = []
+
+        class _Cap(logging.Handler):
+            def emit(self, record):
+                try:
+                    logged.append(record.getMessage())
+                except Exception:  # noqa: BLE001
+                    pass
+        cap = _Cap(logging.DEBUG)
+        logging.getLogger().addHandler(cap)
+        try:
+            done = copy_for_viewer(self.args.project, dst)
+            n_scn = sum(1 for d in done if d.startswith("scenarios/"))
+            has_asr = "derived/asr.json" in done
+            ok = has_asr and not rsm.is_pilot_project(dst) and not vf.is_pilot_name(dst)
+            self.check("vw_copy", ok, t0, f"copied={len(done)} scenarios={n_scn} asr={has_asr} "
+                                          f"words_before={os.path.exists(vf.words_path(dst))}")
+            if not ok:
+                return False
+            if self.args.window_size:
+                self._resize(self.args.window_size)
+            # ---- 열기: 보기 전용(세션 화면 '보기 전용' 1번) + 사본에 영상 연결
+            t1 = time.perf_counter()
+            ok = self._open_view_only(dst)
+            if ok:
+                self._connect_copy_media(self.wb)
+                ok = self.wait(lambda: bool(self.wb.media_path) and self.wb.chat_data.count > 0
+                               and "chat" not in self.wb._jobs)
+            clicks += 1
+            self.check("vw_open", ok, t1, f"view_only={self.wb.session is None if self.wb else '-'} "
+                                          f"chats={self.wb.chat_data.count if self.wb else 0} clicks=1(세션 화면 '보기 전용')")
+            if not ok:
+                return False
+            # ---- 메뉴 '훈련 → 시청자 훈련' 한 번 (전사 낱말이 없으면 열 때 워커가 만든다 — 진행 창, 사람 클릭 0)
+            t1 = time.perf_counter()
+            self.win.m_training.aboutToShow.emit()
+            enabled = self.win.a_viewer_training.isEnabled()
+            reason_len = len(self.win.a_viewer_reason.text()) if not enabled else 0
+            t_menu = time.perf_counter()
+            self.win.a_viewer_training.trigger()
+            view = self.win.viewer_view
+            ok = enabled and view is not None and self.win.stack.currentWidget() is view and view.state() == "training"
+            playing = ok and self.wait(lambda: view.player.is_playing(), 20)
+            open_ms = (time.perf_counter() - t_menu) * 1000
+            w_code, w_doc = vf.words_status(dst, self.wb.project.data)
+            n_win = len((w_doc or {}).get("windows") or ())
+            sids = vs.list_sessions(dst)
+            recs0 = vs.read_valid(vs.session_path(dst, sids[0]))[0] if len(sids) == 1 else []
+            no_dialog = QApplication.activeModalWidget() is None
+            n_inputs = len(input_fields(view)) if view is not None else -1
+            if view is not None:
+                view.viewerEvent.connect(lambda d: emitted.append(d))
+                view.writeScored.connect(lambda d: emitted.append(d))
+                view.summaryShown.connect(lambda d: emitted.append(d))
+                view.messageShown.connect(lambda s: emitted.append(s))
+            self.pump(300)
+            fit = self._fit(view) if view is not None else "-"
+            fit_ok = "/outside=0" in fit and "/hscroll=n" in fit
+            ok = ok and playing and not view.is_muted() and no_dialog and n_inputs == 1 and w_code == vf.W_OK \
+                and n_win > 0 and [r["kind"] for r in recs0] == [vs.K_START] and fit_ok \
+                and (view.virtual_line_count() > 0 or n_scn == 0)
+            clicks += 2
+            seg = view._segment if view is not None else None
+            self.check("vw_menu", ok, t1, f"enabled={enabled} reason_len={reason_len} autoplay={playing} "
+                                          f"muted={view.is_muted() if view else '-'} modal_dialog={not no_dialog} "
+                                          f"input_fields={n_inputs} words={w_code} windows={n_win} "
+                                          f"virtual_lines={view.virtual_line_count() if view else 0} "
+                                          f"range_ms={seg[1] - seg[0] if seg else 0} start_lines={len(recs0)} "
+                                          f"fit={fit} open_to_play_ms={open_ms:.0f} "
+                                          f"clicks=2(메뉴 '훈련' + '시청자 훈련')")
+            if not ok:
+                return False
+            self.pump(800)
+            # ---- 합성 채팅 3개: 쓰기 칸에 넣고 진짜 Enter (한글 keyClicks 는 PySide6 가 죽어 insert 로 넣는다)
+            t1 = time.perf_counter()
+            at, words = self._viewer_topic_words(dst, seg)
+            if at is None:
+                return self.check("vw_write", False, t1, "구간 안에서 낱말 2개가 든 전사 창을 찾지 못함")
+            view.seek_vod(at)
+            self.pump(300)
+            q_topic = f"{words[0]} {words[1]} 어떻게 된 거예요?"   # 합성: 주제 맞는 열린 질문(전사 낱말 2개)
+            q_emote = "{:zz_test_01:}{:zz_test_01:}"                # 합성: 이모티콘만
+            q_copy = q_topic                                         # 앞 글(내가 쓴 첫 글) 베끼기
+            texts[:] = [q_topic, q_emote]
+            self.win.activateWindow()
+            res = []
+            still_playing = []
+            for text in (q_topic, q_emote, q_copy):
+                view.input.setFocus()
+                view.input.clear()
+                view.input.insert(text)
+                QTest.keyClick(view.input, Qt.Key_Return)
+                keys += 1
+                self.pump(50)
+                res.append(view.last_result() if view.write_count() == len(res) + 1 else None)
+                still_playing.append(bool(view.player.is_playing()))
+            got = [tuple((r or {}).get("levels", {}).get(a) for a in ("topic", "expand", "repeat")) for r in res]
+            codes = [tuple((r or {}).get("codes", {}).get(a) for a in ("topic", "expand", "repeat")) for r in res]
+            marks = view.chat.label_marks() if hasattr(view.chat, "label_marks") else {}
+            ok = None not in res and got[0] == ("good", "good", "good") and got[1][:2] == ("weak", "weak") \
+                and got[2][2] == "weak" and codes[2][2] == "repeat.self_same" and all(still_playing) \
+                and view.input.text() == "" and len(view.practice_ids()) == 3 and len(marks) == 3
+            self.check("vw_write", ok, t1, "levels=" + ";".join("/".join(str(x) for x in g) for g in got)
+                       + " codes=" + ";".join("/".join(str(x) for x in c) for c in codes)
+                       + f" kept_playing={sum(still_playing)}/3 practice_rows={len(view.practice_ids())} "
+                         f"marks={len(marks)} keys=3(Enter) clicks=0")
+            if not ok:
+                return False
+            # ---- 구간 끝: 끝 바로 앞으로 옮겨 재생이 구간 끝에 닿으면 요약이 저절로 (사람 클릭 0)
+            t1 = time.perf_counter()
+            view.seek_vod(seg[1] - 2_500)
+            if not view.player.is_playing():
+                view.toggle_play()
+            reached = self.wait(lambda: view.state() == "summary", 30)
+            via = "segment_end"
+            if not reached:                                          # 재생이 안 되는 환경
+                view.show_summary("segment_end")
+                via = "fallback"
+            s = view.summary() or {}
+            n_ex = s.get("examples", 0)
+            ok = view.state() == "summary" and s.get("writes") == 3 and not view.input.isEnabled() \
+                and (n_ex > 0 or view.virtual_line_count() == 0) and self.wait(lambda: not view.player.is_playing(), 5)
+            lv = s.get("levels") or {}
+            self.check("vw_summary", ok, t1, f"via={via} writes={s.get('writes')} examples={n_ex} "
+                                             + " ".join(f"{a}={lv.get(a, {}).get('good', 0)}/{lv.get(a, {}).get('ok', 0)}/"
+                                                        f"{lv.get(a, {}).get('weak', 0)}" for a in ("topic", "expand",
+                                                                                                    "repeat"))
+                                             + " clicks=0")
+            if not ok:
+                return False
+            # 요약 화면은 찍지 않는다: '다른 시청자라면' 칸에 실제 채팅 본문(가림 이름과 함께)이 보이기 때문(검토 2026-10-23).
+            # 숫자는 위 vw_summary 줄에 이미 있다.
+            # ---- 닫기 한 번 → 작업대로
+            t1 = time.perf_counter()
+            view.btn_close.click()
+            self.pump(100)
+            ok = self.win.viewer_view is None and self.win.stack.currentWidget() is self.wb
+            clicks += 1
+            self.check("vw_close", ok, t1, f"back_to_workbench={ok} clicks=1(닫기)")
+            # ---- 기록 줄: start · write ×3 · end(segment_end). 쓴 글은 viewer\ 기록에만, 신호·로그·다른 파일에는 0
+            t1 = time.perf_counter()
+            sids = vs.list_sessions(dst)
+            recs, summ = vs.read_valid(vs.session_path(dst, sids[0])) if len(sids) == 1 else ([], {})
+            kinds = [r["kind"] for r in recs]
+            want = [vs.K_START, vs.K_WRITE, vs.K_WRITE, vs.K_WRITE, vs.K_END]
+            lv_rec = [tuple((r["body"].get("scores") or {}).get(a, {}).get("level") for a in ("topic", "expand", "repeat"))
+                      for r in recs if r["kind"] == vs.K_WRITE]
+            scorer = {r["body"].get("scorer") for r in recs if r["kind"] == vs.K_WRITE}
+            end_reason = recs[-1]["body"].get("reason") if recs else None
+            blobs_sig = json.dumps(emitted, ensure_ascii=False, default=str)
+            leak_sig = sum(1 for t in texts if t in blobs_sig)
+            leak_log = sum(1 for t in texts for m in logged if t in m)
+            leak_files = 0
+            for d, _dirs, files in os.walk(dst):
+                rel_d = os.path.relpath(d, dst).replace(os.sep, "/")
+                if rel_d == "viewer" or rel_d.startswith("viewer/"):
+                    continue
+                for f in files:
+                    try:
+                        b = open(os.path.join(d, f), "rb").read()
+                    except OSError:
+                        continue
+                    leak_files += sum(1 for t in texts if t.encode("utf-8") in b)
+            in_log_file = sum(1 for t in texts if t.encode("utf-8") in
+                              open(vs.session_path(dst, sids[0]), "rb").read()) if len(sids) == 1 else 0
+            ok = kinds == want and summ.get("invalid", 0) == 0 and lv_rec == got and end_reason == "segment_end" \
+                and leak_sig == 0 and leak_log == 0 and leak_files == 0 and in_log_file == 2 \
+                and scorer == {f"viewer_score/{vsc_version()}"}
+            self.check("vw_log", ok, t1, f"sessions={len(sids)} lines={len(recs)} kinds_ok={kinds == want} "
+                                         f"invalid={summ.get('invalid')} levels_match={lv_rec == got} "
+                                         f"end_reason={end_reason} scorer={','.join(sorted(map(str, scorer)))} "
+                                         f"text_in_signals={leak_sig} text_in_app_log={leak_log} "
+                                         f"text_in_other_files={leak_files} text_in_viewer_log={in_log_file}/2")
+            # ---- 보호 구역·백업(내보내기) 제외·노출 0
+            t1 = time.perf_counter()
+            pdata = self.wb.project.data
+            zone = backup.protected_patterns(pdata)
+            rel_log = f"viewer/{sids[0]}.jsonl" if sids else "viewer/-"
+            protected = backup.in_protected_zone(rel_log, zone) and backup.in_protected_zone("derived/asr-words.json",
+                                                                                              zone)
+            sel = backup.select_files(dst, include_chat=True, include_protected=False, project=pdata)
+            n_out = sum(1 for r in sel if r.replace("\\", "/").startswith(("viewer/", "derived/")))
+            later = ex.SessionInfo("L99-P-20991231-zz99", "primary", "2099-12-31T00:00:00+09:00")
+            xv, _w = exposure_io.compute_for(dst, [later], include_unseals=False)
+            n_train = len(ts.list_sessions(dst))
+            ok = protected and n_out == 0 and n_train == 0 and xv.exposed_any() == frozenset()
+            self.win.m_training.aboutToShow.emit()
+            self.check("vw_privacy", ok, t1, f"protected_zone={protected} backup_or_export_files={n_out} "
+                                             f"training_logs={n_train} later_session_exposed={len(xv.exposed_any())} "
+                                             f"menu_enabled_again={self.win.a_viewer_training.isEnabled()} "
+                                             f"human_clicks_total={clicks} keys_total={keys}")
+            print(f"    사람 클릭 합계: 보기 전용 1 + 메뉴 2 + 쓰기 0(Enter {keys}) + 요약 0 + 닫기 1 = {clicks} (키 {keys})")
+            return ok
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc(limit=3)
+            return self.check("viewer_flow", False, t0, type(e).__name__)
+        finally:
+            logging.getLogger().removeHandler(cap)
+            texts.clear()
+            if self.win is not None and getattr(self.win, "viewer_view", None) is not None:
+                self.win.close_viewer_training()
+            if self.wb is not None and getattr(self.wb, "project", None) is not None and _inside(self.wb.project.root, tmp):
+                self.win.show_home()
+                self.pump(50)
+            leftover = remove_tree_checked(tmp)
+            if leftover:
+                self.check("vw_cleanup", False, t0, f"임시 사본을 다 지우지 못함({len(leftover)}개, {tmp}) — 직접 지우세요")
+            else:
+                self.check("vw_cleanup", True, time.perf_counter(),
+                           f"사본 지움(shutil.rmtree, 남은 것 0) (흐름 전체 {time.perf_counter() - t0:.1f}초)")
 
     @staticmethod
     def _file_set(root: str) -> set[str]:
@@ -2538,7 +2917,8 @@ class Smoke:
         steps = [self.step_window, self.step_open, self.step_chat, self.step_timeline, self.step_video, self.step_waveform,
                  self.step_seek, self.step_chat_activate, self.step_play, self.step_zoom, self.step_filter,
                  self.step_store_copy, self.step_shot, self.step_labeling_flow, self.step_agreement_flow,
-                 self.step_adjudication_flow, self.step_analysis_flow, self.step_training_flow, self.step_close]
+                 self.step_adjudication_flow, self.step_analysis_flow, self.step_training_flow, self.step_viewer_flow,
+                 self.step_close]
         t_all = time.perf_counter()
         for st in steps:
             try:
@@ -2561,13 +2941,14 @@ class Smoke:
         steps_ok = True
         a = self.args
         if a.store_copy and a.labeling_flow and a.agreement_flow and a.adjudication_flow and not failed:
-            an, trn = bool(a.analysis_flow), bool(a.training_flow)
-            missing, extra = compare_steps((r[0] for r in self.results), analysis=an, training=trn)
+            an, trn, vw = bool(a.analysis_flow), bool(a.training_flow), bool(a.viewer_flow)
+            missing, extra = compare_steps((r[0] for r in self.results), analysis=an, training=trn, viewer=vw)
             steps_ok = not missing
             seen = [s for s in dict.fromkeys(r[0] for r in self.results) if s not in SKIP_MARKS]
             print(f"== 단계 목록(14 c5 의 49{f' + E 분석 {len(STEPS_ANALYSIS)}' if an else ''}"
-                  f"{f' + F 훈련 {len(STEPS_TRAINING)}' if trn else ''} 와 대조, 15 5-2 의 16): {len(seen)}"
-                  f"/{len(expected_steps(an, trn))} missing={missing} extra={extra}")
+                  f"{f' + F 훈련 {len(STEPS_TRAINING)}' if trn else ''}"
+                  f"{f' + G 시청자 {len(STEPS_VIEWER)}' if vw else ''} 와 대조, 15 5-2 의 16): {len(seen)}"
+                  f"/{len(expected_steps(an, trn, vw))} missing={missing} extra={extra}")
         if self._wd_gaps:
             tot = sum(g for _s, g, _c in self._wd_gaps)
             print(f"== external_suspend: 프로세스 전체가 멈춘 구간 {len(self._wd_gaps)}번, 합 {tot:.1f}초 "

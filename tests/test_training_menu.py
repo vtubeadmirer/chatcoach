@@ -163,7 +163,8 @@ def test_menu_one_click_opens_trainer_and_logs_exposure(win, proj):  # noqa: F81
     root = proj["root"]
     titles = [a.text() for a in win.menuBar().actions()]
     assert titles.index("훈련(&T)") == titles.index("분석(&I)") + 1
-    assert [a.text() for a in win.m_training.actions() if a.isVisible()] == ["스트리머 훈련(&S)"]
+    assert [a.text() for a in win.m_training.actions() if a.isVisible() and not a.isSeparator()] == \
+        ["스트리머 훈련(&S)", "시청자 훈련(&W)"]                     # G 시청자 훈련(D-20 2)은 구분선 아래
     win.update_training_actions()                                  # 프로젝트 없음
     assert not win.a_streamer_training.isEnabled() and win.a_training_reason.isVisible()
 

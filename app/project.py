@@ -39,7 +39,7 @@ SLUG_TITLE_CHARS = 30
 FORBIDDEN_CHARS = set('\\/:*?"<>|')
 WINDOWS_RESERVED = frozenset({"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(10)),
                               *(f"LPT{i}" for i in range(10)), "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"})
-DEFAULT_PROTECTED_ZONE = ["chat/protected/", "derived/asr*", "derived/ocr*", "origin/", "scenarios/"]   # scenarios/: H-1(20 3장, D-05)
+DEFAULT_PROTECTED_ZONE = ["chat/protected/", "derived/asr*", "derived/ocr*", "origin/", "scenarios/", "viewer/"]   # scenarios/: H-1(20 3장, D-05). viewer/: G 시청자 연습 글(D-20 4)
 DEFAULT_PURPOSE = "분석 엔진 평가용 정답 라벨 작성(시범)"
 DEFAULT_GUIDE_VERSION = "0.1"
 SAVE_RETRY_DELAYS = (0.1, 0.3, 1.0, 3.0)   # 8-3: os.replace 실패 시 다시 시도하는 간격(초)

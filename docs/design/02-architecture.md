@@ -242,9 +242,10 @@ flowchart TB
 | `app/core/topics.py` · `app/ui/summary_view.py` · `app/ui/topic_track.py` | 주제 흐름(엔진이 냄, 앱은 보이기만) 검사·방송 요약 계산 / 요약 표 화면 / 타임라인 위 주제 띠. 화면 둘은 디스크를 열지 않는다. 띠에는 주제 이름만(D-17 8) | analysis_flow | 순수 함수 · 위젯 | E (D-01, D-17 5·8) |
 | `app/exposure_io.py` | 노출 판정(`core.exposure`)의 입력 모으기: 계획 취소 기록·`seal.jsonl` 의 해제 줄·**훈련 기록의 `training.start` 줄**(규칙 5, `project_trainings`). 라벨 파일·봉인 원본·runs 는 열지 않는다 | core.exposure | Qt 없음 | E·F (D-18 7) |
 | `app/reference_set.py` | **훈련 기준 '원래 반응'** 읽기와 훈련 메뉴 켜기 판단(`training_availability`): 사람 최종 세트(세션 밖 읽기, 잠긴 세션만), 없으면 `labels\manual-*.csv` 이름 순 첫 파일(읽기만). 시범 프로젝트는 시범 세션이 모두 잠기기 전에는 아무 라벨도 읽지 않는다 | export, seal | Qt 없음 | F (D-18 7) |
-| `app/core/training.py` · `app/training_store.py` | 고르기(pick·unpick)·견주기(같음·나만·원래만·맞힌 비율·시각 차 중앙값) 순수 계산 / `training\<id>.jsonl` 쓰기·읽기(training-event 스키마 검사, 본문·닉네임 칸 없음, 시범은 잠기기 전 거부) | reference_set, jsonl | 순수 함수 · 파일 | F (D-18 6·8, [03](03-data-model.md) 6-16) |
+| `app/core/training.py` · `app/training_store.py` | 고르기(pick·unpick)·견주기(같음·나만·원래만·맞힌 비율·시각 차 중앙값) 순수 계산 / `training\<id>.jsonl` 쓰기·읽기(training-event 스키마 검사, 본문·닉네임 칸 없음, 시범은 잠기기 전 거부). 가상 채팅을 섞은 화면 줄은 `split_mixed`: `core.scenario.merge_for_display` 결과(MergeResult·DisplayRow)면 그 실제 줄만 쓰고 **실제 채팅을 다시 붙이지 않는다**(구간으로 잘라 0줄이어도 — 20 8장 3번, 21 4-2 18번). 가상 줄만 든 dict 목록일 때만 실제 채팅을 앞에 붙인다 | reference_set, jsonl | 순수 함수 · 파일 | F (D-18 6·8, [03](03-data-model.md) 6-16) |
 | `app/ui/trainer_view.py` · `app/ui/train_compare_view.py` | **스트리머 훈련 화면**: 소리 끈 다시보기·흐르는 채팅(재생 위치까지만)·타임라인·'고른 수 n', 채팅 한 번 누르기 = 읽겠다. 견주기 화면(Ctrl+Enter): 같음·나만·원래만 표, 행을 누르면 소리를 켜고 원래 대답 앞뒤를 듣는다. 입력 칸 없음. 메인 창(`mainwindow`)이 작업대 위에 쌓고, 라벨링·출처 판정 세션에서는 '보기 전용으로 다시 열고 훈련'(D-19 3) | core.training, training_store, chat_panel, timeline, player | 작업대 부품 재사용 | F (D-16, D-18 6, D-19 3·4) |
 | `app/core/scenario.py` · `app/scenario_store.py` | **가상 채팅 시나리오**(H-1·H-2·H-4): 시나리오 검사·조립·실제 채팅과 시간축 섞기 / `scenarios\SC-*.jsonl` 원자 쓰기·읽기. `messages.jsonl`·`labels\` 와 섞지 않고, 가상 줄은 늘 출처 칸으로 표시한다. 라벨링 세션은 `scenarios\` 를 열지 않는다 | — | 순수 함수 · 파일 | H (D-05, D-19 2, [20](20-plan-virtual-chat.md)) |
+| `engine/retrieve.py` · `tools/make_scenario.py` | **가상 채팅 'retrieved' 고르기**(H-2): 드문 1분 창 → 같은 방송 구간 밖·같은 `channel_id` 프로젝트 후보 → 거르기 → 주제 낱말 점수 → seed 로 시각 흩기. 가림 이름은 **줄마다 다르다**(D-20 7). 금칙어는 저장소 밖 `<데이터 폴더>\config\blocklist-ko.txt` 를 읽고 시나리오에는 해시만(D-20 6, 없으면 경고만). 문턱은 `--threshold Q/T`(`test` = 45/60, 기본 2/6) 또는 `--quiet-max-real`·`--target-per-min`. 표준 라이브러리 + 순수 모듈 `app.core.textnorm`(낱말 규칙, 앱 채점기와 같이 씀, D-20 3)만. 쓰기는 도구가 `app.scenario_store.write_scenario` 로. 앱은 도구를 **따로 프로세스로** 부른다(`app/scenario_mix.py`, 앱은 engine 을 import 하지 않음). `python -m engine scenario …` 는 `engine/__main__.py` 의 `_PASSTHROUGH` 로 `tools/make_scenario.main` 에 같은 인자를 그대로 넘긴다(21 4-2 23번) — 규칙·출력은 도구 하나에만 있다 | app.core.scenario, scenario_store, reference_set(시범 판단) | 표준 라이브러리 | H (D-19 2, D-20 6·7·8) |
 | `compare_view` · `origin_match` | 사람끼리 비교 화면(06 4-9 첫 장), 가상 채팅 생성 기록 대조기. (옛 `missed_view` 는 `forms/missed_form.py`, `relabel_view` 는 `relabel_dialog.py`·`session_dialog.py`, `origin_view` 는 `ui/origin_view.py` 로 만들었고, `ai_compare` 는 E 의 `app/ai_compare.py` 로 옮겼다, D-15 7) | — | — | v1 (`origin_match` 는 H 와 같이) |
 
 ### 3-3. 모듈 사이의 계약
@@ -785,7 +786,7 @@ sequenceDiagram
 | 재라벨 계획 취소 | 메뉴 '세션 → 재라벨 계획 취소…'(조정 세션에서만) 대화상자 하나. 조정 화면 아래 칸의 취소 칸은 지웠다 | C단계 (D-12 7, D-13 1, D-14 1·2) |
 | `relabel_second` 계획 · 출처 판정 대상 만들기 | 조정 화면 아래 칸 | C단계 (D-14 1, 15 1-2 7·9번) |
 | 프로젝트 백업 · 되살리기 · 지우기(휴지통) | 메뉴 '파일'. `ui/ops_dialogs.py` | C 마무리 (M4, 16 5-2 1번) |
-| 방송 분석 (나란히 보기) | 메뉴 '분석 → 엔진과 나란히 보기'(분석 세션). 해제된 엔진 판정 ↔ 최종 세트. 해제 전에는 열지 않고 '봉인됨 n건' 만(D-18 3). run 이 둘 이상이면 판 고르기·판끼리 견주기 | E (D-14 8, D-15 7, 17 6-1 4번) |
+| 방송 분석 (나란히 보기) | 메뉴 '분석 → 엔진과 나란히 보기'(분석 세션). 해제된 엔진 판정 ↔ 최종 세트. 해제 전에는 열지 않고 '봉인됨 n건' 만(D-18 3). run 이 둘 이상이면 판 고르기·판끼리 견주기. **판 고르기의 A 기본**: 정한 것은 '엔진 판이 가장 높은 해제 run'(18 5-2 7번 — v0.3 가 있으면 v0.3), 지금 코드(`app/analysis_flow.py`)는 '가장 늦게 해제한 run'. 봉인 표시 문구는 어디서나 '봉인됨 n건' 하나(D-18 3). 둘 다 코드 맞추기는 21 4-2 15번(G 다음 묶음 0번) | E (D-14 8, D-15 7, 17 6-1 4번) |
 | 방송 요약 | 메뉴 '분석 → 방송 요약'(같은 자리·같은 조건). 주제 덩어리별 채팅·반응률·놓친 질문. 분석 세션 작업대에는 타임라인 위 주제 트랙도 | E (D-01, D-17 5·8) |
 | AI 비교 보고서 | 메뉴 '보고 → AI 비교 보고서…'(세션 밖·조정 세션). 해제된 run 만 | E (D-15 7) |
 | 스트리머 훈련 | 메뉴 '훈련 → 스트리머 훈련' 한 번. 작업대 위에 쌓는 화면(소리 끈 다시보기·흐르는 채팅·'고른 수 n') → '견주기'(같음·나만·원래만) → [닫기] 로 작업대. 라벨링·출처 판정 세션에서는 같은 메뉴가 '보기 전용으로 다시 열고 훈련'. 시범(잠기기 전)·기준 없음·영상 없음이면 메뉴 안에 까닭 한 줄. 훈련 중에는 분석 메뉴·AI 비교 보고서·일치도 보고서를 끈다 | F (D-18 6·7·8, D-19 3·4, [06](06-evaluation-and-agreement.md) 7-5) |
@@ -1139,7 +1140,8 @@ C 마무리 측정 (2026-10-22, `tools/bench_c6.py`, 합성 마커 20만 개, of
 | 업데이터 | 자산 선택·zip 검사·서명 | `test_updater.py` | 매 push |
 | 실제 프로세스 | 실제 robocopy·PowerShell 교체, 한글 폴더, 다른 창, 중간 종료 | `test_updater_safety.py` | `tools/release.ps1` 에서만 (CI 제외) |
 | 빌드 산출물 | exe 가 실제로 뜨는가 | `--selftest` 를 한글 폴더('테스트 문서')에서 | release.yml |
-| 실제 창 | 영상 열기 → 마커 → 라벨 저장 → 내보내기 | `tools/gui_smoke.py` | 릴리스 전 수동 |
+| 블라인드 열기 감시 | 라벨링 세션이 `scenarios\`·`data\ai\`·`data\reports\`·다른 세션 `labels\` 를 열지 않는가 | `os.listdir`·`open` 을 감시하는 test_blind 류. **지금은 메인 창 라벨링 세션 한 종류만**(`test_labeling_session_never_opens_scenarios`) — 20 10장 H-1 기준은 라벨링 세션 4종(`primary`·`relabel_same`·`relabel_second`·`adjudication`) 각각이고, 출처 판정(`origin_review`)도 같이 붙인다(21 4-2 6번, 남음) | 매 push |
+| 실제 창 | 영상 열기 → 마커 → 라벨 저장 → 내보내기, 그리고 F·H 훈련 흐름 | `tools/gui_smoke.py`. **스모크 프로세스가 역추적·종료 코드 없이 조용히 끝나는 일**이 있었다(21 3-4, 7번 중 3번 — 보안 프로그램의 프로세스 정지·종료로 보임). 사용자 몫: Acronis Active Protection 신뢰 목록에 개발용 `python.exe` 2개(`.venv\Scripts\python.exe`, Python312 의 것). Claude 몫: 스모크를 띄우는 바깥 감시 스크립트가 2초마다 자식의 일시 정지(Suspended) 스레드 수·CPU 를 적고 종료 코드와 같이 보고한다(21 4-2 19번, 남음). 스모크 안의 '외부 정지 감시'(3초 넘게 멈추고 CPU 가 늘지 않음)는 이미 있다 | 릴리스 전 수동 |
 
 ### 11-2. 골든 테스트와 픽스처
 

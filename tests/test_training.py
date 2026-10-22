@@ -339,6 +339,36 @@ def test_split_mixed_from_scenario_merge():
     assert REAL_NICK not in repr(rows[1:3])
 
 
+def test_split_mixed_merge_result_never_reattaches_real():
+    """21 4-2 18번: merge_for_display 결과(MergeResult·DisplayRow 목록)에 실제 줄이 0개여도 real 을 다시 붙이지 않는다.
+    섞기가 구간으로 잘라 실제 줄이 남지 않았는데 split_mixed 가 실제 채팅 전부를 붙이면 구간 밖 원 채팅(원 가림 닉네임)이
+    가상 줄과 같은 표에 보인다(20 8장 3번). dict 목록(가상 줄만 돌려주는 mix)은 지금처럼 앞에 붙인다. 모두 합성."""
+    scn = pytest.importorskip("app.core.scenario")
+    if not hasattr(scn, "merge_for_display"):
+        pytest.skip("core.scenario.merge_for_display 없음")
+    real = [_real(1, 50_000), _real(2, 60_000)]                     # 모두 구간 [0, 10000) 밖
+    src = {"chat_id": cid(9), "t_ms": 90_000, "kind": "text", "nickname_masked": REAL_NICK, "text": V_TEXT}
+    recs = [{"kind": "scenario.header", "scenario_id": "SC-20261022-abcd", "range": {"vod_from_ms": 0, "vod_to_ms": 10_000}},
+            {"kind": "scenario.chat", "line_id": "s0001", "source": "retrieved", "show_vod_ms": 2000,
+             "from_project_id": "p0", "from_chat_id": cid(9), "from_t_ms": 90_000, "display_mask": "하**"},
+            {"kind": "scenario.end", "lines": 1, "lines_sha256": "0" * 64}]
+    res = scn.merge_for_display(real, recs, resolve=lambda p, c: src if c == cid(9) else None, clip_to_range=True)
+    assert res.counts["real"] == 0 and res.counts["real_out_of_range"] == 2
+    rows, virt = tr.split_mixed(res, real=real)
+    assert [r["chat_id"] for r in rows] == ["v:s0001"] and set(virt) == {"v:s0001"}
+    assert REAL_NICK not in repr(rows) and not any(r is x for r in rows for x in real)
+    # DisplayRow 목록(MergeResult.rows)만 넘겨도 같다
+    rows2, _ = tr.split_mixed(list(res.rows), real=real)
+    assert [r["chat_id"] for r in rows2] == ["v:s0001"]
+    # dict 목록(가상 줄만 돌려주는 mix)은 그대로 앞에 붙인다(옛 동작 — 화면의 _clip_mixed 가 구간으로 자른다)
+    rows3, _ = tr.split_mixed([{"source": "retrieved", "line_id": "s0001", "show_vod_ms": 2000, "text": V_TEXT,
+                                "display_mask": "하**"}], real=real)
+    assert rows3[:2] == real and len(rows3) == 3
+    # 빈 MergeResult 도 실제 줄을 붙이지 않는다
+    empty = scn.merge_for_display(real, recs, resolve=lambda p, c: None, clip_to_range=True)
+    assert tr.split_mixed(empty, real=real) == ([], {})
+
+
 def test_compare_virtual_separate_from_score():
     lines = {"v:s0001": tr.VirtualLine("v:s0001", "s0001", "retrieved", 2000),
              "v:s0002": tr.VirtualLine("v:s0002", "s0002", "generated", 6000),
