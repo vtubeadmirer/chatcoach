@@ -42,8 +42,10 @@ training_menu_state() 는 폴더 이름(pilot-*)만 보는 이중 잠금이고, 
 로그에는 건수·시각만 남긴다.
 
 가상 채팅 섞기(H-4, 20 5장, D-19 2): start(scenario=…) 를 주면 mix_fn(real, scenario) 로 실제 채팅과 시나리오 줄을
-섞어 흘린다. 기본 mix_fn 은 app.core.scenario.mix(real, scenario) 가 있으면 그것, 없으면 같은 모듈의
-merge_for_display(real, records, resolve=…) (시나리오 담당이 정한 지금 이름). scenario = 시나리오 줄 목록 또는
+섞어 흘린다. 기본 mix_fn 은 app.core.scenario.merge_for_display(real, records, resolve=…, clip_to_range=True)
+(H-1 의 정식 이름 — 작업 지시의 가정 이름 'mix' 는 쓰지 않는다). 가상 채팅을 섞을 때는 실제 채팅을 훈련 구간 안만
+싣고(retrieved 의 원 채팅은 같은 방송 구간 밖이라 같은 표에 원 가림 닉네임으로 보이면 가명이 이어진다, 20 8장 3번),
+실제 줄과 본문이 같은 가상 줄은 뺀다(_clip_mixed). 시나리오가 없으면 지금(F)처럼 다 싣는다. scenario = 시나리오 줄 목록 또는
 {"records", "resolve"}(retrieved 본문을 원 messages.jsonl 에서 읽는 함수 — 부르는 쪽이 준다).
 결과는 app.core.training.split_mixed 로 화면 줄을 만든다: 가상 줄의 화면 id 는 'v:'+line_id, 이름은 시나리오의 가림
 이름(없으면 '시청자N'), 원래 채팅의 닉네임·viewer_id 는 버린다. messages.jsonl 에는 아무것도 쓰지 않는다.
@@ -183,18 +185,50 @@ def _scenario_parts(scenario):
 
 
 def _default_mix(real, scenario):
-    """시나리오 담당(H-1, app.core.scenario)의 섞기 함수를 부른다.
-    - mix(real, scenario) 가 있으면 그것(작업 지시의 가정 이름).
-    - 없으면 merge_for_display(real, records, resolve=…, clip_to_range=False) — 지금 그 모듈의 이름.
-      clip_to_range=False: 실제 채팅은 지금(F)처럼 다 싣는다(구간 밖 고르기는 이 화면이 막는다).
-    돌려준 것(줄 목록 또는 MergeResult)은 core.training.split_mixed 가 화면 줄로 고른다."""
+    """시나리오 담당(H-1, app.core.scenario)의 섞기 함수 merge_for_display(real, records, resolve=…, clip_to_range=True)
+    를 부른다. clip_to_range=True: 실제 채팅은 시나리오 구간 [from, to) 안만 싣는다 — retrieved 의 원 채팅(같은 방송
+    구간 밖)이 같은 표에 원 가림 닉네임으로 보이지 않게(20 8장 3번). 화면도 훈련 구간으로 한 번 더 자른다(_clip_mixed).
+    돌려준 MergeResult 는 core.training.split_mixed 가 화면 줄로 고른다."""
     from ..core import scenario as scn
-    if hasattr(scn, "mix"):
-        return scn.mix(real, scenario)
     records, resolve = _scenario_parts(scenario)
     if not records:
         raise ValueError("시나리오 줄이 없습니다")
-    return scn.merge_for_display(real, records, resolve=resolve, clip_to_range=False)
+    return scn.merge_for_display(real, records, resolve=resolve, clip_to_range=True)
+
+
+def _norm_text(s) -> str:
+    """본문 견주기용: 공백을 하나로, 대소문자 무시."""
+    return " ".join(str(s or "").split()).casefold()
+
+
+def _clip_mixed(rows: list, vlines: dict, seg: tuple[int, int] | None) -> tuple[list, dict, int, int]:
+    """섞은 화면 줄 → (실제 줄은 구간 [시작, 끝) 안만, 남은 실제 줄과 본문이 같은 가상 줄은 뺀 것, 뺀 실제 수,
+    뺀 가상 수). seg 가 None 이면 실제 줄은 그대로 둔다. 숫자만 돌려준다(본문은 로그에 남기지 않는다)."""
+    from ..core import training as trn
+    kept: list = []
+    n_out = 0
+    for r in rows:
+        if trn.is_virtual_id(r.get("chat_id")):
+            kept.append(r)
+            continue
+        t = r.get("t_ms")
+        if seg is not None and not (isinstance(t, int) and not isinstance(t, bool) and seg[0] <= t < seg[1]):
+            n_out += 1
+            continue
+        kept.append(r)
+    real_texts = {_norm_text(r.get("text")) for r in kept if not trn.is_virtual_id(r.get("chat_id"))}
+    real_texts.discard("")
+    out: list = []
+    vl = dict(vlines)
+    n_dup = 0
+    for r in kept:
+        vid = r.get("chat_id")
+        if trn.is_virtual_id(vid) and _norm_text(r.get("text")) in real_texts:
+            vl.pop(vid, None)
+            n_dup += 1
+            continue
+        out.append(r)
+    return out, vl, n_out, n_dup
 
 
 def _scenario_info(scenario) -> dict:
@@ -429,7 +463,7 @@ class TrainerView(QWidget):
         vlines: dict = {}
         scen_info = None
         if scenario is not None:
-            mixed = self._mix_scenario(chat, scenario, viewer_no, show_virtual_marks)
+            mixed = self._mix_scenario(chat, scenario, viewer_no, show_virtual_marks, seg)
             if mixed is None:
                 return False
             chat, viewer_no, vlines = mixed
@@ -506,8 +540,13 @@ class TrainerView(QWidget):
         QTimer.singleShot(0, self, self.setFocus)
         return True
 
-    def _mix_scenario(self, chat, scenario, viewer_no, show_marks: bool):
-        """실제 채팅 + 시나리오 → (화면 줄 목록, viewer_no, 가상 줄 dict). 막히면 까닭을 보이고 None."""
+    def _mix_scenario(self, chat, scenario, viewer_no, show_marks: bool, seg: tuple[int, int] | None = None):
+        """실제 채팅 + 시나리오 → (화면 줄 목록, viewer_no, 가상 줄 dict). 막히면 까닭을 보이고 None.
+
+        가상 채팅을 섞을 때 실제 채팅은 훈련 구간 [시작, 끝) 안만 싣는다(seg). retrieved 줄의 원 채팅은 같은 방송의
+        구간 밖에 있어, 다 실으면 같은 본문이 원 가림 닉네임과 함께 같은 표에 보여 가명 ↔ 원 가림 이름이 이어지고
+        가상인 티가 난다(20 8장 3번). 구간 밖 줄은 어차피 고를 수 없고 견주기도 구간으로 거른다(숫자는 그대로).
+        남은 실제 줄과 본문(공백·대소문자 무시)이 같은 가상 줄은 뺀다(한 번 더 막기)."""
         from ..core import training as trn
         if not isinstance(chat, (list, tuple)):
             self.set_blocked(tr("가상 채팅을 섞으려면 채팅 줄 목록이 필요합니다"))
@@ -521,6 +560,9 @@ class TrainerView(QWidget):
             LOG.warning("가상 채팅 섞기 실패: %s", type(e).__name__)
             self.set_blocked(tr("가상 채팅을 섞지 못했습니다 ({0})").format(type(e).__name__))
             return None
+        rows, vlines, n_out, n_dup = _clip_mixed(rows, vlines, seg)
+        if n_out or n_dup:
+            LOG.info("가상 채팅 섞기: 구간 밖 실제 채팅 %d줄 · 실제와 본문이 같은 가상 줄 %d줄 뺌", n_out, n_dup)
         if not vlines:
             self.set_blocked(tr(REASON_NO_SCENARIO))
             return None
@@ -618,6 +660,7 @@ class TrainerView(QWidget):
         if not self._log_toggle(chat_id, now):
             return None
         self._picks[chat_id] = now
+        self._seen_until = max(int(self._seen_until), int(t))   # 고른 채팅은 본 것 (이른 견주기 until_ms 가 그 줄을 빼지 않게)
         self._emit("training.pick", chat_id=chat_id, picked_vod_ms=now, wall_at=self._clock(), source=SOURCE_REPLAY)
         self._refresh_picks()
         self._say("")
@@ -648,6 +691,7 @@ class TrainerView(QWidget):
         if not self._log_virtual(ln, now):
             return None
         self._vpicks[vid] = now
+        self._seen_until = max(int(self._seen_until), int(t))   # 고른 줄은 본 것 (견주기 shown ≥ picked)
         self._emit("training.pick", line_id=ln.line_id, picked_vod_ms=now, wall_at=self._clock(), source=ln.source)
         self._refresh_picks()
         self._say("")

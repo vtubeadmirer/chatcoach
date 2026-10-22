@@ -2395,6 +2395,8 @@ class Smoke:
             for r in jsonl.read(ident).records:
                 nk = r.get("nicknames")
                 for s in (nk if isinstance(nk, list) else [nk]):
+                    if isinstance(s, dict):               # 수집기가 쓰는 모양 {"nickname", "first_seen_ms"} (chzzk_chat)
+                        s = s.get("nickname")
                     if isinstance(s, str) and len(s) >= 2:
                         names.add(s)
                 for k in ("user_id_hash", "viewer_id"):
@@ -2402,7 +2404,11 @@ class Smoke:
                         uids.add(r[k])
         hit_name = sum(1 for s in names if s.encode("utf-8") in sblob)
         hit_uid = sum(1 for s in uids if s.encode("utf-8") in sblob)
-        keys_bad = sum(sblob.count(k) for k in (b'"nickname', b'"viewer_id"', b'"user_id', b'"text"'))
+        # 금지 칸 이름만 정확한 키 모양('"…":')으로 센다 — 줄 직렬화는 공백 없는 ':' 구분자. 값 쪽의 "text"(chat_kind 의 값)와
+        # 스키마가 정한 숫자 칸 checks.nickname_hit · filters.versions 의 "nickname-v1" 은 개인정보가 아니라 세지 않는다.
+        # "text" 칸은 generated 줄에만 허용되는데 이 흐름은 retrieved 만 만드니 0 이어야 한다
+        keys_bad = sum(sblob.count(k) for k in (b'"nickname":', b'"nickname_masked":', b'"viewer_id":',
+                                                b'"user_id_hash":', b'"text":'))
         total = hit_mask + hit_vid + hit_text + hit_name + hit_uid + keys_bad
         names_n, uids_n, masks_n, vids_n = len(names), len(uids), len(masks), len(vids)
         names.clear(), uids.clear(), masks.clear(), vids.clear(), texts.clear()

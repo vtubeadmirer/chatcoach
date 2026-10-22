@@ -940,21 +940,31 @@ class MainWindow(QMainWindow):
         wb = self.workbench
         if wb is None or not self.training_needs_reopen():
             return False
+        # ④ 놓친 후보 폼의 저장 전 입력은 resolve_unsaved(구간표·반응 편집기만 본다)가 묻지 않는다 — 세션을 닫으면
+        # 사라지므로 set_mode·prepare_lock 처럼 묻는 창 없이 머문다(D-16)
+        from ..core import phase as _ph
+        mf = getattr(wb, "missed_form", None)
+        if getattr(wb, "mode", None) == _ph.MISSED and mf is not None and mf.has_unsaved():
+            self.statusBar().showMessage(tr("④ 저장하지 않은 입력이 있습니다 — 저장(Ctrl+Enter)하거나 취소(Esc)한 뒤에 "
+                                            "훈련을 여세요"), 6000)
+            return False
         if not wb.resolve_unsaved(allow_cancel=True):        # '취소' 나 반응 편집 중이면 그대로 머문다
             self.statusBar().showMessage(tr("저장하지 않은 변경이 있어 훈련을 열지 않았습니다"), 6000)
             return False
         root = wb.project.root
         hint = getattr(wb, "labeler_id", None)
         from .. import training_store as ts
-        self._training_labeler_hint = hint if isinstance(hint, str) and ts.LABELER_ID_RE.match(hint) else None
         LOG.info("훈련: 라벨링 세션을 닫고 보기 전용으로 다시 엽니다")
         self._close_workbench("user")                        # session.close 줄·잠금 풀기(저장 안 한 변경은 위에서 처리)
+        # 힌트는 닫은 뒤에 둔다(_close_workbench 가 비운다) — 다시 연 이 프로젝트의 작업대가 열려 있는 동안만 쓰인다
+        self._training_labeler_hint = hint if isinstance(hint, str) and ts.LABELER_ID_RE.match(hint) else None
         self._reopen_view_only = True
         try:
             out = self.project_view.open_path(root)
         finally:
             self._reopen_view_only = False
         if out is None or not out.ok or self.workbench is None:
+            self._training_labeler_hint = None
             self.show_home()
             self.statusBar().showMessage(tr("보기 전용으로 다시 열지 못했습니다"), 6000)
             return False
@@ -986,6 +996,19 @@ class MainWindow(QMainWindow):
             return None
         self._pending_training = None
         return self.streamer_training(show=show)
+
+    @staticmethod
+    def _drop_empty_training_log(log) -> None:
+        """훈련이 열리지 않았을 때(섞기 막힘 등) TrainingLog.create 가 먼저 만든 0바이트 training\\<id>.jsonl 을 지운다.
+        한 줄이라도 쓴 파일은 그대로 둔다(노출 기록). 실패는 경고만."""
+        p = getattr(log, "path", None)
+        if not isinstance(p, str):
+            return
+        try:
+            if os.path.isfile(p) and os.path.getsize(p) == 0:
+                os.remove(p)
+        except OSError as e:
+            LOG.warning("빈 훈련 기록 지우기 실패: %s", type(e).__name__)
 
     @staticmethod
     def _fresh_chat_data(cd):
@@ -1067,6 +1090,7 @@ class MainWindow(QMainWindow):
         self.invalidate_training_cache()            # start 줄이 생겼으면 노출이 바뀌었다(다음 판단은 새로)
         if not ok:
             reason = view.blocked_label.text()
+            self._drop_empty_training_log(log)      # start 줄을 못 쓴 빈 기록 파일(노출 아님)은 남기지 않는다
             view.close_view()
             self.stack.removeWidget(view)
             view.deleteLater()
@@ -1922,6 +1946,9 @@ class MainWindow(QMainWindow):
         wb = self.workbench
         if wb is None:
             return
+        # 다시 열기 전 세션의 라벨러는 그 다시 연 작업대에서만 쓴다(다른 프로젝트로 새지 않게). 작업대가 없을 때(새로 열기
+        # 직전의 _close_workbench)는 비우지 않는다 — 다시 열기가 닫은 뒤 힌트를 두고 바로 연다
+        self._training_labeler_hint = None
         try:
             wb.resolve_unsaved(allow_cancel=False)
         except Exception:  # noqa: BLE001 — 닫는 길은 막지 않는다

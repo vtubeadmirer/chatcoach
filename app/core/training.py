@@ -465,18 +465,20 @@ class VirtualSummary:
 def compare_virtual(vpicks: Mapping[str, int], lines: Mapping[str, VirtualLine] | Iterable[VirtualLine], *,
                     range_ms: tuple[int, int] | None = None, until_ms: int | None = None) -> VirtualSummary:
     """가상 채팅 고르기를 센다(원래 반응과 섞지 않는다). vpicks: 가상 화면 id → 고른 순간의 VOD 시각.
-    shown = 범위([시작, 끝)) 안이고 until_ms 까지 나온 가상 줄 수. 고른 줄은 범위·until 과 상관없이 picked 로 센다
-    (고를 때 이미 화면에 있었다)."""
+    shown = 범위([시작, 끝)) 안이고 until_ms 까지 나온 가상 줄 수 + 그 밖이어도 고른 줄. 고른 줄은 범위·until 과
+    상관없이 picked 로 센다(고를 때 이미 화면에 있었다) — 그래서 고른 줄은 shown 에도 넣어 늘 shown ≥ picked 다
+    (화면은 재생 위치보다 PICK_FUTURE_TOL_MS 뒤의 줄까지 고르게 둔다)."""
     if isinstance(lines, Mapping):
         lines = list(lines.values())
     by = {s: {"shown": 0, "picked": 0} for s in VIRTUAL_SOURCES}
     shown = 0
     by_vid: dict[str, VirtualLine] = {}
+    picked_vids = set(vpicks or ())
     for ln in lines or ():
         if not isinstance(ln, VirtualLine):
             raise TrainingError("VirtualLine 이 아닙니다")
         by_vid[ln.vid] = ln
-        if _in_range(ln.show_vod_ms, range_ms, until_ms):
+        if ln.vid in picked_vids or _in_range(ln.show_vod_ms, range_ms, until_ms):
             shown += 1
             by[ln.source]["shown"] += 1
     picks: list[dict] = []

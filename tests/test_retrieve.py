@@ -358,6 +358,38 @@ def test_tool_refusals(tmp_path, capsys):
     assert not os.path.exists(os.path.join(tgt, "scenarios"))
 
 
+def test_tool_skips_pilot_listed_sibling_and_target(tmp_path, capsys, monkeypatch):
+    """이름이 pilot-* 가 아니어도 시범 기록(setup.json items[])에 적힌 같은 채널 프로젝트는 열지 않는다
+    (messages.jsonl·identities.jsonl open 0번). 대상이 적혀 있으면 읽기 전에 거부(rc 2). 검토 의견 재현."""
+    root = tmp_path / "projects"
+    tgt = make_project(root, "p-a", busy(600000, 5) + busy(720000, 5) + [msg(670000, "드문", viewer=viewer(950))])
+    make_project(root, "p-b", pool_msgs(0, 30, prefix="다른방송", start_viewer=100))
+    hidden = make_project(root, "p-hidden", pool_msgs(0, 30, prefix="숨은시범", start_viewer=300),
+                          identities={viewer(300): ["합성숨은닉"]})
+    pdir = tmp_path / "pilot"
+    pdir.mkdir()
+    (pdir / "setup.json").write_text(json.dumps({"items": [{"project_id": uid("p-hidden")}]}), encoding="utf-8")
+    opened = []
+    real_open = open
+
+    def spy(path, *a, **kw):
+        opened.append(str(path))
+        return real_open(path, *a, **kw)
+    monkeypatch.setattr("builtins.open", spy)
+    args = ["--project", tgt, "--from", "600000", "--to", "840000", "--blocklist", "", "--dry-run"]
+    assert MS.main(args, now=NOW) == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["stats"]["pilot_skipped"] == 1 and out["stats"]["same_channel_projects"] == 1
+    assert not any(os.path.join("p-hidden", "chat") in p for p in opened)
+    assert os.path.isdir(hidden)
+    # 대상이 시범 기록에 적혀 있으면(잠기지 않음) 읽기 전에 거부
+    (pdir / "setup.json").write_text(json.dumps({"items": [{"project_id": uid("p-a")}]}), encoding="utf-8")
+    opened.clear()
+    assert MS.main(args, now=NOW) == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "pilot_locked"
+    assert not any(os.path.join("p-a", "chat") in p for p in opened)
+
+
 def test_tool_store_missing(tmp_path, capsys, monkeypatch):
     tgt = basic_target(tmp_path)
     monkeypatch.setattr(MS, "_store", lambda: None)

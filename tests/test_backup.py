@@ -101,6 +101,8 @@ def test_in_protected_zone_rules():
     assert backup.in_protected_zone("derived/ocr.jsonl", z)
     assert backup.in_protected_zone("origin/OT-1.json", z)
     assert backup.in_protected_zone("origin/", z)
+    assert backup.in_protected_zone("scenarios/SC-20261022-abcd.jsonl", z)   # 가상 채팅 시나리오(H-1, D-05)
+    assert not backup.in_protected_zone("scenario.json", z)
     assert not backup.in_protected_zone("derived/vad.json", z)
     assert not backup.in_protected_zone("chat/messages.jsonl", z)
     assert not backup.in_protected_zone("labels/a.jsonl", z)

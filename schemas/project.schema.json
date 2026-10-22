@@ -49,7 +49,7 @@
     "protected_zone": {
       "type": "array",
       "items": {"type": "string", "minLength": 1},
-      "description": "보호 구역: 내보내기·라벨러 패키지·일반 백업에서 기본 제외하는 프로젝트 상대 경로(접두사 또는 glob). 기본값: chat/protected/, derived/asr*, derived/ocr*, origin/."
+      "description": "보호 구역: 내보내기·라벨러 패키지·일반 백업에서 기본 제외하는 프로젝트 상대 경로(접두사 또는 glob). 기본값: chat/protected/, derived/asr*, derived/ocr*, origin/, scenarios/ (가상 채팅 시나리오, H-1·D-05)."
     },
     "storage_warning_acknowledged": {
       "oneOf": [

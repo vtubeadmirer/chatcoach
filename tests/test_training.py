@@ -356,3 +356,11 @@ def test_compare_virtual_separate_from_score():
                                 "diff_count"}
     with pytest.raises(tr.TrainingError):
         tr.compare_virtual({}, [object()])
+
+
+def test_compare_virtual_picked_counts_as_shown():
+    """고른 줄은 until 뒤(화면의 1초 여유)여도 shown 에 든다 — 늘 shown ≥ picked (검토 의견 재현)."""
+    lines = [tr.VirtualLine("v:s0001", "s0001", "retrieved", 6500),
+             tr.VirtualLine("v:s0002", "s0002", "retrieved", 9000)]
+    vs = tr.compare_virtual({"v:s0001": 6000}, lines, range_ms=(5000, 25_000), until_ms=6000)
+    assert (vs.shown, vs.picked) == (1, 1) and vs.by_source["retrieved"] == {"shown": 1, "picked": 1}

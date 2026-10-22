@@ -17,7 +17,9 @@
   app.scenario_store.write_scenario(project_root, records)(검사 + scenarios\\<scenario_id>.jsonl 원자적 쓰기).
   같은 프로젝트·구간·lines_sha256 인 시나리오가 이미 있으면 write_scenario 가 새로 쓰지 않고 그 ID 를 준다.
   채울 줄이 0개면 쓰지 않는다(nothing_to_fill).
-시범 프로젝트(pilot-*)는 읽기 전에 거부한다(pilot_locked). AI·외부 호출·모델 없음. messages.jsonl 은 읽기만.
+시범 프로젝트(pilot-*)는 읽기 전에 거부한다(pilot_locked). 이름이 달라도 시범 기록(freeze.json projects[]·setup.json
+items[])에 적힌 프로젝트는 app.reference_set 으로 거른다 — 대상이면 거부, 같은 채널 후보면 열지 않는다(stats.pilot_skipped).
+AI·외부 호출·모델 없음. messages.jsonl 은 읽기만.
 출력: 표준 출력에 JSON 한 줄(숫자·ID·코드만. 본문·닉네임 없음).
 종료 코드: 0 정상(이미 있음·채울 것 없음 포함) · 1 입력 오류 · 2 시범 거부 · 3 scenario_store 없음 · 4 만들 수 없음
 """
@@ -52,6 +54,18 @@ def _store():
     except ImportError:
         return None
     return sc.assemble, st.write_scenario, st
+
+
+def _pilot_checks():
+    """(대상 막힘 까닭 함수, 같은 채널 후보 제외 함수) — app.reference_set 의 시범 판단(폴더 이름 + 시범 기록
+    freeze.json projects[]·setup.json items[]). 엔진은 이름(pilot-*)만 보므로 이름이 다른 시범 프로젝트는 여기서 막는다.
+    대상은 시범 세션이 모두 잠겼으면 열어도 되고(pilot_block_reason, write_scenario 와 같은 판단), 같은 채널 후보는
+    시범이면 잠김과 상관없이 열지 않는다(원 채팅·원 닉네임을 읽게 되므로). 모듈이 없으면 None."""
+    try:
+        from app import reference_set as rs
+    except ImportError:
+        return None
+    return rs.pilot_block_reason, rs.is_pilot_project
 
 
 _TIME = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?$")
@@ -119,11 +133,23 @@ def main(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         _emit({"error": "scenario_store_missing"})
         return 3
     assemble, write_scenario, st = store
+    checks = _pilot_checks()
+    if checks is None:
+        _emit({"error": "scenario_store_missing"})
+        return 3
+    block_reason, is_pilot = checks
+    try:
+        blocked = block_reason(project) is not None
+    except Exception:  # noqa: BLE001 — 판단이 안 되면 막는다(블라인드 쪽으로 안전하게)
+        blocked = True
+    if blocked:                                     # 시범 기록에 적힌 프로젝트도 읽기 전에 거부
+        _emit({"error": "pilot_locked"})
+        return 2
     bl = ns.blocklist if ns.blocklist is not None else default_blocklist(project)
     try:
         header, chats, stats = R.make_retrieved_scenario(project, a, b, projects_root=ns.projects_root,
                                                          blocklist_path=bl, topic_flow_path=ns.topic_flow,
-                                                         seed=seed, cfg=cfg, now=now)
+                                                         seed=seed, cfg=cfg, now=now, exclude=is_pilot)
     except R.RetrieveError as e:
         _emit({"error": e.code})
         return 2 if e.code == "pilot_locked" else (1 if e.code in ("bad_range", "no_messages", "bad_seed") else 4)

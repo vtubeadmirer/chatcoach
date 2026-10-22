@@ -5,7 +5,7 @@
 백업 (zip 하나 + 안에 manifest.json, 파일마다 크기·SHA-256)
 - 무엇을 담나 (허용 목록, 03 16-2): project.json · guide/ · labels/ · samples/ · locks/(open.lock 제외) · relabel/.
   채팅(chat/messages.jsonl · chat/fetch-*.json)은 '수동 백업' 과 '일 1회 백업 중 주 1회' 만.
-  보호 구역(project.json 의 protected_zone ∪ 기본값 chat/protected/ · derived/asr* · derived/ocr* · origin/)은
+  보호 구역(project.json 의 protected_zone ∪ 기본값 chat/protected/ · derived/asr* · derived/ocr* · origin/ · scenarios/)은
   include_protected=True('보호 포함')일 때만. derived/ 의 나머지·캐시·<앱>\\data\\ai\\ 는 넣지 않는다.
   보호 구역 목록은 프로젝트 값과 기본값의 합집합이다 — project.json 이 비어 있어도 기본 보호는 빠지지 않는다.
 - 어디에 (02 5-3, S-39): 기본 paths.backup_root()\\<project_id>\\ (= %LOCALAPPDATA%\\ChatCoach\\backups\\…).
@@ -64,7 +64,8 @@ RETENTION_SOON_DAYS = 30
 RESTORE_MAX_BYTES = 4 * 1024 ** 3
 RESTORE_MAX_ENTRIES = 200_000
 
-DEFAULT_PROTECTED_ZONE = ("chat/protected/", "derived/asr*", "derived/ocr*", "origin/")   # project.DEFAULT_PROTECTED_ZONE 와 같다
+DEFAULT_PROTECTED_ZONE = ("chat/protected/", "derived/asr*", "derived/ocr*", "origin/",
+                          "scenarios/")   # project.DEFAULT_PROTECTED_ZONE 와 같다. scenarios/: 가상 채팅은 앱 밖으로 안 나간다(D-05)
 CORE_DIRS = ("guide", "labels", "samples", "locks", "relabel")        # 03 16-2 '백업' 열
 PRE_UPDATE_DIRS = ("labels", "samples", "locks", "relabel")          # 04 6-7
 PROJECT_FILE = "project.json"

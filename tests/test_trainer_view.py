@@ -587,7 +587,8 @@ def _nick_of(v, chat_id):
 
 def test_virtual_mixed_into_chat_with_marks(qapp):
     v, ok = make_v(qapp)
-    assert ok and v.virtual_line_count() == 4 and v.chat.total_count() == 34
+    # 가상 채팅을 섞으면 실제 채팅은 훈련 구간 [5초, 25초) 안 20줄만 싣는다(구간 밖 원 채팅과 본문이 겹치지 않게)
+    assert ok and v.virtual_line_count() == 4 and v.chat.total_count() == 24
     assert _nick_of(v, "v:s0001") == "하** · 가져옴" and _nick_of(v, "v:s0002") == "두* · 생성"
     assert _nick_of(v, "v:s0003") == "시청자3 · 생성"             # 가림 이름이 없으면 가명 (가상 이름 차례 3)
     d = v.chat.chat_data()
@@ -811,3 +812,80 @@ def test_virtual_pure_helpers():
     assert tcv.virtual_numbers(None) is None and tcv.fmt_virtual(None) == ""
     # 점수 숫자에는 가상 행이 들어가지 않는다
     assert tcv.summary_numbers(None, rows) == tcv.summary_numbers(None, [])
+
+
+# ---------------------------------------------------------------------------- 고친 것 재현 (검토 의견)
+def test_early_compare_virtual_shown_not_below_picked(qapp):
+    """재생 위치 VOD 6000 에서 1초 여유 안의 가상 줄(6500)을 고르고 바로 견주기: 가상 채팅 shown ≥ picked
+    (전에는 shown 0 · picked 1). 사람 클릭 2(가상 채팅 1 + 견주기 1)."""
+    v, ok = make_v(qapp)
+    assert ok
+    v.player.at(4_000)                                                 # 보정 Shift → VOD 6000
+    assert v.position_vod() == 6_000
+    assert v.toggle_pick("v:s0001") == "pick"
+    assert v.show_compare() is True
+    vs = v.virtual_result()
+    assert vs.picked == 1 and vs.shown == 1 and vs.by_source["retrieved"] == {"shown": 1, "picked": 1}
+    assert v.compare_view.virtual_text().startswith("가상 채팅 1개 가운데 1개 고름")
+    cmp_ev = v.events[-1]
+    assert cmp_ev["kind"] == "training.compare" and cmp_ev["virtual_shown"] >= cmp_ev["virtual_picked"] == 1
+    assert cmp_ev["until_ms"] == 6_500                                 # 고른 줄은 본 것으로 친다
+
+
+def test_early_compare_real_pick_within_tolerance_is_same(qapp):
+    """실제 채팅도 같다: VOD 5500 에서 6000 의 채팅(원래 반응 있음)을 고르고 바로 견주기 → '같음'
+    (전에는 until 5500 이 그 원래 반응을 빼 '나만' 이 됐다)."""
+    v, ok = make(qapp)
+    assert ok
+    v.player.at(5_500 - 2000)
+    assert v.toggle_pick(cid(6)) == "pick"
+    assert v.show_compare() is True
+    assert CALLS[-1]["until_ms"] == 6_000
+    nums = v.compare_view.summary()
+    assert nums["same"] == 1 and nums["mine_only"] == 0
+
+
+def test_virtual_mix_clips_real_chat_to_segment(qapp):
+    """retrieved 줄의 원 채팅(같은 방송, 구간 밖)이 같은 표에 원 가림 닉네임으로 보이지 않는다 — 기본 섞기
+    (core.scenario, clip_to_range) + 화면 자르기. 견주기 뒤(다 보이기)에도 같은 본문의 실제 줄은 0개."""
+    pytest.importorskip("app.core.scenario")
+    real = messages()
+    src = real[2]                                                      # t 2000: 구간(5000~25000) 앞
+    recs = [{"kind": "scenario.header", "scenario_id": "SC-20261022-abcd", "range": {"vod_from_ms": SEG[0],
+                                                                                     "vod_to_ms": SEG[1]}},
+            {"kind": "scenario.chat", "line_id": "s0001", "source": "retrieved", "show_vod_ms": 6_500,
+             "from_project_id": "p0", "from_chat_id": src["chat_id"], "from_t_ms": src["t_ms"], "display_mask": "하**"},
+            {"kind": "scenario.end", "lines": 1, "lines_sha256": "0" * 64}]
+    v = tv.TrainerView(parts={"player": FakePlayer}, compare_fn=fake_compare)
+    ok = v.start(chat=real, segment=SEG, reference=REF, media_path=None,
+                 scenario={"records": recs, "resolve": lambda p, c: src if c == src["chat_id"] else None})
+    assert ok and v.virtual_line_count() == 1
+
+    def rows(d):
+        return [(d.chat_ids[i], int(d.times[i]), d.texts[i]) for i in range(d.n)]
+    d = v.chat.chat_data()
+    real_rows = [r for r in rows(d) if not r[0].startswith("v:")]
+    virt_rows = [r for r in rows(d) if r[0].startswith("v:")]
+    assert len(real_rows) == 20 and all(SEG[0] <= t < SEG[1] for _c, t, _x in real_rows)
+    assert src["chat_id"] not in d.chat_ids
+    assert {x for _c, _t, x in virt_rows} & {x for _c, _t, x in real_rows} == set()
+    v.seek_vod(SEG[0])
+    assert v.show_compare() is True
+    shown = {v.chat.model.data(v.chat.model.index(r, 0), Qt.UserRole) for r in range(v.chat.row_count())}
+    assert src["chat_id"] not in shown and "v:s0001" in shown
+
+
+def test_virtual_mix_drops_line_with_same_text_as_real(qapp):
+    """한 번 더 막기: 남은 실제 줄과 본문이 같은 가상 줄은 뺀다. 가상 줄만 돌려주는 섞기(실제 줄을 split_mixed 가
+    앞에 더함)도 구간 밖 실제 줄은 싣지 않는다."""
+    real = messages()
+    same_text = real[10]["text"]                                       # 구간 안 실제 줄과 같은 본문
+    lines = [dict(V_LINES[0]), {"source": "retrieved", "line_id": "s0009", "show_vod_ms": 8_000,
+                                "text": "  " + same_text.upper() + " ", "display_mask": "세**"}]
+    v = tv.TrainerView(parts={"player": FakePlayer}, compare_fn=fake_compare,
+                       mix_fn=lambda _real, _s: [dict(x) for x in lines])
+    ok = v.start(chat=real, segment=SEG, reference=REF, media_path=None, scenario=SCEN)
+    assert ok and v.virtual_line_count() == 1 and "v:s0009" not in v._vlines
+    d = v.chat.chat_data()
+    assert d.n == 21 and all(SEG[0] <= int(d.times[i]) < SEG[1] for i in range(d.n))
+    assert v.events[0]["virtual_lines"] == 1

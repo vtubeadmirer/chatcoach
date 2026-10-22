@@ -29,7 +29,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 TOOL_NAME = "engine retrieve"
 TOOL_VERSION = "0.1.0"
@@ -189,10 +189,23 @@ def load_project(project_dir: str) -> ProjectChats:
     return ProjectChats(project_dir, pid, ch, chats, _sha256_file(msg), load_nicknames(project_dir), frozenset(masks))
 
 
-def find_same_channel_projects(project_dir: str, projects_root: str | None, channel_id: str | None) -> tuple[list[str], int]:
-    """같은 channel_id 의 다른 프로젝트 폴더(이름 순)와 이름만 보고 뺀 시범 폴더 수.
+def _excluded(exclude: Callable[[str], bool] | None, d: str) -> bool:
+    """부르는 쪽의 제외 판정(예: 앱의 시범 기록 대조). 판정이 실패하면 뺀다(블라인드 쪽으로 안전하게)."""
+    if exclude is None:
+        return False
+    try:
+        return bool(exclude(d))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def find_same_channel_projects(project_dir: str, projects_root: str | None, channel_id: str | None, *,
+                               exclude: Callable[[str], bool] | None = None) -> tuple[list[str], int]:
+    """같은 channel_id 의 다른 프로젝트 폴더(이름 순)와 뺀 시범 폴더 수.
 
     channel_id 를 모르면 빈 목록(같은 방송만 쓴다). pilot-* 는 project.json 도 열지 않는다.
+    exclude(폴더) 가 참이면 그 폴더도 시범으로 보고 뺀다 — 엔진은 폴더 이름만 보므로, 이름이 pilot-* 가 아닌 시범
+    프로젝트(시범 기록 freeze.json·setup.json 에 적힘)는 부르는 쪽(tools/make_scenario.py → app.reference_set)이 준다.
     """
     if not channel_id or not projects_root or not os.path.isdir(projects_root):
         return [], 0
@@ -202,7 +215,7 @@ def find_same_channel_projects(project_dir: str, projects_root: str | None, chan
         d = os.path.join(projects_root, name)
         if not os.path.isdir(d) or os.path.normcase(os.path.abspath(d)) == me:
             continue
-        if is_pilot_dir(d):
+        if is_pilot_dir(d) or _excluded(exclude, d):
             pilots += 1
             continue
         if not os.path.isfile(os.path.join(d, "chat", "messages.jsonl")):
@@ -589,13 +602,15 @@ def build_header(target: ProjectChats, others: Sequence[ProjectChats], from_ms: 
 
 def make_retrieved_scenario(project_dir: str, from_ms: int, to_ms: int, *, projects_root: str | None = None,
                             blocklist_path: str | None = None, topic_flow_path: str | None = None, seed: int = 0,
-                            cfg: RetrieveConfig | None = None, now: datetime | None = None
+                            cfg: RetrieveConfig | None = None, now: datetime | None = None,
+                            exclude: Callable[[str], bool] | None = None
                             ) -> tuple[dict, list[dict], dict]:
     """한 번에: 시범 거부 → 읽기 → 고르기. (header 칸, scenario.chat 줄들, 통계). 통계는 숫자만.
 
     파일 줄 목록은 app.core.scenario.assemble(header, chats, yyyymmdd=…) 로 만들고 app.scenario_store.write_scenario
     (project_root, records) 로 쓴다(tools/make_scenario.py).
     projects_root 를 주면 그 아래 같은 channel_id 프로젝트(pilot-* 제외)도 후보로 쓴다. 기본은 project_dir 의 부모.
+    exclude(폴더) 가 참인 같은 채널 후보도 열지 않는다(find_same_channel_projects).
     """
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         raise RetrieveError("bad_seed", "seed 는 0 이상 정수")
@@ -604,7 +619,7 @@ def make_retrieved_scenario(project_dir: str, from_ms: int, to_ms: int, *, proje
     cfg = cfg or RetrieveConfig()
     target = load_project(project_dir)
     root = projects_root if projects_root is not None else os.path.dirname(os.path.abspath(project_dir))
-    dirs, pilots = find_same_channel_projects(project_dir, root, target.channel_id)
+    dirs, pilots = find_same_channel_projects(project_dir, root, target.channel_id, exclude=exclude)
     others = [load_project(d) for d in dirs]
     blocklist, bl_sha = load_blocklist(blocklist_path)
     topic, tf_sha = load_topic_flow(topic_flow_path)

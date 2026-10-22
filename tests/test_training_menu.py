@@ -269,6 +269,58 @@ def test_reopen_cancel_on_unsaved_stays_in_session(win, proj, monkeypatch):  # n
     win.show_home()
 
 
+def test_reopen_stays_when_missed_form_unsaved(win, proj, monkeypatch):  # noqa: F811
+    """재라벨 ④ 놓친 후보 폼에 저장 전 입력이 있으면 '다시 열고 훈련' 이 세션을 닫지 않는다(입력이 사라지지 않게).
+    묻는 창 없이 상태 줄 한 줄(D-16). 검토 의견 재현."""
+    from app.core import phase as ph
+    _slow_poll(monkeypatch)
+    wb = _open(win, proj["root"], ctx(P2, "primary", "L01"))
+
+    class Missed:
+        def has_unsaved(self):
+            return True
+    asked = []
+    monkeypatch.setattr(wb, "resolve_unsaved", lambda allow_cancel=True: asked.append(1) or True)
+    old_mode, old_mf = wb.mode, wb.missed_form
+    wb.mode, wb.missed_form = ph.MISSED, Missed()
+    try:
+        assert win.reopen_view_only_and_train() is False
+        assert win.workbench is wb and wb.session is not None and win._pending_training is None
+        assert asked == [] and "④" in win.statusBar().currentMessage()
+        assert win.training_view is None and ts.list_sessions(proj["root"]) == []
+    finally:
+        wb.mode, wb.missed_form = old_mode, old_mf
+    win.show_home()
+
+
+def test_blocked_start_leaves_no_empty_training_file(win, proj, monkeypatch):  # noqa: F811
+    """훈련 화면이 start 에서 막히면(섞기 막힘 등) 먼저 만든 0바이트 training\\<id>.jsonl 을 지운다. 검토 의견 재현."""
+    from app.ui import trainer_view as tv
+    root = proj["root"]
+    _open(win, root, None)
+
+    def blocked(self, **_k):
+        self.set_blocked("합성 막힘")
+        return False
+    monkeypatch.setattr(tv.TrainerView, "start", blocked)
+    for _ in range(2):                                             # 누를 때마다 쌓이지 않는다
+        assert win.streamer_training() is None
+        assert win.statusBar().currentMessage() == "합성 막힘"
+    assert ts.list_sessions(root) == []
+    tdir = ts.training_dir(root)
+    assert not os.path.isdir(tdir) or os.listdir(tdir) == []
+    win.show_home()
+
+
+def test_training_labeler_hint_cleared_on_close(win, proj):  # noqa: F811
+    """다시 열기 전 세션의 라벨러 힌트는 그 작업대가 닫히면 비운다(다른 프로젝트 훈련 기록으로 새지 않게)."""
+    _open(win, proj["root"], None)
+    win._training_labeler_hint = "L02"
+    assert win._training_labeler() == "L02"
+    win.show_home()
+    assert win._training_labeler_hint is None
+
+
 def test_pending_training_dropped_when_project_changes(win, proj, monkeypatch):  # noqa: F811
     _slow_poll(monkeypatch)
     wb = _open(win, proj["root"], ctx(P2, "primary", "L01"))
@@ -485,6 +537,13 @@ def test_virtual_make_then_mix_on_by_default(win, proj):  # noqa: F811
     win.a_streamer_training.trigger()
     view = win.training_view
     assert view is not None and view.virtual_line_count() > 0
+    # retrieved 원 채팅(같은 방송 구간 밖)은 표에 실리지 않는다 — 가상 줄과 본문이 같은 실제 줄 0개(20 8장 3번)
+    d = view.chat.chat_data()
+    vtexts = {d.texts[i] for i in range(d.n) if d.chat_ids[i].startswith("v:")}
+    rtexts = {d.texts[i] for i in range(d.n) if not d.chat_ids[i].startswith("v:")}
+    assert vtexts and not (vtexts & rtexts)
+    sg = view._segment
+    assert all(sg[0] <= int(d.times[i]) < sg[1] for i in range(d.n) if not d.chat_ids[i].startswith("v:"))
     recs = ts.read_valid(ts.session_path(root, ts.list_sessions(root)[0]))[0]
     scn = sst.load_scenario(root, ids[0])
     assert recs[0]["body"]["scenario_id"] == ids[0] and recs[0]["body"]["scenario_sha256"] == scn.sha256
