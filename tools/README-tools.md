@@ -15,7 +15,8 @@
 | `calibrate.py` | 영상 시각 = 채팅 시각 앵커로 시각 보정을 기록한다. |
 | `extract_audio.py` | 영상에서 STT 용 16kHz 모노 WAV 를 뽑고 걸린 시간을 출력한다. |
 | `export_labels.py` | 프로젝트의 현재 유효 라벨을 zip 하나로 내보낸다 (`app.export.export_labels`). |
-| `make_scenario.py` | 가상 채팅 시나리오('retrieved' 만, H-2)를 `scenarios\` 에 만든다. 시범 프로젝트는 거부. 금칙어는 저장소 밖 `config\blocklist-ko.txt`(해시만 기록). |
+| `make_scenario.py` | 가상 채팅 시나리오(retrieved, H-2)를 `scenarios\` 에 만든다. `--generated <생성 후보>`(H-3, `python -m engine generate --out` 이 만든 파일)를 주면 retrieved 와 합치고 G 채점기(`app.core.gen_filter`)로 한 번 더 거른다 — 기본 `--generated-mode replace` 는 생성 몫(`--max-generated-ratio`, 기본 0.25)을 먼저 잡고 그 창의 점수 낮은 retrieved 를 뺀다(창 목표·가상 비율 상한은 그대로). 이 도구는 LLM 을 부르지 않는다. 시범 프로젝트는 거부(`--generated`·`--topic-flow`·`--blocklist`·`--projects-root` 가 시범 폴더 안이어도 읽기 전에 종료 2). `--generated` 는 원 닉네임 목록(`chat\protected\identities.jsonl`)이 없으면 `nicknames_missing` 종료 1(`--allow-no-identities` 로만 진행, 경고). 금칙어는 저장소 밖 `config\blocklist-ko.txt`(해시만 기록). |
+| `gen_e2e.py` | **H-3 생성 끝에서 끝까지 스모크(가짜 LLM, 사람 클릭 0)**: 원 프로젝트(기본 개발용 `p15767532`, 읽기만)의 필요한 파일만 `%LOCALAPPDATA%\ChatCoachSmoke\gen-e2e-*` 사본으로 → `engine generate --fake`(고정 합성 응답) · `engine generate --model … --url http://127.0.0.1:<가짜 서버>`(`engine.llm_local` → `engine.llm_fake.FakeLLMServer`, 받은 자료 낱말로 합성 줄) → `make_scenario --generated` → 스트리머 훈련 화면에 섞여 흐름(가·생 표시) → 시나리오·생성 후보·보낸 기록·보낸 요청·훈련 기록 바이트 검사(실제 닉네임·viewer_id·user_id_hash·가림 닉네임·본문 0건). 소켓 연결은 가짜 서버 포트만(그 밖은 막고 셈). 시범(pilot-*·시범 기록)은 아무것도 열기 전에 종료 2. 끝나면 `shutil.rmtree`. 출력은 숫자·코드만. 종료 0 = 검사 모두 통과. |
 | `viewer_score_calib.py` | 시청자 훈련 채점 보정 자료: 반응받은 채팅과 같은 구간 다른 채팅의 세 축 분포·lift·정밀도·문턱 후보(기본값은 바꾸지 않음). 손라벨 길과 시범 최종 세트 길(`--final-set`, D-22). 출력은 숫자·코드만. |
 
 ## AI 결과 · 봉인
@@ -23,9 +24,9 @@
 | 도구 | 한 줄 설명 |
 |---|---|
 | `engine_to_ai.py` | 엔진 link 출력 → ai-result 1판. 시범 프로젝트는 `--seal` 로만 받는다(D-15 8). `--engine v0.3`(로컬 임베딩 의미 비교, 엔진 venv) · 짝 셋(판정 봉인의 짝으로 봉인, `--out a.json` 이면 `a.<짝>.json`): `--topics`(주제 흐름, D-17 5) · `--words`(시각별 전사 낱말, D-20 3) · `--vectors`(창별 주제 벡터, D-22). 낱말·벡터 평문 파일은 그 프로젝트 보호 구역 안일 때만 쓴다. 리허설·시범: `--from-project <P> --seal --by L01 --topics --words --vectors`. |
-| `ai_seal.py` | AI 결과 봉인 받기·상태·해제 (`app.seal`). `seal`·`status`('봉인됨 n건', 짝 유무, 해제 뒤 엔진 판)·`check`(해제 조건만)·`unseal --all`(프로젝트 하나를 손으로 풀 때 — 해제 당일 입구는 `pilot_unseal_day.py` 하나)·`verify`(해제된 결과·짝 파일을 해제 기록 해시와 대조). 출력은 JSON 한 줄(해시 앞 12자·코드·건수). |
+| `ai_seal.py` | AI 결과 봉인 받기·상태·해제 (`app.seal`). `seal`·`status`('봉인됨 n건', 짝 유무, 나중에 붙인 짝 `pairs_attached`, 해제 뒤 엔진 판)·`check`(해제 조건만)·`unseal --all`(프로젝트 하나를 손으로 풀 때 — 해제 당일 입구는 `pilot_unseal_day.py` 하나)·`verify`(해제된 결과·짝 파일을 해제 기록 해시와 대조)·**`attach-pairs`**(짝 보충, D-23 3: 이미 있는 판정 봉인에 주제 흐름·전사 낱말·벡터 짝을 붙인다. 판정은 다시 봉인하지 않아 사전 봉인 여부 그대로. `--all` 또는 `--sha256 <앞 12자 이상>`, 입력은 `--from-engine`(엔진을 메모리로, 엔진 venv, 판정과 같은 `--asr`·범위) 또는 `--topics/--words/--vectors <파일> [--remove-source]` — 시범은 낱말·벡터 파일이 `chatcoach-data\sealed-work` 아래일 때만. 이미 있는 짝은 'present' 로 건너뛰고, 하나라도 거부되면 아무것도 붙이지 않는다). 오류 줄에 원인 코드 `code`(`app.seal.SEAL_ERROR_CODES` — `dup_run_id`·`sealed_mismatch`·`messages_missing` 등). 출력은 JSON 한 줄(해시 앞 12자·코드·건수). |
 | `ai_compare.py` | 해제한 run 과 최종 세트로 AI 비교 보고서를 만든다 (`app.ai_compare`). |
-| `pilot_unseal_day.py` | **시범 해제 당일 한 번에**(D-22 2): 조건 확인 → 3편 해제(짝 포함) → 해제 파일 대조(`ai_seal.verify_project`) → 일치도 보고서가 없으면 만듦(요약 폴더 `agreement\`) → AI 비교 보고서 → 엔진 판끼리 견주기 → 보정 재측정 → 요약(숫자·코드·ID 만). 한 편이라도 조건이 안 되면 아무것도 풀지 않고 종료 3. **기본은 dry-run**(조건만 보고 아무것도 쓰지 않음) — 되돌릴 수 없는 해제는 `--go` 를 줄 때만. 기본 폴더는 없다: `--projects-root`·`--project` 를 주거나, 실제 데이터 폴더(`chatcoach-data`)면 `--real` 이 있어야 한다(없으면 아무것도 열기 전에 종료 2). 해제 당일 차례: 세션이 모두 잠긴 뒤 `--real`(dry-run) → 사용자 세션의 '시작' 확인 → `--real --go`. 유효한 봉인이 풀리지 않거나 seal.jsonl 이 깨졌으면 오류 코드(`unseal:SealError`·`seal_jsonl:problems`)와 종료 1. 시범 폴더 안에는 쓰지 않고(열기 감시), 사람 클릭 0 — Claude 가 돌린다. 리허설은 합성 시범 프로젝트로만(사용자가 라벨링 중인 실제 시범 폴더로는 dry-run 도 돌리지 않는다). |
+| `pilot_unseal_day.py` | **시범 해제 당일 한 번에**(D-22 2): 조건 확인 → 3편 해제(짝 포함) → 해제 파일 대조(`ai_seal.verify_project`) → 일치도 보고서가 없으면 만듦(요약 폴더 `agreement\`) → AI 비교 보고서 → 엔진 판끼리 견주기 → 보정 재측정 → 요약(숫자·코드·ID 만). 한 편이라도 조건이 안 되면 아무것도 풀지 않고 종료 3. **기본은 dry-run**(조건만 보고 아무것도 쓰지 않음) — 되돌릴 수 없는 해제는 `--go` 를 줄 때만. 기본 폴더는 없다: `--projects-root`·`--project` 를 주거나, 실제 데이터 폴더(`chatcoach-data`)면 `--real` 이 있어야 한다(없으면 아무것도 열기 전에 종료 2). 해제 당일 차례: 세션이 모두 잠긴 뒤 `--real`(dry-run) → 사용자 세션의 '시작' 확인 → `--real --go`. 유효한 봉인이 풀리지 않거나 seal.jsonl 이 깨졌으면 오류 코드(`unseal:<원인 코드>` — `app.seal.SEAL_ERROR_CODES`, 예 `unseal:dup_run_id`·`unseal:seal_jsonl_corrupt` — 와 `seal_jsonl:problems`)와 종료 1. 시범 폴더 안에는 쓰지 않고(열기 감시), 사람 클릭 0 — Claude 가 돌린다. 리허설은 합성 시범 프로젝트로만(사용자가 라벨링 중인 실제 시범 폴더로는 dry-run 도 돌리지 않는다). |
 | `agreement_report.py` | 잠긴 두 세션의 일치도 보고서 (`app.agreement_report`). 하나라도 안 잠겼으면 라벨 파일을 열지 않고 종료 3. |
 
 - **시범 엔진 작업 폴더(`chatcoach-data\sealed-work`)의 산출물(wav·asr.json 등)은 휴지통으로 보내지 않는다.** 봉인(`sealed\<sha>.bin`)이
@@ -56,6 +57,7 @@
 | `update_roundtrip.py` | 앱 안 업데이트 왕복 시험(04 12-5)을 자동으로 돌린다. `--rollback` 이면 업데이트 직후 실행에서 [도움말 → 이전 버전으로 되돌리기] 메뉴 함수로 되돌리고 확인한다. |
 | `pilot_setup.py` | 시범 영상 폴더 → 프로젝트·채팅·앵커 후보 (보정은 제안만). `--dry-run` 은 아무것도 쓰지 않는다. |
 | `pilot_freeze.py` | 시범 시작 때 라벨 형식·기준서 v0.1 고정 기록(freeze.json)을 한 번 만들고, 시범 중에는 `--check` 로 확인. |
+| `pilot_rehearsal.py` | **해제 당일 리허설**(합성 시범 3편, 사람 클릭 0): 판정만 사전 봉인 → 1차 잠금 → 해제 당일 dry-run 이 종료 3 → 재라벨 잠금 → `ai_seal attach-pairs`(sealed-work 의 합성 짝 파일, `--remove-source`) → dry-run 종료 0 → `pilot_unseal_day --go` 종료 0(편마다 해제 2·짝 셋 각 2·대조 ok·사전 봉인 2) → 편마다 `ai_seal verify` → 출력에 합성 표지 없음. 자리는 `%LOCALAPPDATA%\ChatCoachSmoke\rehearsal-*` 만(밖이거나 실제 데이터 폴더면 종료 2), 끝나면 `shutil.rmtree`. 도구는 모두 같은 프로세스에서 `main(argv)` 로 부른다(앱 데이터 폴더 지정이 저장소 `data\` 로 새지 않게). `--gui`(화면 확인, 합성 영상은 로컬 ffmpeg) · `--seal-mode together`(지난 묶음 방식) · `--keep` · `--json`. 합성 자료는 `tests/test_pilot_unseal_day` 의 도우미를 쓴다. 종료 0 = 검사 모두 통과. |
 | `fake_release_server.py` | 127.0.0.1 전용 가짜 릴리스 서버와 시험 릴리스 준비. |
 
 - **스모크가 멈췄을 때 읽는 법** (`smoke_watch.py` 요약 줄·watch.log — 먼저 `python tools/smoke_watch.py --summarize` 한 번):
@@ -65,6 +67,8 @@
   ② Suspended 가 0 인데 출력이 멈추고 덤프를 받았다 → 요약의 '주 스레드: 단계 step_… (줄)' 과 '가장 안쪽' 틀을 본다.
   요약 판정이 'CPU 를 쓰며 돎' 이면 출력 없이 긴 단계(예: 23 5-2 의 23 — `flow_reaction` 의 두 번 듣기 2배속 재생 42초, `step_labeling_flow`
   가 재생 범위 도달을 기다림)이고 교착이 아니다. 'CPU 거의 0' 이면 무언가를 기다리는 것이라 그 틀이 원인 후보다.
+  두 번 듣기는 이제 진행 줄(`  .. flow_reaction 다시 듣기 n/2 시작 · coverage=… 10초마다 · 끝`, 24 5-2 의 13)을 찍으므로 전체 흐름도
+  기본 `--stall 30` 으로 가짜 멈춤이 잡히지 않는다. 진행 줄은 PASS/FAIL 줄과 모양이 달라 요약의 단계 이름에는 들어가지 않는다.
   ③ `Timeout (` 덤프(자동) → 어떤 스레드가 GIL 을 60초 넘게 쥐었다(같은 실행에 Suspended 표본이 있으면 외부 정지가 풀릴 때 생긴 가짜일 수 있음,
   23 5-2 의 24). ④ `Windows fatal exception` → 치명 오류(접근 위반 등) 순간의 스택('오류 난 스레드').
   스택 파일에는 파일·함수 이름과 줄 번호만 있다(채팅 본문·닉네임 없음). 요약은 경로를 저장소 상대·`site-packages/…`·파일 이름으로 줄이고,

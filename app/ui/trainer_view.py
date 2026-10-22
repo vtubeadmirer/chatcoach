@@ -49,7 +49,8 @@ training_menu_state() 는 폴더 이름(pilot-*)만 보는 이중 잠금이고, 
 {"records", "resolve"}(retrieved 본문을 원 messages.jsonl 에서 읽는 함수 — 부르는 쪽이 준다).
 결과는 app.core.training.split_mixed 로 화면 줄을 만든다: 가상 줄의 화면 id 는 'v:'+line_id, 이름은 시나리오의 가림
 이름(없으면 '시청자N'), 원래 채팅의 닉네임·viewer_id 는 버린다. messages.jsonl 에는 아무것도 쓰지 않는다.
-- 연습 화면 표시(20 2장·5-2·9장 3): 가상 줄의 닉네임 칸 뒤에 ' · 가져옴'·' · 생성'. show_virtual_marks=False 면
+- 연습 화면 표시(20 2장·5-2·9장 3): 가상 줄의 닉네임 칸 앞에 출처 한 글자('가'·'생', 좁은 칸에서도 잘리지 않게),
+  뒤에 ' · 가져옴'·' · 생성' — 예 '생 두* · 생성'. show_virtual_marks=False 면
   숨긴다(H-5 가려내기용 — 그 화면은 '생성 채팅이 섞여 있음' 한 줄을 따로 보여야 한다). 견주기는 늘 드러낸다.
 - 가상 채팅도 고르기·취소(한 번 누름)가 된다. 견주기 점수(같음·나만·원래만·맞힌 비율·시각 차)는 replay 만으로
   낸다 — compare_fn 에는 실제 채팅 고르기만 넘긴다. 가상 고르기는 core.training.compare_virtual 로 따로 세어
@@ -85,6 +86,9 @@ END_TOL_MS = 200                # 구간 끝 이만큼 앞이면 끝난 것으�
 SOURCE_REPLAY = "replay"        # D-05: 실제 채팅 재생
 
 VIRTUAL_TAG = {"retrieved": "가져옴", "generated": "생성"}   # 연습 화면의 가상 표시 (20 2장)
+# 닉네임 칸 **앞** 한 글자 표시: 출처를 한눈에 가른다. 닉네임 칸은 폭이 좁아(64px, 뒤를 줄임표로 자름) 뒤의
+# ' · 가져옴'·' · 생성' 이 잘려 retrieved 와 generated 가 같아 보일 수 있다 — 앞 글자는 잘리지 않는다(H-3 준비).
+VIRTUAL_MARK = {"retrieved": "가", "generated": "생"}
 
 REASON_NO_REFERENCE = "라벨이 잠긴 구간이 없습니다"
 REASON_NO_SCENARIO = "가상 채팅이 아직 없습니다"
@@ -578,7 +582,8 @@ class TrainerView(QWidget):
         if show_marks:
             for r in rows:
                 if trn.is_virtual_id(r.get("chat_id")) and r.get("source") in VIRTUAL_TAG:
-                    r["nickname_masked"] = f"{r['nickname_masked']} · {tr(VIRTUAL_TAG[r['source']])}"
+                    src = r["source"]
+                    r["nickname_masked"] = f"{tr(VIRTUAL_MARK[src])} {r['nickname_masked']} · {tr(VIRTUAL_TAG[src])}"
         return rows, vno, vlines
 
     # ------------------------------------------------------------------ 고르기

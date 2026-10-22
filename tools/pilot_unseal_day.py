@@ -11,7 +11,8 @@
   3. 해제: 프로젝트마다 seal_status 의 봉인(검사 valid, 아직 안 푼 것)을 모두 seal.unseal 로 푼다(짝 주제 흐름·전사 낱말·
      벡터는 seal 이 같이 푼다). 해제는 되돌릴 수 없으므로 조건을 모두 본 뒤에만. 푼 뒤 tools/ai_seal.verify_project 로
      결과·짝 파일을 해제 기록 해시와 대조한다(어긋나면 오류 'verify:unsealed_files', 종료 1). 유효한 봉인이 풀리지 않으면
-     (seal.unseal 의 SealError) 건수만큼 오류 'unseal:SealError', seal.jsonl 에 문제(끝 줄 잘림 등)가 있으면 오류
+     (seal.unseal 의 SealError) 건수만큼 오류 'unseal:<원인 코드>'(seal.SEAL_ERROR_CODES — 예 'unseal:dup_run_id'·
+     'unseal:seal_jsonl_corrupt'), seal.jsonl 에 문제(끝 줄 잘림 등)가 있으면 오류
      'seal_jsonl:problems' — 둘 다 종료 1(해제 실패가 '오류 0' 으로 가려지지 않게). 해제 당일 입구는 이 도구
      하나다 — ai_seal 'unseal --all'·'verify' 는 같은 seal.unseal·대조를 프로젝트 하나에 손으로 할 때 쓴다.
   4. AI 비교 보고서: 해제된 run 마다(엔진 v0.2·v0.3 모두) ai_compare.make_report. 최종 세트는 프로젝트마다 한 번 만든다
@@ -312,7 +313,7 @@ def unseal_project(root: str, *, by: str, ai_root: str | None = None) -> dict:
         try:
             r = seal.unseal(root, e.sha256, by=by, ai_root=ai_root)
         except seal.SealError as x:
-            out["failed"].append(type(x).__name__)
+            out["failed"].append(seal.error_code(x))          # 원인 코드(seal.SEAL_ERROR_CODES, 예: dup_run_id)
             continue
         out["unsealed_now"] += 1
         out["presealed"] += int(bool(r.presealed))
@@ -627,7 +628,8 @@ def touches_real_data(paths: Sequence[str | None]) -> bool:
 
 
 def unseal_errors(u: Mapping) -> list[str]:
-    """unseal_project 결과 → 오류 코드(풀리지 않은 유효 봉인 건수만큼 'unseal:<예외>', seal.jsonl 문제 'seal_jsonl:problems').
+    """unseal_project 결과 → 오류 코드(풀리지 않은 유효 봉인 건수만큼 'unseal:<원인 코드>' — seal.error_code, seal.jsonl 문제
+    'seal_jsonl:problems').
     이 코드가 있으면 run_day 는 종료 1 — 해제가 실패했는데 '오류 0' 으로 보이지 않게(앱에는 '봉인됨' 으로 남는다)."""
     out = [f"unseal:{f}" for f in u.get("failed") or ()]
     if u.get("seal_problems"):
@@ -685,7 +687,8 @@ def run_day(roots: Sequence[str], *, out_root: str, by: str = "L01", ai_root: st
             try:
                 p["unseal"] = unseal_project(r, by=by, ai_root=ai_root)
             except Exception as e:  # noqa: BLE001
-                p["errors"].append(f"unseal:{type(e).__name__}")
+                from app import seal as _seal
+                p["errors"].append(f"unseal:{_seal.error_code(e)}")
                 continue
             p["unseal_s"] = round(time.perf_counter() - ts, 2)
             p["errors"] += unseal_errors(p["unseal"])         # 풀리지 않은 유효 봉인 · 깨진 seal.jsonl → 종료 1

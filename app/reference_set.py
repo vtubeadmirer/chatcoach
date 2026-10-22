@@ -17,6 +17,15 @@
     잠금·계획·표본 매니페스트만 열고 **라벨 파일은 열지 않는다**. 판단이 안 되면(오류) 잠기지 않은 것으로 본다.
   - 시범인데 모두 잠기지 않았으면 훈련 메뉴를 끈다. 이때는 최종 세트도 손라벨도 **열지 않는다**.
 
+자리(reader_kind, 24 5-2 의 9)
+  - 공개 함수는 reader_kind(부르는 세션 종류, app.core.visibility)를 받는다. 기본 None = 세션 밖(지금까지와 같다).
+  - 라벨링(1차·재라벨)·출처 판정 세션, 모르는 종류(= 봉인 AI 결과 ai_sealed 를 열 수 없는 자리, 03 12-1)는 **아무것도 열기
+    전에** 막는다: 최종 세트를 만들면 다른 세션 라벨과 seal.jsonl(노출 계산의 해제 기록)을 읽게 되고, 시범 판단도 잠금·계획을
+    읽기 때문이다. 이때 training_availability·load_reference 는 꺼짐(REASON_SEAT), pilot_block_reason 은 REASON_SEAT,
+    pilot_sessions_locked 는 (False, [REASON_SEAT]), load_final_set_reference 는 (None, 'seat_blind').
+    is_pilot_project 는 이름·시범 기록(freeze.json·setup.json)만 보므로 막지 않는다.
+  - 조정·분석 세션은 막지 않는다(지금까지와 같은 길로 읽는다).
+
 본문·닉네임은 읽지 않거나 버린다(chat_id·시각·등급만, D-17 8). 이 모듈은 파일을 쓰지 않는다.
 """
 from __future__ import annotations
@@ -41,6 +50,17 @@ PILOT_META_MAX_BYTES = 4 * 1024 * 1024
 REASON_NO_REFERENCE = "라벨이 잠긴 구간이 없습니다"
 REASON_PILOT_LOCKED = "시범 세션이 모두 잠기기 전에는 훈련을 열지 않습니다 (D-18 7)"
 REASON_NO_PROJECT = "프로젝트를 열지 못했습니다"
+REASON_SEAT = "이 세션에서는 훈련 기준(다른 세션 라벨·봉인 기록)을 열지 않습니다 (06 7-3)"
+SEAT_BLIND = "seat_blind"
+
+
+def seat_blind(reader_kind: str | None) -> bool:
+    """이 자리가 훈련 기준 읽기를 막아야 하는가. None(세션 밖)은 아니다. 봉인 AI 결과(ai_sealed)를 열 수 없는 자리 —
+    라벨링(1차·재라벨)·출처 판정·모르는 종류 — 는 막는다(03 12-1). 파일을 열지 않는다."""
+    if reader_kind is None:
+        return False
+    from .core import visibility as vis
+    return vis.files_to_open(reader_kind).access("ai_sealed") == vis.NONE
 
 
 @dataclass
@@ -149,9 +169,11 @@ def is_pilot_project(project_dir: str, *, pilot_dir: str | None = None) -> bool:
     return False
 
 
-def pilot_sessions_locked(project_dir: str) -> tuple[bool, list[str]]:
+def pilot_sessions_locked(project_dir: str, *, reader_kind: str | None = None) -> tuple[bool, list[str]]:
     """시범 세션이 모두 잠겼나 — (잠김, 아닌 까닭 목록). seal.unseal_conditions(06 7-1)와 같은 판단.
-    잠금·계획·표본 매니페스트만 연다. 오류면 (False, [까닭])."""
+    잠금·계획·표본 매니페스트만 연다. 오류면 (False, [까닭]). 막는 자리(seat_blind)면 열기 전에 (False, [REASON_SEAT])."""
+    if seat_blind(reader_kind):
+        return False, [REASON_SEAT]
     from . import seal
     root = _root(project_dir)
     try:
@@ -161,8 +183,12 @@ def pilot_sessions_locked(project_dir: str) -> tuple[bool, list[str]]:
     return bool(cond.met), list(cond.reasons)
 
 
-def pilot_block_reason(project_dir: str, *, pilot_dir: str | None = None) -> str | None:
-    """시범 프로젝트이고 시범 세션이 모두 잠기지 않았으면 그 까닭 한 줄. 아니면 None."""
+def pilot_block_reason(project_dir: str, *, pilot_dir: str | None = None,
+                       reader_kind: str | None = None) -> str | None:
+    """시범 프로젝트이고 시범 세션이 모두 잠기지 않았으면 그 까닭 한 줄. 아니면 None.
+    막는 자리(seat_blind)면 시범이든 아니든 아무것도 열기 전에 REASON_SEAT."""
+    if seat_blind(reader_kind):
+        return REASON_SEAT
     if not is_pilot_project(project_dir, pilot_dir=pilot_dir):
         return None
     ok, _ = pilot_sessions_locked(project_dir)
@@ -248,8 +274,12 @@ def _span_of(refs: Iterable[tr.RefReaction]) -> list[tuple[int, int]]:
     return [(min(cs), max(ts) + 1)]
 
 
-def load_final_set_reference(project_dir: str) -> tuple[ReferenceSet | None, str | None]:
-    """(가) 사람 최종 세트. (기준 또는 None, 없을 때 까닭 이름). 잠긴 세션만 읽는다(export.build_final_set 규칙)."""
+def load_final_set_reference(project_dir: str, *,
+                             reader_kind: str | None = None) -> tuple[ReferenceSet | None, str | None]:
+    """(가) 사람 최종 세트. (기준 또는 None, 없을 때 까닭 이름). 잠긴 세션만 읽는다(export.build_final_set 규칙).
+    막는 자리(seat_blind)면 열기 전에 (None, SEAT_BLIND) — 최종 세트는 다른 세션 라벨과 seal.jsonl 을 읽는다."""
+    if seat_blind(reader_kind):
+        return None, SEAT_BLIND
     from . import export
     try:
         fx = export.build_final_set(_root(project_dir))
@@ -330,8 +360,12 @@ def load_manual_reference(project_dir: str) -> ReferenceSet | None:
 
 
 # ----------------------------------------------------------------------------- 묶음
-def load_reference(project_dir: str, *, pilot_dir: str | None = None) -> tuple[ReferenceSet | None, str | None]:
-    """훈련 기준. (기준, None) 또는 (None, 꺼진 까닭 한 줄). 시범이고 모두 잠기지 않았으면 아무 라벨도 열지 않는다."""
+def load_reference(project_dir: str, *, pilot_dir: str | None = None,
+                   reader_kind: str | None = None) -> tuple[ReferenceSet | None, str | None]:
+    """훈련 기준. (기준, None) 또는 (None, 꺼진 까닭 한 줄). 시범이고 모두 잠기지 않았으면 아무 라벨도 열지 않는다.
+    막는 자리(seat_blind — 라벨링·출처 판정 세션)면 아무것도 열기 전에 (None, REASON_SEAT)."""
+    if seat_blind(reader_kind):
+        return None, REASON_SEAT
     root = _root(project_dir)
     if not os.path.isfile(os.path.join(root, "project.json")):
         return None, REASON_NO_PROJECT
@@ -346,8 +380,12 @@ def load_reference(project_dir: str, *, pilot_dir: str | None = None) -> tuple[R
     return ref, None
 
 
-def training_availability(project_dir: str, *, pilot_dir: str | None = None) -> Availability:
-    """메뉴 '훈련 → 스트리머 훈련' 을 켤지. 꺼지면 까닭 한 줄(18 6-2)."""
+def training_availability(project_dir: str, *, pilot_dir: str | None = None,
+                          reader_kind: str | None = None) -> Availability:
+    """메뉴 '훈련 → 스트리머 훈련' 을 켤지. 꺼지면 까닭 한 줄(18 6-2).
+    막는 자리(seat_blind)면 project.json·시범 기록·라벨·seal.jsonl 을 하나도 열지 않고 꺼짐(REASON_SEAT)."""
+    if seat_blind(reader_kind):
+        return Availability(False, REASON_SEAT, False, None)
     root = _root(project_dir)
     pilot = os.path.isfile(os.path.join(root, "project.json")) and is_pilot_project(root, pilot_dir=pilot_dir)
     ref, why = load_reference(root, pilot_dir=pilot_dir)
@@ -359,4 +397,5 @@ __all__ = [
     "default_pilot_dir", "reference_from_final_export", "load_final_set_reference", "manual_csv_files",
     "read_manual_csv", "load_manual_reference", "load_reference", "training_availability",
     "REASON_NO_REFERENCE", "REASON_PILOT_LOCKED", "REASON_NO_PROJECT", "MANUAL_REQUIRED",
+    "REASON_SEAT", "SEAT_BLIND", "seat_blind",
 ]

@@ -25,6 +25,12 @@
 - 짝 하나가 깨져도 판정 해제는 막지 않는다 — 그 짝만 풀지 않고 코드(<짝>_unreadable·_bin_mismatch·_json·_format)를 남긴다.
 - 벡터 검사(vectors_check)는 앱 쪽 규칙이다(앱은 엔진을 import 하지 않는다, D-06): 칸 모양·target·벡터 해시·
   app.core.viewer_score.vectors_from_doc 이 모든 창을 읽는지. 엄한 검사(정규화 길이 등)는 engine.topic_vectors.validate 몫.
+- 짝 보충(attach_pairs, D-23 3): 판정만 봉인된 것에 짝을 나중에 붙인다(판정을 다시 봉인하지 않는다 — 사전 봉인 여부 그대로).
+  먼저 모두 검사하고 하나라도 거부되면 아무것도 붙이지 않는다. 이미 있는 짝은 덮어쓰지 않는다('present'). 붙인 짝 기록에는
+  attached = true · after_primary_lock 칸이 더해진다(SealEntry.pairs_attached). 명령줄은 tools/ai_seal.py attach-pairs.
+
+원인 코드 (24 5-2 의 5): SealError 마다 .code(SEAL_ERROR_CODES — dup_run_id·sealed_mismatch·messages_missing 등). 메시지(str)는
+사람이 읽는 문장 그대로 두고(화면에 그대로 보인다), 도구·요약은 error_code(예외) 로 'unseal:<코드>' 를 적는다.
 
 봉인 (seal_bytes · seal_file)
 - 언제든 받는다. 받을 때 06 6-2 검사를 **들어온 바이트로** 돌려 '유효 / 거부 코드' 만 남긴다. 내용은 화면·로그·기록에
@@ -113,24 +119,64 @@ __all__ = [
     "seal_topics_bytes", "seal_topics_file", "read_topics", "topics_check", "TOPICS_SOURCE_KINDS",
     "seal_words_bytes", "seal_words_file", "read_words", "words_check", "WORDS_SOURCE_KINDS",
     "seal_vectors_bytes", "seal_vectors_file", "read_vectors", "vectors_check", "VECTORS_SOURCE_KINDS",
+    "SEAL_ERROR_CODES", "error_code", "attach_pairs", "AttachResult", "ATTACH_SOURCES",
 ]
 
 
+#: SealError 의 원인 코드 (24 5-2 의 5). 메시지(str)는 사람이 읽는 문장 그대로 두고, 기계가 읽는 원인은 .code 에 둔다 —
+#: 해제 당일 요약·도구 출력은 'unseal:<코드>' 로 적는다(error_code). 코드에는 내용·경로·ID 가 없다.
+SEAL_ERROR_CODES = (
+    "seal_error",              # 코드를 주지 않은 SealError(옛 호출)
+    "reader_blind",            # 이 자리(세션 종류)는 data\ai 를 열지 않는다 (SealBlindError)
+    "not_unsealed",            # 해제 기록이 없는 run 을 읽으려 함 (SealNotUnsealedError)
+    "conditions_unmet",        # 06 7-1 해제 조건 안 됨 (SealBlockedError)
+    "already_unsealed",        # 이미 해제한 봉인 (AlreadyUnsealedError)
+    "project_id_format", "ai_dir_in_project", "ai_dir_in_repo", "project_json", "bad_by",
+    "seal_jsonl_corrupt",      # seal.jsonl 깨진 줄·끝 줄 잘림 — 새 기록을 쓰지 않는다
+    "lock_unreadable", "lock_session_mismatch",
+    "source_kind", "too_large", "sha_format", "reason_length",
+    "pair_sha_format",         # 짝 sha256 형식이 아님
+    "pair_missing",            # 짝 판정 봉인이 없음
+    "pair_unsealed",           # 짝 판정이 이미 해제됨(붙이지 않음)
+    "pair_not_valid",          # 짝 판정 봉인이 받을 때 거부된 것(붙이지 않음, attach_pairs)
+    "pair_kind",               # 모르는 짝 종류(attach_pairs)
+    "no_seal_record",          # 봉인 기록이 없는 해시
+    "rejected_at_seal",        # 받을 때 거부된 결과는 해제하지 않음
+    "messages_missing",        # 프로젝트 채팅 파일이 없거나 읽을 줄이 없음
+    "sealed_unreadable",       # 봉인 파일(.bin)을 읽지 못함
+    "sealed_mismatch",         # 봉인 파일이 기록과 다름(바뀌었거나 손상)
+    "recheck_rejected",        # 지금 프로젝트와 대조하면 거부됨
+    "all_dropped",             # 판정이 모두 이 프로젝트에 없는 chat_id
+    "run_id_format",
+    "dup_run_id",              # 같은 run_id 의 다른 결과가 이미 해제됨
+    "unsealed_mismatch",       # 해제한 파일(runs·짝)이 해제 기록의 해시와 다름
+)
+
+
 class SealError(RuntimeError):
-    """봉인·해제를 할 수 없다. 메시지에 내용·경로를 넣지 않는다(해시·코드·건수만)."""
+    """봉인·해제를 할 수 없다. 메시지에 내용·경로를 넣지 않는다(해시·코드·건수만). .code = 원인 코드(SEAL_ERROR_CODES)."""
+    code = "seal_error"
+
+    def __init__(self, msg: str = "", *, code: str | None = None):
+        super().__init__(msg)
+        if code:
+            self.code = code
 
 
 class SealBlindError(SealError, PermissionError):
     """이 자리(세션 종류)는 data\\ai 를 열지 않는다(06 7-3). 파일을 열기 전에."""
+    code = "reader_blind"
 
 
 class SealNotUnsealedError(SealBlindError):
     """해제 기록(ai.unsealed)이 없는 run 을 읽으려 했다 — 해제 전에는 어느 자리에서도 runs·topics·words·vectors 를
     열지 않는다(파일을 열기 전에). SealBlindError 이므로 '블라인드라 못 봄' 으로 다루면 된다."""
+    code = "not_unsealed"
 
 
 class SealBlockedError(SealError):
     """06 7-1 해제 조건이 되지 않았다. reasons 에 사유 문장(세션·계획 ID 와 건수만)."""
+    code = "conditions_unmet"
 
     def __init__(self, reasons: list[str]):
         self.reasons = list(reasons)
@@ -139,6 +185,13 @@ class SealBlockedError(SealError):
 
 class AlreadyUnsealedError(SealError):
     """이미 해제한 봉인이다."""
+    code = "already_unsealed"
+
+
+def error_code(exc: BaseException) -> str:
+    """예외 → 원인 코드. SealError 면 .code, 아니면 예외 이름(OSError 등). 해제 당일 요약의 'unseal:<코드>' 에 쓴다."""
+    c = getattr(exc, "code", None) if isinstance(exc, SealError) else None
+    return c if isinstance(c, str) and c else type(exc).__name__
 
 
 @dataclass
@@ -160,6 +213,7 @@ class SealEntry:
     words_sha256: str | None = None              # 짝으로 봉인한 시각별 전사 낱말(검사 통과한 마지막 것, D-20 3)
     vectors_sha256: str | None = None            # 짝으로 봉인한 창별 주제 벡터(검사 통과한 마지막 것, 23 5-2 의 2)
     engine_version: str | None = None            # 해제 기록의 엔진 판(해제 뒤에만, 옛 기록은 None = 판 모름)
+    pairs_attached: list[str] = field(default_factory=list)   # 짝 보충(attach_pairs)으로 나중에 붙인 짝 종류(D-23 3)
 
 
 @dataclass
@@ -246,19 +300,19 @@ def default_ai_root(project_root: str) -> str:
 def project_ai_dir(project_root: str, project_id: str, ai_root: str | None = None) -> str:
     """<ai 루트>\\<project_id>. 프로젝트 폴더·저장소(git 작업 트리) 안이면 SealError."""
     if not isinstance(project_id, str) or not PROJECT_ID_RE.match(project_id):
-        raise SealError("project_id 형식이 아닙니다")
+        raise SealError("project_id 형식이 아닙니다", code="project_id_format")
     base = os.path.abspath(ai_root or default_ai_root(project_root))
     if _under(base, project_root):
-        raise SealError("AI 결과 폴더가 프로젝트 폴더 안입니다(06 7-2: 프로젝트 밖)")
+        raise SealError("AI 결과 폴더가 프로젝트 폴더 안입니다(06 7-2: 프로젝트 밖)", code="ai_dir_in_project")
     if _under(base, paths.code_dir()) or _in_git_tree(base):
-        raise SealError("AI 결과 폴더가 저장소 안입니다")
+        raise SealError("AI 결과 폴더가 저장소 안입니다", code="ai_dir_in_repo")
     return os.path.join(base, project_id)
 
 
 def _project(project_root: str):
     p = open_project(project_root)
     if p.data is None or not p.project_id:
-        raise SealError("project.json 을 읽지 못했습니다")
+        raise SealError("project.json 을 읽지 못했습니다", code="project_json")
     return p
 
 
@@ -288,7 +342,7 @@ def _app_version(v: str | None) -> str:
 
 def _check_by(by) -> str:
     if not isinstance(by, str) or not LABELER_RE.match(by):
-        raise SealError("by 는 라벨러 ID(예: L01) 여야 합니다")
+        raise SealError("by 는 라벨러 ID(예: L01) 여야 합니다", code="bad_by")
     return by
 
 
@@ -307,7 +361,7 @@ def _read_records(d: str) -> tuple[list[dict], list[str]]:
 def _append(d: str, rec: dict) -> dict:
     recs, probs = _read_records(d)
     if probs:
-        raise SealError("seal.jsonl 이 깨져 새 기록을 쓰지 않습니다: " + "; ".join(probs[:3]))
+        raise SealError("seal.jsonl 이 깨져 새 기록을 쓰지 않습니다: " + "; ".join(probs[:3]), code="seal_jsonl_corrupt")
     seq = max((r.get("seq", 0) for r in recs if isinstance(r.get("seq"), int)), default=0) + 1
     full = {"v": RECORD_V, "seq": seq, **rec}
     jsonl.append(os.path.join(d, SEAL_FILE), full)
@@ -346,9 +400,9 @@ def _lock_docs(project_root: str) -> list[tuple[str, str, dict]]:
                 raw = f.read(LOCK_MAX_BYTES + 1)
             doc = load_json_strict(raw, LOCK_MAX_BYTES)
         except (OSError, StrictJsonError):
-            raise SealError(f"{sid} 의 잠금 파일을 읽지 못했습니다") from None
+            raise SealError(f"{sid} 의 잠금 파일을 읽지 못했습니다", code="lock_unreadable") from None
         if doc.get("session_id") != sid:
-            raise SealError(f"{sid} 의 잠금 파일 session_id 가 이름과 다릅니다")
+            raise SealError(f"{sid} 의 잠금 파일 session_id 가 이름과 다릅니다", code="lock_session_mismatch")
         out.append((sid, hashlib.sha256(raw).hexdigest(), doc))
     return out
 
@@ -380,13 +434,13 @@ def seal_bytes(project_root: str, data: bytes, *, source: str, by: str, now: dat
     크기 상한을 넘으면 봉인하지 않고 SealError. 거부된 파일도 봉인은 한다(check = rejected — 해제는 거부)."""
     _guard(reader_kind, unseal=False)
     if source not in SOURCE_KINDS:
-        raise SealError(f"출처 종류는 {SOURCE_KINDS} 가운데 하나여야 합니다")
+        raise SealError(f"출처 종류는 {SOURCE_KINDS} 가운데 하나여야 합니다", code="source_kind")
     _check_by(by)
     if not isinstance(data, (bytes, bytearray)):
         raise TypeError("data 는 bytes 여야 합니다")
     data = bytes(data)
     if len(data) > air.MAX_BYTES:
-        raise SealError(f"크기 상한({air.MAX_BYTES} 바이트)을 넘어 봉인하지 않습니다")
+        raise SealError(f"크기 상한({air.MAX_BYTES} 바이트)을 넘어 봉인하지 않습니다", code="too_large")
     proj = _project(project_root)
     d = project_ai_dir(project_root, proj.project_id, ai_root)
     sha = hashlib.sha256(data).hexdigest()
@@ -434,6 +488,8 @@ def _entry(rec: Mapping, recs: Iterable[dict], first_lock: str | None) -> SealEn
     for spec in _PAIRS:
         p = _pair_record(recs, e.sha256, spec.kind)
         setattr(e, f"{spec.name}_sha256", p.get("sha256") if p is not None else None)
+        if p is not None and p.get("attached") is True:
+            e.pairs_attached.append(spec.name)
     return e
 
 
@@ -678,28 +734,29 @@ PAIR_KINDS = tuple(s.name for s in _PAIRS)              # ("topics", "words", "v
 
 def _seal_pair_bytes(spec: _PairSpec, project_root: str, data: bytes, *, pair_sha256: str, by: str, source: str,
                      now: datetime | None, ai_root: str | None, app_version: str | None,
-                     reader_kind: str | None) -> SealEntry:
+                     reader_kind: str | None, extra: Mapping | None = None) -> SealEntry:
+    """extra: 새 기록에 더할 칸(attach_pairs 의 attached·after_primary_lock). 같은 바이트가 이미 있으면 쓰지 않는다."""
     _guard(reader_kind, unseal=False)
     if source not in spec.sources:
-        raise SealError(f"{spec.label} 출처 종류는 {spec.sources} 가운데 하나여야 합니다")
+        raise SealError(f"{spec.label} 출처 종류는 {spec.sources} 가운데 하나여야 합니다", code="source_kind")
     _check_by(by)
     if not isinstance(pair_sha256, str) or not SHA256_RE.match(pair_sha256):
-        raise SealError("짝 sha256 형식이 아닙니다")
+        raise SealError("짝 sha256 형식이 아닙니다", code="pair_sha_format")
     if not isinstance(data, (bytes, bytearray)):
         raise TypeError("data 는 bytes 여야 합니다")
     data = bytes(data)
     limit = spec.max_bytes
     if len(data) > limit:
-        raise SealError(f"{spec.label} 크기 상한({limit} 바이트)을 넘어 봉인하지 않습니다")
+        raise SealError(f"{spec.label} 크기 상한({limit} 바이트)을 넘어 봉인하지 않습니다", code="too_large")
     proj = _project(project_root)
     d = project_ai_dir(project_root, proj.project_id, ai_root)
     recs, probs = _read_records(d)
     if probs:
-        raise SealError("seal.jsonl 이 깨져 새 기록을 쓰지 않습니다: " + "; ".join(probs[:3]))
+        raise SealError("seal.jsonl 이 깨져 새 기록을 쓰지 않습니다: " + "; ".join(probs[:3]), code="seal_jsonl_corrupt")
     if _sealed_record(recs, pair_sha256) is None:
-        raise SealError("짝 AI 결과 봉인이 없습니다 — 판정 결과를 먼저 봉인하세요")
+        raise SealError("짝 AI 결과 봉인이 없습니다 — 판정 결과를 먼저 봉인하세요", code="pair_missing")
     if _unsealed_record(recs, pair_sha256) is not None:
-        raise SealError(f"짝 AI 결과가 이미 해제되어 {spec.obj} 붙이지 않습니다")
+        raise SealError(f"짝 AI 결과가 이미 해제되어 {spec.obj} 붙이지 않습니다", code="pair_unsealed")
     sha = hashlib.sha256(data).hexdigest()
     old = [r for r in recs if r.get("kind") == spec.kind and r.get("sha256") == sha and r.get("pair") == pair_sha256]
     os.makedirs(os.path.join(d, SEALED_DIR), exist_ok=True)
@@ -715,7 +772,7 @@ def _seal_pair_bytes(spec: _PairSpec, project_root: str, data: bytes, *, pair_sh
     rec = _append(d, {
         "kind": spec.kind, "at": _now_iso(now), "by": by, "app_version": _app_version(app_version),
         "sha256": sha, "size": len(data), "source": source, "pair": pair_sha256, "check": chk,
-        "reject_reasons": codes,
+        "reject_reasons": codes, **dict(extra or {}),
     })
     e = SealEntry(sha256=sha, size=len(data), sealed_at=rec["at"], sealed_by=by, source=source, check=chk,
                   reject_reasons=codes)
@@ -731,6 +788,111 @@ def _seal_pair_file(spec: _PairSpec, project_root: str, path: str, *, pair_sha25
         data = f.read(spec.max_bytes + 1)
     return _seal_pair_bytes(spec, project_root, data, pair_sha256=pair_sha256, by=by, source="file", now=now,
                             ai_root=ai_root, app_version=app_version, reader_kind=reader_kind)
+
+
+# ----------------------------------------------------------------------------- 짝 보충 (D-23 3, 24 5-2 의 1)
+ATTACH_SOURCES = ("engine", "file")      # 짝 보충 출처: 엔진을 이 자리에서 메모리로 돌림 · 받은 파일
+
+
+@dataclass
+class AttachResult:
+    """attach_pairs 한 번의 결과. 내용(낱말·수·키워드)은 없다 — 해시·크기·검사·코드만."""
+    pair_sha256: str                             # 짝을 붙인 판정 봉인
+    rows: list[dict]                             # 짝마다 {kind, status, sha256, size, check, reject_reasons}
+    presealed: bool                              # 판정 봉인의 사전 봉인 여부(짝 보충으로 바뀌지 않는다)
+    after_primary_lock: bool                     # 이번 보충이 첫 1차 잠금 뒤인가(기록에도 남는다)
+
+    @property
+    def ok(self) -> bool:
+        """모든 짝이 붙었거나(attached) 이미 있었다(present)."""
+        return all(r["status"] in ("attached", "present") for r in self.rows)
+
+    @property
+    def attached(self) -> list[str]:
+        return [r["kind"] for r in self.rows if r["status"] == "attached"]
+
+
+def attach_pairs(project_root: str, pair_sha256: str, docs: Mapping[str, bytes], *, by: str,
+                 source: str = "file", now: datetime | None = None, ai_root: str | None = None,
+                 app_version: str | None = None, reader_kind: str | None = None) -> AttachResult:
+    """**이미 있는 판정 봉인**(pair_sha256)에 짝(주제 흐름·전사 낱말·주제 벡터)을 나중에 붙인다(D-23 3: 실제 시범 봉인에
+    짝이 없으면 잠긴 뒤·해제 전에 엔진으로 만들어 붙이고, 판정을 다시 봉인하지 않는다 — 다시 봉인하면 '사전 봉인' 이 아니게
+    된다). 판정 봉인은 건드리지 않으므로 사전 봉인 여부는 그대로다.
+
+    docs: {짝 종류(PAIR_KINDS): 바이트}. source: 'engine'(→ 기록의 출처 engine_<짝>) 또는 'file'.
+    규칙
+    - 판정 봉인이 없으면(pair_missing)·받을 때 거부됐으면(pair_not_valid)·이미 풀렸으면(pair_unsealed) SealError —
+      아무것도 쓰지 않는다.
+    - 짝마다: 검사를 통과한 같은 종류 짝이 이미 있으면 붙이지 않고 'present'(덮어쓰지 않는다 — 봉인은 한 번).
+    - **먼저 모두 검사한다.** 하나라도 거부되면(크기·형식·방송 번호·project_id) 아무 짝도 붙이지 않고 그 짝을 'rejected'
+      (나머지는 'skipped') 로 돌려준다 — 반쯤 붙은 상태가 생기지 않게. 거부 코드만 남고 내용은 남지 않는다.
+    - 붙인 짝의 기록(<짝>.sealed)에는 보통 칸에 더해 attached = true, after_primary_lock(첫 1차 잠금 뒤인가)이 남는다.
+      seal.jsonl 은 하위 호환이다(칸만 더함). 해제·읽기는 보통 짝과 같다(unseal 이 같은 해제에서 한 번에 푼다)."""
+    _guard(reader_kind, unseal=False)
+    if source not in ATTACH_SOURCES:
+        raise SealError(f"짝 보충 출처는 {ATTACH_SOURCES} 가운데 하나여야 합니다", code="source_kind")
+    _check_by(by)
+    if not isinstance(pair_sha256, str) or not SHA256_RE.match(pair_sha256):
+        raise SealError("짝 sha256 형식이 아닙니다", code="pair_sha_format")
+    unknown = [k for k in docs if k not in _PAIR_BY_NAME]
+    if unknown or not docs:
+        raise SealError(f"짝 종류는 {PAIR_KINDS} 가운데 하나 이상이어야 합니다", code="pair_kind")
+    proj = _project(project_root)
+    d = project_ai_dir(project_root, proj.project_id, ai_root)
+    recs, probs = _read_records(d)
+    if probs:
+        raise SealError("seal.jsonl 이 깨져 새 기록을 쓰지 않습니다: " + "; ".join(probs[:3]), code="seal_jsonl_corrupt")
+    srec = _sealed_record(recs, pair_sha256)
+    if srec is None:
+        raise SealError("짝 AI 결과 봉인이 없습니다 — 판정 결과를 먼저 봉인하세요", code="pair_missing")
+    if srec.get("check") != "valid":
+        raise SealError("받을 때 거부된 판정 봉인에는 짝을 붙이지 않습니다", code="pair_not_valid")
+    if _unsealed_record(recs, pair_sha256) is not None:
+        raise SealError("짝 AI 결과가 이미 해제되어 짝을 붙이지 않습니다", code="pair_unsealed")
+    first = _first_primary_lock_at(_lock_docs(project_root))
+    at = _now_iso(now)
+    after = first is not None and not _is_presealed(at, first)
+    presealed = _is_presealed(srec.get("at", ""), first)
+    rows: list[dict] = []
+    todo: list[tuple[_PairSpec, bytes]] = []
+    for spec in _PAIRS:                                   # 늘 같은 순서(topics → words → vectors)
+        if spec.name not in docs:
+            continue
+        data = docs[spec.name]
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("짝 자료는 bytes 여야 합니다")
+        data = bytes(data)
+        sha = hashlib.sha256(data).hexdigest()
+        row = {"kind": spec.name, "status": "", "sha256": sha, "size": len(data), "check": None, "reject_reasons": []}
+        rows.append(row)
+        have = _pair_record(recs, pair_sha256, spec.kind)
+        if have is not None:
+            row.update(status="present", sha256=have["sha256"], size=have.get("size", 0), check="valid")
+            continue
+        if len(data) > spec.max_bytes:
+            row.update(status="rejected", check="rejected", reject_reasons=[f"{spec.name}_too_large"])
+            continue
+        chk, codes = spec.check(data, proj.data)
+        row.update(check=chk, reject_reasons=list(codes))
+        if chk != "valid":
+            row["status"] = "rejected"
+            continue
+        todo.append((spec, data))
+    if any(r["status"] == "rejected" for r in rows):
+        for r in rows:
+            if r["status"] == "":
+                r["status"] = "skipped"
+        return AttachResult(pair_sha256, rows, presealed, after)
+    by_kind = {r["kind"]: r for r in rows}
+    for spec, data in todo:
+        src = spec.sources[0] if source == "engine" else "file"
+        e = _seal_pair_bytes(spec, project_root, data, pair_sha256=pair_sha256, by=by, source=src, now=now,
+                             ai_root=ai_root, app_version=app_version, reader_kind=reader_kind,
+                             extra={"attached": True, "after_primary_lock": after})
+        r = by_kind[spec.name]
+        r.update(status="attached" if e.check == "valid" else "rejected", check=e.check,
+                 reject_reasons=list(e.reject_reasons))
+    return AttachResult(pair_sha256, rows, presealed, after)
 
 
 def _unseal_pair(spec: _PairSpec, d: str, recs: list[dict], pair: str,
@@ -765,7 +927,7 @@ def _unsealed_or_blind(recs: Iterable[dict], run_id: str) -> dict:
     """run_id 의 마지막 ai.unsealed 기록. 없으면(해제 전) 파일을 열기 전에 SealNotUnsealedError."""
     u = [r for r in recs if r.get("kind") == K_UNSEALED and r.get("run_id") == run_id]
     if not u:
-        raise SealNotUnsealedError("해제 기록이 없는 run_id 입니다(해제 전에는 열지 않습니다)")
+        raise SealNotUnsealedError("해제 기록이 없는 run_id 입니다(해제 전에는 열지 않습니다)")   # code not_unsealed
     return u[-1]
 
 
@@ -773,7 +935,7 @@ def _read_pair(spec: _PairSpec, project_root: str, run_id: str, *, ai_root: str 
                reader_kind: str | None) -> dict | None:
     _guard(reader_kind, unseal=True, unsealed_view=True)
     if not isinstance(run_id, str) or not air.RUN_ID_RE.match(run_id):
-        raise SealError("run_id 형식이 아닙니다")
+        raise SealError("run_id 형식이 아닙니다", code="run_id_format")
     proj = _project(project_root)
     d = project_ai_dir(project_root, proj.project_id, ai_root)
     recs, _ = _read_records(d)
@@ -785,7 +947,7 @@ def _read_pair(spec: _PairSpec, project_root: str, run_id: str, *, ai_root: str 
     with builtins.open(os.path.join(d, spec.folder, f"{run_id}.json"), "rb") as f:
         raw = f.read(limit + 1)
     if hashlib.sha256(raw).hexdigest() != t["file_sha256"]:
-        raise SealError(f"해제한 {spec.label} 파일이 기록과 다릅니다")
+        raise SealError(f"해제한 {spec.label} 파일이 기록과 다릅니다", code="unsealed_mismatch")
     return load_json_strict(raw, limit)
 
 
@@ -878,25 +1040,26 @@ def unseal(project_root: str, sha256: str, *, by: str, now: datetime | None = No
     (engine_version·pairs 포함)."""
     _guard(reader_kind, unseal=True)
     if not isinstance(sha256, str) or not SHA256_RE.match(sha256):
-        raise SealError("sha256 형식이 아닙니다")
+        raise SealError("sha256 형식이 아닙니다", code="sha_format")
     _check_by(by)
     if early_reason is not None:
         early_reason = early_reason.strip()
         if not early_reason or len(early_reason) > REASON_MAX:
-            raise SealError(f"앞당겨 여는 사유는 1~{REASON_MAX}자여야 합니다")
+            raise SealError(f"앞당겨 여는 사유는 1~{REASON_MAX}자여야 합니다", code="reason_length")
     root = os.path.abspath(project_root)
     proj = _project(root)
     d = project_ai_dir(root, proj.project_id, ai_root)
     recs, probs = _read_records(d)
     if probs:
-        raise SealError("seal.jsonl 이 깨져 해제하지 않습니다: " + "; ".join(probs[:3]))
+        raise SealError("seal.jsonl 이 깨져 해제하지 않습니다: " + "; ".join(probs[:3]), code="seal_jsonl_corrupt")
     srec = _sealed_record(recs, sha256)
     if srec is None:
-        raise SealError("봉인 기록이 없는 해시입니다")
+        raise SealError("봉인 기록이 없는 해시입니다", code="no_seal_record")
     if _unsealed_record(recs, sha256) is not None:
         raise AlreadyUnsealedError("이미 해제한 봉인입니다")
     if srec.get("check") != "valid":
-        raise SealError("받을 때 거부된 결과는 해제하지 않습니다: " + ",".join(srec.get("reject_reasons") or []))
+        raise SealError("받을 때 거부된 결과는 해제하지 않습니다: " + ",".join(srec.get("reject_reasons") or []),
+                        code="rejected_at_seal")
     cond = unseal_conditions(root, proj.data, reader_kind=reader_kind)
     if not cond.met and early_reason is None:
         raise SealBlockedError(cond.reasons)
@@ -905,32 +1068,32 @@ def unseal(project_root: str, sha256: str, *, by: str, now: datetime | None = No
     chat_ids = air.project_chat_ids(root)
     if not chat_ids:
         raise SealError("프로젝트 채팅 파일(chat/messages.jsonl)이 없거나 읽을 수 있는 줄이 없어 해제하지 않습니다 "
-                        "— 채팅 파일을 되살린 뒤 다시 하세요")
+                        "— 채팅 파일을 되살린 뒤 다시 하세요", code="messages_missing")
     # ---- 여기서부터 봉인 파일을 연다
     binp = os.path.join(d, SEALED_DIR, f"{sha256}.bin")
     try:
         with builtins.open(binp, "rb") as f:
             data = f.read(air.MAX_BYTES + 1)
     except OSError:
-        raise SealError("봉인 파일을 읽지 못했습니다") from None
+        raise SealError("봉인 파일을 읽지 못했습니다", code="sealed_unreadable") from None
     if hashlib.sha256(data).hexdigest() != sha256 or len(data) != srec.get("size"):
-        raise SealError("봉인 파일이 기록과 다릅니다(바뀌었거나 손상)")
+        raise SealError("봉인 파일이 기록과 다릅니다(바뀌었거나 손상)", code="sealed_mismatch")
     doc = air.parse_bytes(data)
     chk = air.check_doc(doc, proj.data, chat_ids=chat_ids)
     if not chk.ok:
-        raise SealError("지금 프로젝트와 대조하면 거부됩니다: " + ",".join(chk.rejects))
+        raise SealError("지금 프로젝트와 대조하면 거부됩니다: " + ",".join(chk.rejects), code="recheck_rejected")
     norm, info = air.normalize(doc, proj.data, chat_ids=chat_ids)
     dropped = sum(info.dropped_unknown.values())
     kept = sum(len(arr) for _k, arr in air._arrays(norm))
     if dropped and not kept:
         raise SealError(f"판정 {dropped}건이 모두 이 프로젝트 채팅에 없는 chat_id 라 해제하지 않습니다 "
-                        "— 채팅 파일이 다른 방송이거나 손상됐는지 확인하세요 (06 6-2)")
+                        "— 채팅 파일이 다른 방송이거나 손상됐는지 확인하세요 (06 6-2)", code="all_dropped")
     run_id = norm["run_id"]
     if not air.RUN_ID_RE.match(run_id):
-        raise SealError("run_id 형식이 아닙니다")
+        raise SealError("run_id 형식이 아닙니다", code="run_id_format")
     for r in recs:
         if r.get("kind") == K_UNSEALED and r.get("run_id") == run_id and r.get("sha256") != sha256:
-            raise SealError(f"같은 run_id({run_id})의 다른 결과가 이미 해제되었습니다")
+            raise SealError(f"같은 run_id({run_id})의 다른 결과가 이미 해제되었습니다", code="dup_run_id")
     run_bytes = (json.dumps(norm, ensure_ascii=False, indent=1, allow_nan=False) + "\n").encode("utf-8")
     os.makedirs(os.path.join(d, RUNS_DIR), exist_ok=True)
     run_path = os.path.join(d, RUNS_DIR, f"{run_id}.json")
@@ -974,7 +1137,7 @@ def read_run(project_root: str, run_id: str, *, ai_root: str | None = None, read
     visibility UNSEALED_ONLY)."""
     _guard(reader_kind, unseal=True, unsealed_view=True)
     if not isinstance(run_id, str) or not air.RUN_ID_RE.match(run_id):
-        raise SealError("run_id 형식이 아닙니다")
+        raise SealError("run_id 형식이 아닙니다", code="run_id_format")
     proj = _project(project_root)
     d = project_ai_dir(project_root, proj.project_id, ai_root)
     recs, _ = _read_records(d)
@@ -982,7 +1145,7 @@ def read_run(project_root: str, run_id: str, *, ai_root: str | None = None, read
     with builtins.open(os.path.join(d, RUNS_DIR, f"{run_id}.json"), "rb") as f:
         raw = f.read(air.MAX_BYTES + 1)
     if hashlib.sha256(raw).hexdigest() != u.get("run_sha256"):
-        raise SealError("해제한 결과 파일이 기록과 다릅니다")
+        raise SealError("해제한 결과 파일이 기록과 다릅니다", code="unsealed_mismatch")
     return air.parse_bytes(raw)
 
 

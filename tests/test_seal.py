@@ -805,3 +805,286 @@ def test_pilot_unseal_day_rehearsal(pilot, monkeypatch, capsys):
     assert ai_seal.main(["unseal", "--project", root, "--all", "--by", "L01"]) == 0
     assert _last_json(capsys)["unsealed"] == []
     assert _tree(root) == {**before, **{k: v for k, v in _tree(root).items() if k.startswith(("locks", "relabel"))}}
+
+
+# ============================================================================== 원인 코드 (24 5-2 의 5)
+def test_seal_error_codes_name_the_cause(proj):
+    """SealError 마다 원인 코드(.code) — 메시지(str)는 사람이 읽는 문장 그대로. 해제 당일 요약은 'unseal:<코드>'."""
+    root = proj["root"]
+    _ready(root)
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    binp = os.path.join(ai_dir(proj), "sealed", f"{e.sha256}.bin")
+    with open(binp, "ab") as f:
+        f.write(b" ")
+    with pytest.raises(seal.SealError) as ei:
+        seal.unseal(root, e.sha256, by="L01")
+    assert ei.value.code == "sealed_mismatch" and seal.error_code(ei.value) == "sealed_mismatch"
+    assert "기록과 다릅니다" in str(ei.value) and not str(ei.value).startswith("sealed_mismatch")
+    os.remove(binp)
+    seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01")
+    # 채팅 파일이 없으면 messages_missing (봉인 파일을 열기 전에)
+    msgs = os.path.join(root, "chat", "messages.jsonl")
+    keep = open(msgs, "rb").read()
+    os.remove(msgs)
+    with pytest.raises(seal.SealError) as ei:
+        seal.unseal(root, e.sha256, by="L01")
+    assert ei.value.code == "messages_missing"
+    with open(msgs, "wb") as f:
+        f.write(keep)
+    seal.unseal(root, e.sha256, by="L01")
+    other = seal.seal_bytes(root, data_of(result_doc(created_at="2026-10-23T10:00:00+09:00")), source="file", by="L01")
+    with pytest.raises(seal.SealError) as ei:
+        seal.unseal(root, other.sha256, by="L01")
+    assert ei.value.code == "dup_run_id"
+    cases = [(lambda: seal.unseal(root, e.sha256, by="L01"), "already_unsealed"),
+             (lambda: seal.unseal(root, "f" * 64, by="L01"), "no_seal_record"),
+             (lambda: seal.unseal(root, "xyz", by="L01"), "sha_format"),
+             (lambda: seal.unseal(root, other.sha256, by="bad"), "bad_by"),
+             (lambda: seal.read_run(root, "run-never-unsealed"), "not_unsealed"),
+             (lambda: seal.seal_status(root, reader_kind="primary"), "reader_blind"),
+             (lambda: seal.seal_words_bytes(root, b"{}", pair_sha256="0" * 64, by="L01"), "pair_missing"),
+             (lambda: seal.seal_words_bytes(root, b"{}", pair_sha256=e.sha256, by="L01"), "pair_unsealed")]
+    for fn, code in cases:
+        with pytest.raises(seal.SealError) as ei:
+            fn()
+        assert ei.value.code == code, code
+    assert seal.SealBlockedError(["x"]).code == "conditions_unmet"
+    assert seal.error_code(OSError("x")) == "OSError" and seal.error_code(seal.SealError("x")) == "seal_error"
+
+
+def test_every_seal_error_code_is_listed():
+    """seal.py 의 raise SealError(…) 는 모두 code= 를 주고, 그 코드는 모두 SEAL_ERROR_CODES 에 있다(요약·문서가 같은 목록)."""
+    import ast
+    tree = ast.parse(inspect.getsource(seal))
+    used, missing = set(), 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) \
+                and isinstance(node.exc.func, ast.Name) and node.exc.func.id == "SealError":
+            kw = [k for k in node.exc.keywords if k.arg == "code"]
+            if not kw:
+                missing += 1
+            else:
+                used.add(kw[0].value.value)
+    used |= {c.code for c in (seal.SealError, seal.SealBlindError, seal.SealNotUnsealedError, seal.SealBlockedError,
+                              seal.AlreadyUnsealedError)}
+    assert missing == 0
+    assert len(used) > 20 and used <= set(seal.SEAL_ERROR_CODES), sorted(used - set(seal.SEAL_ERROR_CODES))
+    assert len(set(seal.SEAL_ERROR_CODES)) == len(seal.SEAL_ERROR_CODES)
+
+
+def test_cli_errors_carry_code(proj, capsys):
+    root = proj["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    assert ai_seal.main(["unseal", "--project", root, "--sha256", e.sha256, "--by", "L01"]) == 1
+    j = json.loads(capsys.readouterr().out)
+    assert j["error"] == "SealBlockedError" and j["code"] == "conditions_unmet"
+    assert ai_seal.main(["unseal", "--project", root, "--sha256", "f" * 64, "--by", "L01"]) == 1
+    j = json.loads(capsys.readouterr().out)
+    assert j["code"] == "no_seal_record"
+    _ready(root)
+    os.remove(os.path.join(ai_dir(proj), "sealed", f"{e.sha256}.bin"))
+    assert ai_seal.main(["unseal", "--project", root, "--all", "--by", "L01"]) == 1
+    j = json.loads(capsys.readouterr().out)
+    assert [x["code"] for x in j["errors"]] == ["sealed_unreadable"] and j["unsealed"] == []
+
+
+# ============================================================================== 짝 보충 (D-23 3, 24 5-2 의 1)
+def _pairs(root):
+    pid = _pid(root)
+    return {"topics": data_of(topic_doc()), "words": data_of(words_doc(project_id=pid)),
+            "vectors": data_of(vectors_doc(project_id=pid))}
+
+
+def _records(proj):
+    p = os.path.join(ai_dir(proj), "seal.jsonl")
+    return [json.loads(x) for x in open(p, encoding="utf-8").read().splitlines()]
+
+
+def test_attach_pairs_to_presealed_judgement_after_lock_then_unseal(proj):
+    """판정만 사전 봉인 → 잠금 → 짝 셋을 나중에 붙임 → 해제하면 짝 셋이 같은 해제에서 풀린다. 판정은 다시 봉인하지 않는다."""
+    root = proj["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="engine_link", by="L01", now=NOW)   # 1차 잠금 전
+    _ready(root)
+    n_before = len(_records(proj))
+    r = seal.attach_pairs(root, e.sha256, _pairs(root), by="L01", source="engine")
+    assert r.ok and r.attached == ["topics", "words", "vectors"] and r.presealed is True and r.after_primary_lock is True
+    assert [x["status"] for x in r.rows] == ["attached"] * 3 and all(x["check"] == "valid" for x in r.rows)
+    recs = _records(proj)
+    assert len(recs) == n_before + 3
+    assert [x["kind"] for x in recs if x["kind"] == "ai.sealed"] == ["ai.sealed"]       # 판정 봉인은 하나 그대로
+    new = recs[n_before:]
+    assert [x["kind"] for x in new] == ["topics.sealed", "words.sealed", "vectors.sealed"]
+    assert all(x["pair"] == e.sha256 and x["attached"] is True and x["after_primary_lock"] is True for x in new)
+    assert [x["source"] for x in new] == ["engine_topics", "engine_words", "engine_vectors"]
+    raw = open(os.path.join(ai_dir(proj), "seal.jsonl"), encoding="utf-8").read()
+    assert SECRET_WORD not in raw and TOPIC_SECRET not in raw and "0.6" not in raw
+    st = seal.seal_status(root)
+    ent = st.entries[0]
+    assert ent.presealed is True and ent.pairs_attached == ["topics", "words", "vectors"]
+    assert all(getattr(ent, f"{k}_sha256") for k in seal.PAIR_KINDS)
+    # 두 번째는 할 일이 없다(덮어쓰지 않는다)
+    r2 = seal.attach_pairs(root, e.sha256, _pairs(root), by="L01")
+    assert r2.ok and r2.attached == [] and [x["status"] for x in r2.rows] == ["present"] * 3
+    assert len(_records(proj)) == n_before + 3
+    res = seal.unseal(root, e.sha256, by="L01", now=NOW + timedelta(days=4))
+    assert res.presealed is True
+    assert [(p["kind"], p["error"]) for p in res.record["pairs"]] == [("topics", None), ("words", None), ("vectors", None)]
+    rows, ok = ai_seal.verify_project(root)
+    assert ok and rows[0]["topics"] == rows[0]["words"] == rows[0]["vectors"] == "ok"
+    with pytest.raises(seal.SealError) as ei:                        # 풀린 판정에는 붙이지 않는다
+        seal.attach_pairs(root, e.sha256, {"words": _pairs(root)["words"]}, by="L01")
+    assert ei.value.code == "pair_unsealed"
+
+
+def test_attach_pairs_all_or_nothing_and_refusals(proj):
+    root = proj["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    n0 = len(_records(proj))
+    docs = _pairs(root)
+    docs["vectors"] = data_of(vectors_doc(project_id=_pid(root), video_no="999"))     # 다른 방송 → 거부
+    r = seal.attach_pairs(root, e.sha256, docs, by="L01")
+    assert not r.ok and [x["status"] for x in r.rows] == ["skipped", "skipped", "rejected"]
+    assert r.rows[2]["reject_reasons"] == ["vectors_video_mismatch"]
+    assert len(_records(proj)) == n0                                  # 하나도 붙이지 않았다
+    assert seal.seal_status(root).entries[0].words_sha256 is None
+    # 한 종류가 이미 있으면 그것만 present, 나머지는 붙인다
+    seal.seal_words_bytes(root, _pairs(root)["words"], pair_sha256=e.sha256, by="L01")
+    r = seal.attach_pairs(root, e.sha256, _pairs(root), by="L01")
+    assert [x["status"] for x in r.rows] == ["attached", "present", "attached"]
+    assert seal.seal_status(root).entries[0].pairs_attached == ["topics", "vectors"]
+    assert r.after_primary_lock is False                              # 잠긴 1차가 아직 없다
+    rej = seal.seal_bytes(root, b'{"schema": "x"}', source="file", by="L01")
+    assert rej.check == "rejected"
+    for fn, code in [(lambda: seal.attach_pairs(root, rej.sha256, _pairs(root), by="L01"), "pair_not_valid"),
+                     (lambda: seal.attach_pairs(root, "0" * 64, _pairs(root), by="L01"), "pair_missing"),
+                     (lambda: seal.attach_pairs(root, e.sha256, {"asr": b"{}"}, by="L01"), "pair_kind"),
+                     (lambda: seal.attach_pairs(root, e.sha256, {}, by="L01"), "pair_kind"),
+                     (lambda: seal.attach_pairs(root, e.sha256, _pairs(root), by="L01", source="x"), "source_kind"),
+                     (lambda: seal.attach_pairs(root, "xyz", _pairs(root), by="L01"), "pair_sha_format")]:
+        with pytest.raises(seal.SealError) as ei:
+            fn()
+        assert ei.value.code == code, code
+    for kind in ("primary", "relabel_same", "origin_review"):
+        with pytest.raises(seal.SealBlindError):
+            seal.attach_pairs(root, e.sha256, _pairs(root), by="L01", reader_kind=kind)
+
+
+def test_cli_attach_pairs_files_prefix_and_remove(proj, tmp_path, capsys):
+    root = proj["root"]
+    e1 = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    e2 = seal.seal_bytes(root, data_of(result_doc(run_id="run-synth-other")), source="file", by="L01", now=NOW)
+    files = {}
+    for k, b in _pairs(root).items():
+        files[k] = tmp_path / f"{k}.json"
+        files[k].write_bytes(b)
+    args = ["attach-pairs", "--project", root, "--by", "L01"] + [x for k in seal.PAIR_KINDS
+                                                                  for x in (f"--{k}", str(files[k]))]
+    assert ai_seal.main(args + ["--sha256", e1.sha256[:12]]) == 0      # status 가 찍는 앞 12자
+    out = capsys.readouterr().out
+    j = json.loads(out)
+    assert j["targets"] == 1 and j["ok"] and [x["status"] for x in j["results"][0]["rows"]] == ["attached"] * 3
+    assert SECRET_WORD not in out and TOPIC_SECRET not in out and SECRET_RUN not in out
+    assert ai_seal.main(args + ["--all", "--remove-source"]) == 0       # e1 은 present, e2 만 붙음
+    j = json.loads(capsys.readouterr().out)
+    by = {r["sha256_12"]: [x["status"] for x in r["rows"]] for r in j["results"]}
+    assert by == {e1.sha256[:12]: ["present"] * 3, e2.sha256[:12]: ["attached"] * 3} and j["source_removed"]
+    assert not any(f.exists() for f in files.values())
+    assert ai_seal.main(["status", "--project", root]) == 0
+    st = json.loads(capsys.readouterr().out)
+    assert all(x["pairs_attached"] == list(seal.PAIR_KINDS) for x in st["entries"])
+    assert ai_seal.main(["attach-pairs", "--project", root, "--by", "L01", "--sha256", "abc"]) == 2   # 짝 입력 없음
+    assert json.loads(capsys.readouterr().out)["code"] == "args"
+    assert ai_seal.main(args[:5] + ["--sha256", "0" * 12, "--topics", str(tmp_path / "none.json")]) == 2
+    assert json.loads(capsys.readouterr().out)["code"] == "no_seal_record"
+
+
+def test_cli_attach_pairs_pilot_needs_sealed_work_and_engine_injection(pilot, tmp_path, monkeypatch, capsys):
+    """시범(pilot-*)은 전사 낱말·벡터 파일이 <데이터>\\sealed-work 아래여야 한다(읽기 전에 종료 2). --from-engine 은 엔진 함수를
+    한 번만 부르고(빠진 짝만), 모두 있으면 부르지 않는다. 엔진이 실패하면 종료 1 과 코드."""
+    root = pilot["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="engine_link", by="L01", now=NOW)
+    pb = _pairs(root)
+    outside = tmp_path / "words.json"
+    outside.write_bytes(pb["words"])
+    opened = _spy_open(monkeypatch, os.path.normcase(str(outside)))
+    assert ai_seal.main(["attach-pairs", "--project", root, "--by", "L01", "--all", "--words", str(outside)]) == 2
+    assert json.loads(capsys.readouterr().out)["code"] == "pair_file_unprotected" and opened == []
+    monkeypatch.undo()
+    sw = ai_seal.sealed_work_dir(root)
+    assert os.path.normcase(sw) == os.path.normcase(str(pilot["tmp"] / "chatcoach-data" / "sealed-work"))
+    calls = []
+
+    def fake_engine(project, ns, kinds):
+        calls.append(list(kinds))
+        assert ns.seal is True and ns.asr == "synth.asr.json"
+        return {k: pb[k] for k in kinds}
+    monkeypatch.setattr(ai_seal, "ENGINE_PAIRS", fake_engine)
+    base = ["attach-pairs", "--project", root, "--by", "L01", "--all", "--from-engine", "--asr", "synth.asr.json"]
+    assert ai_seal.main(base + ["--kinds", "words"]) == 0
+    assert calls == [["words"]]
+    j = json.loads(capsys.readouterr().out)
+    assert j["engine_run"] and [x["status"] for x in j["results"][0]["rows"]] == ["attached"]
+    assert ai_seal.main(base) == 0                                     # topics·vectors 만 만든다
+    assert calls[-1] == ["topics", "vectors"]
+    capsys.readouterr()
+    assert ai_seal.main(base) == 0 and len(calls) == 2                 # 모두 있으면 엔진을 띄우지 않는다
+    j = json.loads(capsys.readouterr().out)
+    assert j["missing"] == [] and j["engine_run"] is False
+    assert seal.seal_status(root).entries[0].pairs_attached == ["topics", "words", "vectors"]
+    # 엔진 실패
+    e2 = seal.seal_bytes(root, data_of(result_doc(run_id="run-synth-2")), source="engine_link", by="L01", now=NOW)
+
+    def broken(project, ns, kinds):
+        raise ai_seal.EngineUnavailable("vectors:no_model")
+    monkeypatch.setattr(ai_seal, "ENGINE_PAIRS", broken)
+    assert ai_seal.main(["attach-pairs", "--project", root, "--by", "L01", "--sha256", e2.sha256,
+                         "--from-engine"]) == 1
+    assert json.loads(capsys.readouterr().out) == {"error": "EngineUnavailable", "code": "vectors:no_model"}
+    assert seal.seal_status(root).entries[1].pairs_attached == []
+    assert e.sha256 != e2.sha256
+
+
+# ============================================================================== reference_set 자리 (24 5-2 의 9)
+@pytest.mark.parametrize("kind", ["primary", "relabel_same", "relabel_second", "origin_review", "unknown_kind"])
+def test_reference_set_blind_seats_open_nothing(pilot, monkeypatch, kind):
+    """라벨링·출처 판정 세션(봉인 AI 결과를 못 여는 자리)이 훈련 기준을 부르면 project.json·잠금·라벨·seal.jsonl 을
+    하나도 열지 않고 꺼진다(최종 세트가 다른 세션 라벨과 seal.jsonl 을 읽기 때문)."""
+    from app import reference_set as rs
+    root = pilot["root"]
+    _ready(root)
+    seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    seen = []
+    real_open, real_listdir, real_isfile = builtins.open, os.listdir, os.path.isfile
+
+    def spy_open(p, *a, **kw):
+        seen.append(("open", os.fspath(p)))
+        return real_open(p, *a, **kw)
+
+    def spy_listdir(p="."):
+        seen.append(("listdir", os.fspath(p)))
+        return real_listdir(p)
+
+    def spy_isfile(p):
+        seen.append(("isfile", os.fspath(p)))
+        return real_isfile(p)
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(os, "listdir", spy_listdir)
+    monkeypatch.setattr(os.path, "isfile", spy_isfile)
+    av = rs.training_availability(root, reader_kind=kind)
+    assert not av.enabled and av.reason == rs.REASON_SEAT and av.reference is None
+    assert rs.load_reference(root, reader_kind=kind) == (None, rs.REASON_SEAT)
+    assert rs.load_final_set_reference(root, reader_kind=kind) == (None, rs.SEAT_BLIND)
+    assert rs.pilot_block_reason(root, reader_kind=kind) == rs.REASON_SEAT
+    assert rs.pilot_sessions_locked(root, reader_kind=kind) == (False, [rs.REASON_SEAT])
+    assert seen == []
+
+
+def test_reference_set_out_of_session_and_other_seats_unchanged(pilot):
+    from app import reference_set as rs
+    root = pilot["root"]
+    _ready(root)
+    for kind in (None, "adjudication", "analysis"):
+        assert not rs.seat_blind(kind)
+        assert rs.pilot_sessions_locked(root, reader_kind=kind) == rs.pilot_sessions_locked(root)
+        assert rs.pilot_block_reason(root, reader_kind=kind) == rs.pilot_block_reason(root)
+    assert all(rs.seat_blind(k) for k in ("primary", "relabel_same", "relabel_second", "origin_review", "x"))

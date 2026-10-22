@@ -69,6 +69,7 @@ PRACTICE_NICK = "나"
 PRACTICE_MARK = "연습"
 PRACTICE_TIP = "내가 쓴 연습 채팅 — 앱 안에서만 보이고 어디에도 보내지 않습니다"
 VIRTUAL_TAG = _tv.VIRTUAL_TAG                            # {"retrieved": "가져옴", "generated": "생성"}
+VIRTUAL_MARK = _tv.VIRTUAL_MARK                          # {"retrieved": "가", "generated": "생"} — 닉네임 칸 앞 한 글자
 
 MAX_TEXT_CHARS = 200                                     # app.viewer_store.MAX_TEXT_CHARS 와 같다
 CONTEXT_WINDOW_MS = 120_000                              # 채점 맥락: 보낸 시각 앞 120초 (21 6-2)
@@ -730,8 +731,10 @@ class ViewerTrainView(QWidget):
                 vid = r.get("chat_id")
                 if trn.is_virtual_id(vid):
                     vnames[vid] = str(r.get("nickname_masked") or "")
-                    if show_marks and r.get("source") in VIRTUAL_TAG:
-                        r["nickname_masked"] = f"{r['nickname_masked']} · {tr(VIRTUAL_TAG[r['source']])}"
+                    if show_marks and r.get("source") in VIRTUAL_TAG:   # F 와 같은 꼴: 앞 한 글자 + 뒤 표시
+                        src = r["source"]
+                        r["nickname_masked"] = (f"{tr(VIRTUAL_MARK[src])} {r['nickname_masked']} · "
+                                                f"{tr(VIRTUAL_TAG[src])}")
         if viewer_no is not None:
             vno = {k: v for k, v in dict(viewer_no).items() if isinstance(v, int)}
         else:

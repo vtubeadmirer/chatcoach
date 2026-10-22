@@ -19,6 +19,10 @@
                                            창 글은 저장하지 않음, 기본 <P>/derived/asr-topic-vectors.json, 시범은 거부,
                                            모델이 없으면 종료 3. 엔진 venv 에서)
   scenario --project <P> --from T --to T … tools/make_scenario.py 의 main 을 그대로 부른다(가상 채팅 시나리오)
+  generate --project <P> --from T --to T (--fake <응답.json> | --model <id> [--url http://127.0.0.1:1234]) …
+                                           engine.generate 의 main(H-3 생성 채팅, 지시문 판 gen-chat-v1). 앞 1~2분 전사
+                                           낱말·주제 키워드·채팅 수만 보내고 본문·닉네임은 보내지 않음, 거르기 1~5,
+                                           LM Studio 는 localhost 만. --fake 는 합성 가짜 응답 파일(서버를 부르지 않음)
   semantic-info [--models-dir D] [--lmstudio]
                                            의미 비교 실행기 상태(모델 이름·해시·실행기). 받지 않는다.
                                            --lmstudio 면 이 PC 의 LM Studio 서버(localhost)도 본다
@@ -49,6 +53,7 @@ _PASSTHROUGH = {
     "transcript-words": ("transcript_words", "VOD 로 보정한 시각별 전사 낱말 만들기(engine.transcript_words)"),
     "topic-vectors": ("topic_vectors", "VOD 창별 주제 벡터 만들기(engine.topic_vectors, 로컬 e5-small, 엔진 venv)"),
     "scenario": ("tools/make_scenario.py", "가상 채팅 시나리오(retrieved) 만들기(tools/make_scenario.py)"),
+    "generate": ("generate", "가상 채팅 생성(generated, 로컬 LLM·--fake 가짜 응답, engine.generate)"),
 }
 
 

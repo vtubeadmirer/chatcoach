@@ -22,7 +22,7 @@
   영상 연결(사본의 project.json 에만 저장: 영상이 덮는 VOD 범위는 project.json 으로 정해진다, D-10 3) →
   ① 구간: B 로 경계 하나(영상 끝 2분 전), 구간 2개(저스트채팅 · 게임) 저장(바쁨 표시 켜짐·꺼짐), 구간 완료 표시 →
   ② 반응: 영상 범위 안 채팅 1건에 M → 편집기: 강한 증거(닉네임 호명)·직접 반응, 7-2 범위를 2배속으로 두 번 들음(재확인) → 저장,
-     반응 완료 표시 →
+     반응 완료 표시 → (두 번 듣기 동안 진행 줄 '  .. flow_reaction 다시 듣기 n/2 …' 을 시작·10초마다·끝에 찍는다 — 24 5-2 의 13)
   ③ 표본: 저스트채팅 구간 표본 뽑기(sha256-tau-v2, 모든 표본의 확인 범위가 영상 안인지) · 재현 검증 → 1건 판정(반응 미확인) →
      대기 표본 하나에 ② 반응을 만들고 ③ 으로 돌아와: 판정함으로 세는지, 반응 미확인 단추가 막히는지, M 이 그 ② 라벨을
      고치는 편집기를 여는지, 고친 것이 같은 대상인지(D-10 4) →
@@ -158,6 +158,7 @@ FH_REQUEST_SUFFIX = ".request"     # 바깥 감시가 만드는 요청 파일: <
 FH_POLL_S = 0.5                    # 요청 파일을 보는 간격
 FH_HANG_S = 60.0                   # GIL 이 이만큼 묶이면 C 감시 스레드가 'Timeout' 덤프를 쓴다
 FH_REARM_S = 5.0                   # 그 감시를 다시 거는 간격(걸 때마다 스레드 하나를 새로 만든다)
+PROGRESS_TICK_S = 10.0             # 출력 없이 긴 기다림(두 번 듣기 등)의 진행 줄 간격 — smoke_watch --stall(기본 30)보다 짧게
 
 
 def arm_faulthandler(path: str, *, poll_s: float = FH_POLL_S, hang_s: float = FH_HANG_S,
@@ -634,8 +635,17 @@ class Smoke:
                 return
             time.sleep(0.005)
 
-    def wait(self, cond, timeout_s: float | None = None) -> bool:
-        end = time.perf_counter() + (timeout_s or self.args.timeout)
+    def progress(self, name: str, text: str) -> None:
+        """출력 없이 긴 단계의 진행 줄(24 5-2 의 13): smoke_watch 의 --stall 이 '출력 없음' 을 가짜 멈춤으로 잡지 않게.
+        모양 '  .. <단계> <글>' — PASS/FAIL 줄(smoke_watch._STEP_OUT_RE)과 섞이지 않는다. 숫자·단계 이름만 쓴다."""
+        print(f"  .. {name} {text}", flush=True)
+
+    def wait(self, cond, timeout_s: float | None = None, *, tick_s: float | None = None, tick=None) -> bool:
+        """cond 가 참이 될 때까지 이벤트를 돌린다. tick_s·tick(경과 초 → None) 을 주면 tick_s 초마다 tick 을 부른다
+        (진행 줄을 찍는 데 쓴다)."""
+        t0 = time.perf_counter()
+        end = t0 + (timeout_s or self.args.timeout)
+        next_tick = t0 + tick_s if tick_s and tick else None
         while time.perf_counter() < end:
             self.app.processEvents()
             try:
@@ -643,6 +653,9 @@ class Smoke:
                     return True
             except Exception:  # noqa: BLE001 — 아직 준비 안 됨
                 pass
+            if next_tick is not None and time.perf_counter() >= next_tick:
+                tick(time.perf_counter() - t0)
+                next_tick += tick_s
             time.sleep(0.01)
         return False
 
@@ -1088,13 +1101,22 @@ class Smoke:
                 rv = wb.review
                 rv.set_speed(2.0)
                 for k in range(2):                       # 7-2: 처음 확인 + 다시 듣기
+                    # 다시 듣기마다 진행 줄(24 5-2 의 13) — 2배속 두 번 듣기가 40초 넘게 출력 없이 지나가 --stall 30 이
+                    # 가짜 멈춤을 잡던 일. 시작 한 줄 + 기다리는 동안 PROGRESS_TICK_S 초마다 한 줄 + 끝 한 줄
+                    self.progress("flow_reaction", f"다시 듣기 {k + 1}/2 시작")
                     ed.listen_again()
                     if k == 0 and self.args.screenshot and _inside(self.args.screenshot, SCREENS_DIR):
                         self.pump(1500)                  # 범위 반복 재생 중인 편집 상태 화면
                         self._shot("_flow_edit")
-                    got = self.wait(lambda: rv.current_coverage() >= 0.97, 90)
+                    tw = time.perf_counter()
+                    got = self.wait(lambda: rv.current_coverage() >= 0.97, 90, tick_s=PROGRESS_TICK_S,
+                                    tick=lambda s, k=k: self.progress(
+                                        "flow_reaction", f"다시 듣기 {k + 1}/2 coverage={rv.current_coverage():.2f} "
+                                                         f"{s:.0f}s"))
                     covs.append(rv.current_coverage())
                     passes += 1 if got else 0
+                    self.progress("flow_reaction", f"다시 듣기 {k + 1}/2 끝 coverage={covs[-1]:.2f} "
+                                                   f"{time.perf_counter() - tw:.1f}s {'ok' if got else 'timeout'}")
                 rv.stop_loop()
                 wb.player.pause()
                 rv.set_speed(1.0)

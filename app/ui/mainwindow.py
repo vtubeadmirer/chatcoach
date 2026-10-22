@@ -778,7 +778,8 @@ class MainWindow(QMainWindow):
             if scn is not None:
                 n = scenario_mix.virtual_count(scn)
                 self.a_mix_virtual.setText(tr("가상 채팅 섞기 ({0}줄)(&V)").format(n))
-                self.a_mix_virtual.setToolTip(tr("가져온 채팅을 '가져옴' 표시와 함께 섞습니다 — 견주기 점수에는 넣지 않습니다"))
+                self.a_mix_virtual.setToolTip(tr("가상 채팅을 '가 … · 가져옴'·'생 … · 생성' 표시와 함께 섞습니다 — "
+                                                 "견주기 점수에는 넣지 않습니다"))
                 self.a_mix_virtual.setEnabled(True)
                 self.a_mix_virtual.setChecked(root not in self._mix_off_roots)
         finally:

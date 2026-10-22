@@ -497,7 +497,7 @@ def _go(projects, out_root, capsys, *extra):
 
 def test_unsealable_valid_seal_is_error_exit_1(tmp_path, capsys):
     """run_id 가 같고 바이트만 다른 결과를 하나 더 봉인(둘 다 valid) → 둘째는 seal.unseal 이 SealError 로 거부.
-    예전에는 종료 0 · '오류 0' 이었다(실패는 요약 md 의 '실패' 열에만). 이제 오류 'unseal:SealError' 와 종료 1."""
+    예전에는 종료 0 · '오류 0' 이었다(실패는 요약 md 의 '실패' 열에만). 이제 오류 'unseal:<원인 코드>'(여기서는 dup_run_id)와 종료 1."""
     base, projects = _data(tmp_path)
     pj1 = build_pilot(projects, 1)
     dup = ai_doc("run-v03-1", "0.3.0", pj1["video_no"], GRADES)
@@ -512,19 +512,21 @@ def test_unsealable_valid_seal_is_error_exit_1(tmp_path, capsys):
     assert code == 1, printed
     s = json.loads((out_root / "pilot-unseal-20261102" / "summary.json").read_text(encoding="utf-8"))
     p1 = next(p for p in s["projects"] if p["name"] == os.path.basename(pj1["root"]))
-    assert p1["unseal"]["failed"] == ["SealError"] and p1["unseal"]["unsealed_now"] == 2
-    assert p1["errors"] == ["unseal:SealError"]
+    # 원인 코드(seal.error_code): 예외 이름 'SealError' 가 아니라 '같은 run_id 이미 해제' 를 뜻하는 코드
+    assert p1["unseal"]["failed"] == ["dup_run_id"] and p1["unseal"]["unsealed_now"] == 2
+    assert "dup_run_id" in seal.SEAL_ERROR_CODES
+    assert p1["errors"] == ["unseal:dup_run_id"]
     assert all(p["errors"] == [] for p in s["projects"] if p is not p1)
     assert seal.seal_status(pj1["root"]).sealed_count == 1             # 앱에는 '봉인됨 1건' 으로 남는다 — 그래서 오류
     line = next(x for x in printed.splitlines() if os.path.basename(pj1["root"]) + ": 해제" in x)
-    assert "실패 1" in line and "오류 1 (unseal:SealError)" in line
+    assert "실패 1" in line and "오류 1 (unseal:dup_run_id)" in line
     md = (out_root / "pilot-unseal-20261102" / "summary.md").read_text(encoding="utf-8")
-    assert "## 오류 (코드)" in md and "- unseal:SealError" in md
+    assert "## 오류 (코드)" in md and "- unseal:dup_run_id" in md
 
 
 def test_truncated_seal_jsonl_is_named_not_hidden_behind_calib(tmp_path, capsys):
     """seal.jsonl 끝 줄이 잘림(기록 중 전원 차단) → 두 봉인 모두 풀리지 않는다. 예전에는 원인이 'calib:CalibError' 로만
-    적히고 대조는 'ok 0건' 이었다. 이제 'seal_jsonl:problems'·'unseal:SealError' 가 적히고 대조는 '-'."""
+    적히고 대조는 'ok 0건' 이었다. 이제 'seal_jsonl:problems'·'unseal:seal_jsonl_corrupt' 가 적히고 대조는 '-'."""
     base, projects = _data(tmp_path)
     pjs = [ready_pilot(projects, i) for i in (1, 2, 3)]
     sj = os.path.join(seal.project_ai_dir(pjs[0]["root"], pjs[0]["pid"]), "seal.jsonl")
@@ -537,7 +539,8 @@ def test_truncated_seal_jsonl_is_named_not_hidden_behind_calib(tmp_path, capsys)
     s = json.loads((out_root / "pilot-unseal-20261102" / "summary.json").read_text(encoding="utf-8"))
     p1 = s["projects"][0]
     assert p1["name"] == os.path.basename(pjs[0]["root"])
-    assert p1["errors"].count("unseal:SealError") == 2 and "seal_jsonl:problems" in p1["errors"]
+    assert p1["errors"].count("unseal:seal_jsonl_corrupt") == 2 and "seal_jsonl:problems" in p1["errors"]
+    assert "seal_jsonl_corrupt" in seal.SEAL_ERROR_CODES
     line = next(x for x in printed.splitlines() if p1["name"] + ": 해제" in x)
     assert "대조 -" in line and "실패 2" in line and "seal_jsonl:problems" in line
     assert day.verify_text({"runs": 0, "ok": True}) == "-" and day.verify_text({"runs": 2, "ok": True}) == "ok 2건"

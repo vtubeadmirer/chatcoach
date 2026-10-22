@@ -589,8 +589,8 @@ def test_virtual_mixed_into_chat_with_marks(qapp):
     v, ok = make_v(qapp)
     # 가상 채팅을 섞으면 실제 채팅은 훈련 구간 [5초, 25초) 안 20줄만 싣는다(구간 밖 원 채팅과 본문이 겹치지 않게)
     assert ok and v.virtual_line_count() == 4 and v.chat.total_count() == 24
-    assert _nick_of(v, "v:s0001") == "하** · 가져옴" and _nick_of(v, "v:s0002") == "두* · 생성"
-    assert _nick_of(v, "v:s0003") == "시청자3 · 생성"             # 가림 이름이 없으면 가명 (가상 이름 차례 3)
+    assert _nick_of(v, "v:s0001") == "가 하** · 가져옴" and _nick_of(v, "v:s0002") == "생 두* · 생성"
+    assert _nick_of(v, "v:s0003") == "생 시청자3 · 생성"          # 가림 이름이 없으면 가명 (가상 이름 차례 3)
     d = v.chat.chat_data()
     assert all(d.vnos[d.index_of(f"v:s000{i}")] > 0 for i in range(1, 5))   # 가명 번호 (실제 viewer_id 아님)
     assert NICK_MARK not in [d.nicks[d.index_of(f"v:s000{i}")] for i in range(1, 5)]
@@ -606,6 +606,20 @@ def test_virtual_mixed_into_chat_with_marks(qapp):
 def test_virtual_marks_hidden_option(qapp):
     v, ok = make_v(qapp, show_virtual_marks=False)
     assert ok and _nick_of(v, "v:s0001") == "하**" and _nick_of(v, "v:s0002") == "두*"
+
+
+def test_virtual_mark_front_letter_tells_source(qapp):
+    """retrieved 와 generated 는 닉네임 칸 **앞 한 글자**로 갈린다 — 좁은 칸(뒤 줄임표)에서도 첫 글자는 남는다.
+    실제 채팅 줄의 이름은 그대로(앞 글자 없음)."""
+    v, ok = make_v(qapp)
+    assert ok and tv.VIRTUAL_MARK == {"retrieved": "가", "generated": "생"}
+    by_src = {}
+    for ln in v._vlines.values():
+        by_src.setdefault(ln.source, set()).add(_nick_of(v, ln.vid)[:2])
+    assert by_src == {"retrieved": {"가 "}, "generated": {"생 "}}
+    d = v.chat.chat_data()
+    real = [d.nicks[i] for i in range(d.n) if not d.chat_ids[i].startswith("v:")]
+    assert real and all(n == NICK_MARK for n in real)
 
 
 def test_virtual_pick_counts_separately(qapp):

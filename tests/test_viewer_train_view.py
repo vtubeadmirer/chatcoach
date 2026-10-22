@@ -440,7 +440,9 @@ def test_virtual_mix_examples_and_real_log(qapp, tmp_path):
     assert v.events[0]["scenario_id"] == "SC-20261022-abcd" and v.events[0]["virtual_lines"] == 2
     data = v.chat.chat_data()
     nicks = {data.chat_ids[i]: data.nicks[i] for i in range(data.n)}
-    assert nicks["v:s0001"] == "하** · 가져옴" and nicks["v:s0002"].endswith(" · 생성")   # 가림 이름 모양은 섞기가 정한다
+    # 앞 한 글자(가·생) + 가림 이름 + 뒤 표시 — F(trainer_view.VIRTUAL_MARK)와 같은 꼴. 가림 이름 모양은 섞기가 정한다
+    assert nicks["v:s0001"] == "가 하** · 가져옴"
+    assert nicks["v:s0002"].startswith("생 ") and nicks["v:s0002"].endswith(" · 생성")
     assert min(t for t in data.times) >= SEG[0]                    # 구간(시나리오 머리줄) 안만
     v.seek_vod(9_000)
     _send(v, f"{MINE} 주제 질문?")
