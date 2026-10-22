@@ -720,7 +720,8 @@ def build_report(project_root: str, session_a: str, session_b: str, *, eval_sett
     side_b = _side(lb, view_b, proj.data, exposure)
     # 계산된 AI 결과 노출(app.core.exposure 규칙 1, 06 6-6 10번): 계획 취소 뒤 만든 재라벨 세션.
     # 라벨 형식은 고정이라(D-15 7) 기록하지 않고, 기록된 view.exposed 와 같은 칸(view_exposed)에 합친다.
-    # 봉인 해제(규칙 2)는 이 보고서가 봉인 폴더(data\\ai)를 열지 않는다는 약속 때문에 보지 않는다 — AI 비교 쪽(최종 세트)이 본다
+    # 봉인 해제(규칙 2)는 이 보고서가 봉인 폴더(data\\ai)를 열지 않는다는 약속 때문에 보지 않는다 — AI 비교 쪽(최종 세트)이 본다.
+    # 훈련 열기(규칙 5, D-18 7)는 프로젝트 training\\ 의 시작 시각만 읽어 같은 칸에 합친다(사람 라벨 노출)
     from . import exposure_io
     xview, exposure_warnings = exposure_io.compute_for(
         root, [exposure_io.session_info_of(ls.session_id, v.other_records, ls.lock.get("locked_at"))

@@ -1246,7 +1246,7 @@ def build_final_set(project_dir: str, options: ExportOptions | None = None, *, p
         root, [exposure_io.session_info_of(s, view.other_records, lock_at.get(s)) for s in [primary] + relabels],
         ai_root=ai_root, reader_kind=reader_kind)
     warns.extend(xwarn)
-    computed_exposed = sorted(xview.exposed())
+    computed_exposed = sorted(xview.exposed_any())        # AI 결과 노출 + 훈련 열기 노출(규칙 5, D-18 7)
     for s in computed_exposed:
         b.sessions.setdefault(s, _SessionInfo()).exposed = True
     relabel_exposed = any(s in relabels for s in computed_exposed) or any(

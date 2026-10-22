@@ -609,7 +609,9 @@ class AnalysisView(QWidget):
         self.filter_box = QComboBox()
         for f in FILTERS:
             self.filter_box.addItem(tr(FILTER_KO[f]), f)
-        self.filter_box.currentIndexChanged.connect(lambda _i: self.set_filter(self.filter_box.currentData()))
+        # 연결은 묶인 메서드로만 한다. self 를 잡은 람다는 Qt 연결이 강하게 들고 있어 이 화면이 지워지지 않고
+        # 프로세스 끝(QApplication 뒤)까지 남아 종료 때 접근 위반을 낸다(18 4-2, D-18 10)
+        self.filter_box.currentIndexChanged.connect(self._on_filter_box)
         fl.addWidget(self.filter_box, 1)
         ll.addLayout(fl)
         self.list = QListWidget()
@@ -617,9 +619,9 @@ class AnalysisView(QWidget):
         ll.addWidget(self.list, 1)
         nl = QHBoxLayout()
         self.prev_btn = QPushButton(tr("이전 다른 곳 (Shift+N)"))
-        self.prev_btn.clicked.connect(lambda _=False: self.prev_diff())
+        self.prev_btn.clicked.connect(self._on_prev_clicked)
         self.next_btn = QPushButton(tr("다음 다른 곳 (N)"))
-        self.next_btn.clicked.connect(lambda _=False: self.next_diff())
+        self.next_btn.clicked.connect(self._on_next_clicked)
         nl.addWidget(self.prev_btn)
         nl.addWidget(self.next_btn)
         ll.addLayout(nl)
@@ -670,6 +672,15 @@ class AnalysisView(QWidget):
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 3)
         self.stack.addWidget(self.content)
+
+    def _on_filter_box(self, _i: int) -> None:
+        self.set_filter(self.filter_box.currentData())
+
+    def _on_prev_clicked(self, _checked: bool = False) -> None:
+        self.prev_diff()
+
+    def _on_next_clicked(self, _checked: bool = False) -> None:
+        self.next_diff()
 
     def _install_shortcuts(self) -> None:
         """N / Shift+N. 작업대·큐·출처 화면이 쓰지 않는 키다. 이 화면 안에 초점이 있을 때만 동작한다."""

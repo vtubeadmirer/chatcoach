@@ -66,6 +66,16 @@
   풀리는지, 라벨링 세션에서 주제 트랙이 숨고 요약이 열리지 않는지, 해제 전 분석 세션에서 트랙이 '봉인됨' 인지도 본다(D-17 5).
   끝나면 다 지운다. 단계 이름 앞에 an_.
 
+--training-flow (F 첫 묶음, 08 D-16·D-18 6·7·8, 18 6-2): 같은 모양의 사본 + labels\\manual-*.csv(손라벨 기준, 읽기만)를
+  보기 전용으로 열고 사본에 영상을 연결 → 메뉴 '훈련 → 스트리머 훈련' 한 번(고르는 창 없음, 소리 끈 자동 재생, start 줄) →
+  Space 로 멈춤(작업대 재생은 그대로) → 채팅 표에서 진짜 마우스로 5개 고르기·1개 다시 눌러 취소(아직 안 온 채팅은 표에 없음) →
+  [견주기] → '원래만' 행 하나 눌러 소리 켜고 듣기(끝에서 멈춤) → [닫기] → 기록 줄(start·pick×5·unpick·compare·end, 본문·
+  닉네임 없음) → 훈련 뒤 만든 라벨링 세션이 노출로 계산되는지. 단계마다 사람 클릭 수(clicks=)를 찍는다. 단계 이름 앞에 tr_.
+  스크린샷 _tr_train · _tr_compare. 끝나면 사본을 지운다.
+
+외부 정지 감시: 감시 스레드가 3초 넘게 멈췄고 그동안 프로세스 CPU 가 거의 늘지 않았으면 그 단계 뒤에 external_suspend=초 를
+  붙이고 끝에 합계를 찍는다(보안 프로그램이 프로세스를 통째로 일시 정지한 것 — 코드 멈춤과 구별, 18 보고 4-2).
+
 지키는 것
 - 원본 프로젝트에는 쓰지 않는다: 영상 연결은 persist=False, 세션 없이(보기 전용) 열어 라벨 기록도 열지 않는다.
   열기 잠금(locks/open.lock)만 잡았다 푼다. 끝에 project.json 수정 시각과 크기가 그대로인지 확인한다.
@@ -107,6 +117,9 @@ def parse_args(argv=None):
                     help="사본에서 L01 1차·L02 재라벨(④ 놓친 후보 포함) 잠금→보고서→조정 2건→계획 취소→출처 판정 3건")
     ap.add_argument("--analysis-flow", action="store_true",
                     help="사본에서 합성 엔진 결과 봉인→해제 거부→L01·L02 잠금→해제→분석 세션 나란히 보기→AI 비교 보고서")
+    ap.add_argument("--training-flow", action="store_true",
+                    help="사본(+ labels\\manual-*.csv)에서 메뉴로 스트리머 훈련 열기→채팅 5개 고르기(1개 취소)→견주기→행 듣기"
+                         "→기록 줄 확인")
     ap.add_argument("--window-size", help="--labeling-flow 동안 메인 창 크기 (예: 1366x768, 테두리 포함)")
     ap.add_argument("--data-dir", help="임시 데이터 폴더 (기본 %%TEMP%%\\chatcoach_smoke)")
     ap.add_argument("--timeout", type=float, default=60.0, help="단계 하나의 대기 상한(초)")
@@ -207,25 +220,32 @@ STEPS_ANALYSIS = ("an_copy", "an_seal", "an_open_a", "an_a_label", "an_a_lock_pl
                   "an_summary", "an_report", "an_cleanup")
 
 
-def expected_steps(analysis: bool = False) -> list[str]:
+# --training-flow (F 첫 묶음, 08 D-18 6·7·8) 의 단계. 켜면 cache_drop 앞에 붙고, 건너뛴 표시 'training_flow' 는 빠진다.
+STEPS_TRAINING = ("tr_copy", "tr_open", "tr_menu", "tr_space", "tr_pick", "tr_compare", "tr_listen", "tr_close",
+                  "tr_log", "tr_exposure", "tr_cleanup")
+SKIP_MARKS = ("analysis_flow", "training_flow")
+
+
+def expected_steps(analysis: bool = False, training: bool = False) -> list[str]:
     """지금 판에서 네 흐름을 다 켰을 때 찍혀야 하는 단계 이름(c5 목록을 STEPS_RENAMED 로 바꾸고 STEPS_ADDED 를 더함).
-    analysis=True(--analysis-flow 도 켬)면 cache_drop 앞에 STEPS_ANALYSIS 를 넣는다."""
+    analysis=True(--analysis-flow 도 켬)면 cache_drop 앞에 STEPS_ANALYSIS 를, training=True 면 그 뒤에 STEPS_TRAINING 을."""
     out: list[str] = []
     for s in STEPS_C5:
         s = STEPS_RENAMED.get(s, s)
         if s not in out:
             out.append(s)
     out += [s for s in STEPS_ADDED if s not in out]
-    if analysis:
-        i = out.index("cache_drop") if "cache_drop" in out else len(out)
-        out[i:i] = [s for s in STEPS_ANALYSIS if s not in out]
+    for on, extra in ((analysis, STEPS_ANALYSIS), (training, STEPS_TRAINING)):
+        if on:
+            i = out.index("cache_drop") if "cache_drop" in out else len(out)
+            out[i:i] = [s for s in extra if s not in out]
     return out
 
 
-def compare_steps(names, analysis: bool = False) -> tuple[list[str], list[str]]:
-    """찍힌 단계 이름 → (빠진 것, 목록에 없는 것). 'analysis_flow'(건너뜀 표시)는 대조하지 않는다."""
-    seen = [s for s in dict.fromkeys(names) if s != "analysis_flow"]
-    want = expected_steps(analysis)
+def compare_steps(names, analysis: bool = False, training: bool = False) -> tuple[list[str], list[str]]:
+    """찍힌 단계 이름 → (빠진 것, 목록에 없는 것). 건너뜀 표시('analysis_flow'·'training_flow')는 대조하지 않는다."""
+    seen = [s for s in dict.fromkeys(names) if s not in SKIP_MARKS]
+    want = expected_steps(analysis, training)
     return [s for s in want if s not in seen], [s for s in seen if s not in want]
 
 
@@ -267,6 +287,20 @@ def copy_for_flow(src: str, dst: str) -> list[str]:
         os.makedirs(os.path.join(dst, "chat"), exist_ok=True)
         shutil.copy2(p, os.path.join(dst, rel))
         done.append(rel.replace(os.sep, "/"))
+    return done
+
+
+def copy_for_training(src: str, dst: str) -> list[str]:
+    """--training-flow 사본: 라벨링 흐름 사본 + 손라벨 기준(labels/manual-*.csv, 읽기만 하는 훈련 기준, D-18 7).
+    다른 라벨 기록·잠금·표본·보호 구역·파생 자료·영상은 옮기지 않는다(그래서 최종 세트는 없고 손라벨이 기준이 된다)."""
+    done = copy_for_flow(src, dst)
+    from app import reference_set as rsm
+    names = rsm.manual_csv_files(src)
+    if names:
+        os.makedirs(os.path.join(dst, "labels"), exist_ok=True)
+    for n in names:
+        shutil.copy2(os.path.join(src, "labels", n), os.path.join(dst, "labels", n))
+        done.append("labels/" + n)
     return done
 
 
@@ -360,9 +394,39 @@ class Smoke:
         self.results: list[tuple[str, bool, float, str]] = []
         self.app = None
         self.win = None
+        self._wd_gaps: list[tuple[float, float, float]] = []   # (시작 perf, 멈춘 초, 그동안 프로세스 CPU 초)
+        self._wd_stop = None
+
+    # ---------------------------------------------------------------- 외부 정지 감시 (18 보고 4-2, bugs 담당 제안 2)
+    WD_TICK_S = 0.25
+    WD_GAP_S = 3.0
+
+    def _start_watchdog(self) -> None:
+        """감시 스레드가 0.25초마다 시각을 본다. 한 번에 3초 넘게 건너뛰고 그동안 프로세스 CPU 가 거의 늘지 않았으면
+        프로세스 전체(모든 스레드)가 멈춘 것 — 보안 프로그램(Acronis Active Protection 등)의 일시 정지로 본다.
+        코드 교착은 주 스레드만 멈추므로 감시 스레드는 계속 돈다(GIL 을 쥔 채 멈추는 C 호출은 예외 — 그래서 CPU 도 본다)."""
+        import threading
+        stop = threading.Event()
+        self._wd_stop = stop
+
+        def run():
+            last, cpu = time.perf_counter(), time.process_time()
+            while not stop.wait(self.WD_TICK_S):
+                now, c = time.perf_counter(), time.process_time()
+                gap = now - last - self.WD_TICK_S
+                if gap > self.WD_GAP_S and (c - cpu) < 0.1 * gap:
+                    self._wd_gaps.append((last, gap, c - cpu))
+                last, cpu = now, c
+        threading.Thread(target=run, name="smoke-watchdog", daemon=True).start()
+
+    def _suspended_since(self, t0: float) -> float:
+        return sum(g for s, g, _c in self._wd_gaps if s >= t0 - self.WD_TICK_S)
 
     # ---------------------------------------------------------------- 도우미
     def check(self, name: str, ok: bool, t0: float, detail: str = "") -> bool:
+        sus = self._suspended_since(t0)
+        if sus > 0:
+            detail = (detail + " " if detail else "") + f"external_suspend={sus:.1f}s"
         ms = (time.perf_counter() - t0) * 1000
         self.results.append((name, bool(ok), ms, detail))
         print(f"{'PASS' if ok else 'FAIL'} {name:<22} {ms:8.0f} ms  {detail}", flush=True)
@@ -411,6 +475,7 @@ class Smoke:
         self.app.setApplicationName("ChatCoachSmoke")
         import main as main_mod
         main_mod.apply_dark_theme(self.app)
+        self._start_watchdog()
 
     # ---------------------------------------------------------------- 단계
     def step_window(self) -> bool:
@@ -1889,6 +1954,242 @@ class Smoke:
             if tmp is not None:
                 self._flow_cleanup(tmp, p, t0)
 
+    # ---------------------------------------------------------------- --training-flow (F 첫 묶음, 08 D-18 6·7·8)
+    def _click_chat_row(self, chat, row: int) -> bool:
+        """채팅 표의 보이는 행 하나를 진짜 마우스로 한 번 누른다(QTest). 그 행이 화면 안에 오게 먼저 스크롤."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        v = chat.view
+        idx = chat.model.index(row, 3)
+        v.scrollTo(idx)
+        self.pump(30)
+        rect = v.visualRect(idx)
+        if not rect.isValid() or rect.height() <= 0:
+            return False
+        QTest.mouseClick(v.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+        self.pump(30)
+        return True
+
+    def step_training_flow(self) -> bool:
+        """메뉴로 열기 → Space 멈춤 → 채팅 5개 고르기(1개 취소) → 견주기 → 행 하나 눌러 듣기 → 닫기 → 기록 줄·노출 확인.
+        사람 클릭 수(D-16)를 단계마다 clicks= 로 찍는다(키 한 번도 1로 센다, keys= 따로). 본문·닉네임은 찍지 않는다."""
+        t0 = time.perf_counter()
+        if not self.args.training_flow:
+            return self.check("training_flow", True, t0, "skip (--training-flow 없음)")
+        if not self.args.video or not os.path.isfile(self.args.video):
+            return self.check("training_flow", False, t0, "영상(--video)이 있어야 합니다 — 훈련은 소리 끈 다시보기")
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication
+        from app import exposure_io
+        from app import reference_set as rsm
+        from app import training_store as ts
+        from app.core import exposure as ex
+        from app.core import training as trc
+        tmp = tempfile.mkdtemp(prefix="chatcoach_smoke_tr_")
+        dst = os.path.join(tmp, "한글 사본", "projects", "프로젝트")
+        clicks_total = 0
+        try:
+            done = copy_for_training(self.args.project, dst)
+            n_csv = sum(1 for d in done if d.startswith("labels/"))
+            ok = n_csv > 0 and not rsm.is_pilot_project(dst)
+            self.check("tr_copy", ok, t0, f"copied={len(done)} manual_csv={n_csv}")
+            if not ok:
+                return False
+            if self.args.window_size:
+                self._resize(self.args.window_size)
+            # ---- 열기: 보기 전용(세션 화면 '보기 전용' 1번) + 사본에 영상 연결(사본 project.json 에만)
+            t1 = time.perf_counter()
+            ok = self._open_view_only(dst)
+            if ok:
+                self._connect_copy_media(self.wb)
+                ok = self.wait(lambda: bool(self.wb.media_path) and self.wb.chat_data.count > 0
+                               and "chat" not in self.wb._jobs)
+            self.check("tr_open", ok, t1, f"view_only={self.wb.session is None if self.wb else '-'} "
+                                          f"chats={self.wb.chat_data.count if self.wb else 0} clicks=1(세션 화면 '보기 전용')")
+            if not ok:
+                return False
+            # ---- 메뉴 '훈련 → 스트리머 훈련' 한 번 (고르는 창 없음)
+            t1 = time.perf_counter()
+            wb_player = self.wb.player
+            wb_playing_before = bool(getattr(wb_player, "is_playing", lambda: False)())
+            self.win.m_training.aboutToShow.emit()                   # 메뉴를 펼 때와 같은 판단(기준 읽기·시범 잠금)
+            enabled = self.win.a_streamer_training.isEnabled()
+            reason = self.win.a_training_reason.text() if not enabled else ""
+            t_menu = time.perf_counter()
+            self.win.a_streamer_training.trigger()
+            view = self.win.training_view
+            ok = enabled and view is not None and self.win.stack.currentWidget() is view and view.state() == "training"
+            playing = ok and self.wait(lambda: view.player.is_playing(), 20)
+            open_ms = (time.perf_counter() - t_menu) * 1000
+            seg = view._segment if ok else None
+            starts = [r for s in ts.list_sessions(dst) for r in ts.read_valid(ts.session_path(dst, s))[0]
+                      if r["kind"] == trc.K_START]
+            no_dialog = QApplication.activeModalWidget() is None             # 고르는 창이 없다
+            ok = ok and playing and view.is_muted() and len(starts) == 1 and no_dialog
+            self.check("tr_menu", ok, t1, f"enabled={enabled} reason_len={len(reason)} autoplay={playing} "
+                                          f"modal_dialog={not no_dialog} "
+                                          f"muted={view.is_muted() if view else '-'} open_to_play_ms={open_ms:.0f} "
+                                          f"start_lines={len(starts)} ref_source="
+                                          f"{starts[0]['body']['reference']['source'] if starts else '-'} "
+                                          f"ref_count={starts[0]['body']['reference']['count'] if starts else 0} "
+                                          f"range_ms={seg[1] - seg[0] if seg else 0} clicks=2(메뉴 '훈련' + '스트리머 훈련')")
+            clicks_total += 2
+            if not ok:
+                return False
+            self.pump(1000)                                          # 첫 화면이 그려진 뒤에 찍는다
+            self._shot("_tr_train")
+            # ---- Space = 멈춤 (훈련 화면의 단축키, 작업대 재생은 그대로 멈춘 채)
+            t1 = time.perf_counter()
+            self.win.activateWindow()
+            view.setFocus()
+            self.pump(50)
+            QTest.keyClick(view, Qt.Key_Space)
+            paused = self.wait(lambda: not view.player.is_playing(), 5)
+            via = "key"
+            if not paused:                                           # 창 초점이 없는 환경(offscreen 등)
+                view.toggle_play()
+                paused = self.wait(lambda: not view.player.is_playing(), 5)
+                via = "fallback"
+            wb_same = bool(getattr(wb_player, "is_playing", lambda: False)()) == wb_playing_before
+            self.check("tr_space", paused and wb_same, t1, f"paused={paused} via={via} workbench_player_untouched={wb_same} "
+                                                           f"keys=1(Space) clicks=0")
+            if not (paused and wb_same):
+                return False
+            # ---- 채팅 5개 고르기(진짜 마우스 한 번씩) + 1개 취소
+            t1 = time.perf_counter()
+            chat = view.chat
+            data = chat.chat_data()
+            from app.ui.chat_panel import KIND_CODES
+            text_code = KIND_CODES.get("text")
+            in_seg = [i for i in range(data.n) if seg[0] <= data.times[i] < seg[1] and data.kinds[i] == text_code]
+            if len(in_seg) < 6:
+                return self.check("tr_pick", False, t1, f"구간 안 일반 채팅이 모자람({len(in_seg)})")
+            # 원래 반응 하나를 같이 골라 '같음' 줄도 본다(스모크 안에서만 기준을 엿본다 — 화면에는 견주기 전까지 없다)
+            ref_ids = {r.chat_id for r in getattr(view._reference, "reactions", ()) or ()}
+            ref_first = min((int(data.times[i]) for i in in_seg if data.chat_ids[i] in ref_ids), default=None)
+            target = int(data.times[in_seg[min(len(in_seg) - 1, 11)]]) + 200   # 구간 안 채팅 12개쯤 온 자리
+            if ref_first is not None:
+                target = max(target, ref_first + 200)
+            view.seek_vod(target)
+            self.pump(100)
+            revealed = chat.row_count()
+            hidden_future = revealed < data.n and all(data.times[chat.model.rows[r]] <= target for r in range(revealed))
+            cand = [r for r in range(revealed - 1, -1, -1)
+                    if data.kinds[chat.model.rows[r]] == text_code and seg[0] <= data.times[chat.model.rows[r]] < seg[1]]
+            ref_rows = [r for r in cand if data.chat_ids[chat.model.rows[r]] in ref_ids][:1]
+            rows = [r for r in cand if r not in ref_rows][:5 - len(ref_rows)] + ref_rows
+            gap = QApplication.instance().doubleClickInterval() / 1000.0
+            n_click = 0
+            for r in rows:
+                if self._click_chat_row(chat, r):
+                    n_click += 1
+            picked = view.pick_count()
+            first = data.chat_ids[chat.model.rows[rows[0]]]
+            time.sleep(gap + 0.1)                                    # 더블클릭 간격 밖에서 같은 채팅을 다시 = 취소
+            self.pump(10)
+            self._click_chat_row(chat, rows[0])
+            n_click += 1
+            after = view.pick_count()
+            marks = chat.label_marks() if hasattr(chat, "label_marks") else {}
+            ok = picked == 5 and after == 4 and not view.is_picked(first) and len(marks) == 4 and hidden_future
+            clicks_total += n_click
+            self.check("tr_pick", ok, t1, f"picked={picked} after_cancel={after} marks={len(marks)} "
+                                          f"revealed_rows={revealed}/{data.n} future_hidden={hidden_future} "
+                                          f"clicks={n_click}(채팅 5 + 취소 1)")
+            if not ok:
+                return False
+            # ---- 견주기 단추 한 번
+            t1 = time.perf_counter()
+            view.btn_compare.click()
+            self.pump(50)
+            nums = view.compare_view.summary() if view.state() == "compare" else {}
+            rows_c = view.compare_view.rows() if nums else []
+            ok = view.state() == "compare" and bool(rows_c) and nums.get("same", 0) + nums.get("mine_only", 0) == 4 \
+                and chat.row_count() == data.n and (nums.get("same", 0) >= 1 or not ref_rows)
+            clicks_total += 1
+            self.check("tr_compare", ok, t1, f"same={nums.get('same')} mine_only={nums.get('mine_only')} "
+                                             f"orig_only={nums.get('orig_only')} reference={nums.get('reference')} "
+                                             f"hit_rate={nums.get('hit_rate')} median_delta_ms={nums.get('median_delta_ms')} "
+                                             f"rows={len(rows_c)} clicks=1(견주기)")
+            if not ok:
+                return False
+            self._shot("_tr_compare")
+            # ---- 행 하나 누르면 소리를 켜고 원래 대답 앞뒤를 재생한 뒤 멈춘다
+            t1 = time.perf_counter()
+            tbl = view.compare_view.table
+            pick_row = next((i for i, r in enumerate(rows_c) if r.category == "orig_only"), 0)
+            it = tbl.item(pick_row, 1)
+            tbl.scrollToItem(it)
+            self.pump(30)
+            QTest.mouseClick(tbl.viewport(), Qt.LeftButton, Qt.NoModifier, tbl.visualItemRect(it).center())
+            self.pump(50)
+            end_vod = view.listen_end()
+            unmuted = not view.is_muted()
+            started = self.wait(lambda: view.player.is_playing(), 10)
+            win_ms = (end_vod - view.position_vod()) if end_vod is not None else 0
+            stopped = self.wait(lambda: not view.player.is_playing(), max(30.0, win_ms / 1000 + 15))
+            pos_err = view.position_vod() - end_vod if end_vod is not None else None
+            ok = end_vod is not None and unmuted and started and stopped and view.compare_view.listen_count == 1
+            clicks_total += 1
+            self.check("tr_listen", ok, t1, f"unmuted={unmuted} played={started} stopped_at_end={stopped} "
+                                            f"window_ms={win_ms} stop_err_ms={pos_err} row={rows_c[pick_row].category} "
+                                            f"clicks=1(행)")
+            if not ok:
+                return False
+            # ---- 닫기 한 번 → 작업대로
+            t1 = time.perf_counter()
+            view.btn_close.click()
+            self.pump(100)
+            ok = self.win.training_view is None and self.win.stack.currentWidget() is self.wb
+            clicks_total += 1
+            self.check("tr_close", ok, t1, f"back_to_workbench={ok} clicks=1(닫기)")
+            # ---- 기록 줄: start · pick ×5 · unpick · compare · end, 본문·닉네임 없음
+            t1 = time.perf_counter()
+            sids = ts.list_sessions(dst)
+            recs, summ = ts.read_valid(ts.session_path(dst, sids[0])) if len(sids) == 1 else ([], {})
+            kinds = [r["kind"] for r in recs]
+            want = [trc.K_START] + [trc.K_PICK] * 5 + [trc.K_UNPICK, trc.K_COMPARE, trc.K_END]
+            blob = open(ts.session_path(dst, sids[0]), "rb").read() if len(sids) == 1 else b""
+            leaked = 0
+            for r in rows:
+                src = chat.model.rows[r] if r < len(chat.model.rows) else None
+                if src is None:
+                    continue
+                for s in (data.texts[src], data.nicks[src]):
+                    if s and len(s) >= 2 and s.encode("utf-8") in blob:
+                        leaked += 1
+            cmp_body = next((r["body"] for r in recs if r["kind"] == trc.K_COMPARE), {})
+            ok = kinds == want and summ.get("invalid") == 0 and leaked == 0 and \
+                cmp_body.get("same") == nums.get("same") and recs[-1]["body"].get("reason") == "compare"
+            self.check("tr_log", ok, t1, f"sessions={len(sids)} lines={len(recs)} kinds_ok={kinds == want} "
+                                         f"invalid={summ.get('invalid')} text_or_nick_in_file={leaked} "
+                                         f"end_reason={recs[-1]['body'].get('reason') if recs else '-'}")
+            # ---- 노출: 훈련 뒤 이 프로젝트에서 만드는 라벨링 세션은 대표값에서 빠진다(규칙 5)
+            t1 = time.perf_counter()
+            later = ex.SessionInfo("L99-P-20991231-zz99", "primary", "2099-12-31T00:00:00+09:00")
+            xv, _w = exposure_io.compute_for(dst, [later], include_unseals=False)
+            ok = xv.exposed_any() == {later.session_id} and xv.reasons(later.session_id) == (ex.REASON_TRAINING_OPENED,)
+            self.win.m_training.aboutToShow.emit()
+            self.check("tr_exposure", ok, t1, f"later_session_exposed={ok} menu_enabled_again="
+                                              f"{self.win.a_streamer_training.isEnabled()} "
+                                              f"human_clicks_total={clicks_total} keys_total=1")
+            return True
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc(limit=3)
+            return self.check("training_flow", False, t0, type(e).__name__)
+        finally:
+            if self.win is not None and self.win.training_view is not None:
+                self.win.close_training()
+            if self.wb is not None and getattr(self.wb, "project", None) is not None and _inside(self.wb.project.root, tmp):
+                self.win.show_home()
+                self.pump(50)
+            leftover = remove_tree_checked(tmp)
+            if leftover:
+                self.check("tr_cleanup", False, t0, f"임시 사본을 다 지우지 못함({len(leftover)}개, {tmp}) — 직접 지우세요")
+            else:
+                self.check("tr_cleanup", True, time.perf_counter(), f"사본 지움 (흐름 전체 {time.perf_counter() - t0:.1f}초)")
+
     def _resize(self, spec: str) -> None:
         """--window-size '1366x768': 메인 창 바깥 크기(테두리 포함)를 그 크기로 맞춘다(노트북 화면 확인, 11 4-2 의 2)."""
         w, h = (int(x) for x in spec.lower().split("x", 1))
@@ -2009,7 +2310,7 @@ class Smoke:
         steps = [self.step_window, self.step_open, self.step_chat, self.step_timeline, self.step_video, self.step_waveform,
                  self.step_seek, self.step_chat_activate, self.step_play, self.step_zoom, self.step_filter,
                  self.step_store_copy, self.step_shot, self.step_labeling_flow, self.step_agreement_flow,
-                 self.step_adjudication_flow, self.step_analysis_flow, self.step_close]
+                 self.step_adjudication_flow, self.step_analysis_flow, self.step_training_flow, self.step_close]
         t_all = time.perf_counter()
         for st in steps:
             try:
@@ -2032,12 +2333,17 @@ class Smoke:
         steps_ok = True
         a = self.args
         if a.store_copy and a.labeling_flow and a.agreement_flow and a.adjudication_flow and not failed:
-            an = bool(a.analysis_flow)
-            missing, extra = compare_steps((r[0] for r in self.results), analysis=an)
+            an, trn = bool(a.analysis_flow), bool(a.training_flow)
+            missing, extra = compare_steps((r[0] for r in self.results), analysis=an, training=trn)
             steps_ok = not missing
-            seen = [s for s in dict.fromkeys(r[0] for r in self.results) if s != "analysis_flow"]
-            print(f"== 단계 목록(14 c5 의 49{f' + E 분석 {len(STEPS_ANALYSIS)}' if an else ''} 와 대조, 15 5-2 의 16): {len(seen)}"
-                  f"/{len(expected_steps(an))} missing={missing} extra={extra}")
+            seen = [s for s in dict.fromkeys(r[0] for r in self.results) if s not in SKIP_MARKS]
+            print(f"== 단계 목록(14 c5 의 49{f' + E 분석 {len(STEPS_ANALYSIS)}' if an else ''}"
+                  f"{f' + F 훈련 {len(STEPS_TRAINING)}' if trn else ''} 와 대조, 15 5-2 의 16): {len(seen)}"
+                  f"/{len(expected_steps(an, trn))} missing={missing} extra={extra}")
+        if self._wd_gaps:
+            tot = sum(g for _s, g, _c in self._wd_gaps)
+            print(f"== external_suspend: 프로세스 전체가 멈춘 구간 {len(self._wd_gaps)}번, 합 {tot:.1f}초 "
+                  f"(감시 스레드 기준 — 보안 프로그램의 일시 정지 등, 코드 멈춤과 구별)")
         return 0 if not failed and steps_ok else 1
 
     def step_cache_drop(self) -> bool:

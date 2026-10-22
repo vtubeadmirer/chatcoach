@@ -199,7 +199,9 @@ class OriginView(QWidget):
         self.auto_line.setWordWrap(True)
         self.auto_line.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.auto_btn = QPushButton(tr("자동 결과 받기 Ctrl+G"))
-        self.auto_btn.clicked.connect(lambda _=False: self.take_auto())
+        # 연결은 묶인 메서드로만 한다(이 파일 전체). self 를 잡은 람다·partial 은 Qt 연결이 강하게 들고 있어 화면이
+        # 지워지지 않고 프로세스 끝(QApplication 뒤)까지 남는다 — 종료 때 접근 위반의 원인(D-18 10)
+        self.auto_btn.clicked.connect(self._on_auto_btn)
         ar.addWidget(self.auto_line, 1)
         ar.addWidget(self.auto_btn)
         rr = QHBoxLayout()
@@ -207,7 +209,7 @@ class OriginView(QWidget):
         self.range_line.setTextFormat(Qt.PlainText)
         self.loop_btn = QPushButton(tr("범위 반복 R"))
         self.loop_btn.setCheckable(True)
-        self.loop_btn.clicked.connect(lambda _=False: self.toggle_loop())
+        self.loop_btn.clicked.connect(self._on_loop_btn)
         rr.addWidget(self.range_line, 1)
         rr.addWidget(self.loop_btn)
         cl.addWidget(self.item_line)
@@ -224,10 +226,10 @@ class OriginView(QWidget):
         for i, o in enumerate(og.ORIGINS, 1):
             b = QPushButton(tr(f"{og.ORIGIN_KO[o]} Ctrl+{i}"))
             b.setCheckable(True)
-            b.clicked.connect(lambda _=False, o=o: self._on_origin_clicked(o))
-            self.origin_group.addButton(b, i)
+            self.origin_group.addButton(b, i)       # 눌림은 idClicked 하나로 받는다(아래)
             self.origin_btns[o] = b
             orow.addWidget(b)
+        self.origin_group.idClicked.connect(self._on_origin_id)
         lay.addLayout(orow)
 
         crow = QHBoxLayout()
@@ -259,22 +261,22 @@ class OriginView(QWidget):
         self.rationale.setMaxLength(og.RATIONALE_MAX)
         self.rationale.setPlaceholderText(tr("시각을 넣어 한 줄 (예: 01:20:45 생성 기록에 같은 문구, 3초 차)"))
         self.time_btn = QPushButton(tr("현재 시각 Ctrl+T"))
-        self.time_btn.clicked.connect(lambda _=False: self.insert_time())
+        self.time_btn.clicked.connect(self._on_time_btn)
         rl.addWidget(self.rationale, 1)
         rl.addWidget(self.time_btn)
         lay.addLayout(rl)
 
         self.save_btn = QPushButton(tr("저장 Ctrl+Enter"))
-        self.save_btn.clicked.connect(lambda _=False: self.save_current())
+        self.save_btn.clicked.connect(self._on_save_btn)
         lay.addWidget(self.save_btn)
 
         nr = QHBoxLayout()
         self.prev_btn = QPushButton(tr("◀ 이전 PgUp"))
-        self.prev_btn.clicked.connect(lambda _=False: self.prev())
+        self.prev_btn.clicked.connect(self._on_prev_btn)
         self.next_btn = QPushButton(tr("다음 ▶ PgDown"))
-        self.next_btn.clicked.connect(lambda _=False: self.next())
+        self.next_btn.clicked.connect(self._on_next_btn)
         self.pending_btn = QPushButton(tr("다음 대기"))
-        self.pending_btn.clicked.connect(lambda _=False: self.next_pending())
+        self.pending_btn.clicked.connect(self._on_pending_btn)
         nr.addWidget(self.prev_btn)
         nr.addWidget(self.next_btn)
         nr.addWidget(self.pending_btn)
@@ -285,6 +287,32 @@ class OriginView(QWidget):
         self.msg.setWordWrap(True)
         lay.addWidget(self.msg)
         lay.addStretch(1)
+
+    # 버튼 받기 (clicked(bool) 의 bool 은 버린다)
+    def _on_auto_btn(self, _checked: bool = False) -> None:
+        self.take_auto()
+
+    def _on_loop_btn(self, _checked: bool = False) -> None:
+        self.toggle_loop()
+
+    def _on_origin_id(self, i: int) -> None:
+        if 1 <= i <= len(og.ORIGINS):
+            self._on_origin_clicked(og.ORIGINS[i - 1])
+
+    def _on_time_btn(self, _checked: bool = False) -> None:
+        self.insert_time()
+
+    def _on_save_btn(self, _checked: bool = False) -> None:
+        self.save_current()
+
+    def _on_prev_btn(self, _checked: bool = False) -> None:
+        self.prev()
+
+    def _on_next_btn(self, _checked: bool = False) -> None:
+        self.next()
+
+    def _on_pending_btn(self, _checked: bool = False) -> None:
+        self.next_pending()
 
     def _fill_methods(self, hint: og.AutoHint | None) -> None:
         self.method_box.blockSignals(True)
@@ -307,10 +335,13 @@ class OriginView(QWidget):
             s.activated.connect(fn)
             self.shortcuts[key] = s
 
+        # 값은 단축키 이름표(objectName)에 두고 한 메서드가 sender() 로 읽는다(람다 없이)
         for i, o in enumerate(og.ORIGINS, 1):
-            sc(f"Ctrl+{i}", lambda o=o: self.set_origin(o))
+            sc(f"Ctrl+{i}", self._on_origin_shortcut)
+            self.shortcuts[f"Ctrl+{i}"].setObjectName(o)
         for i, c in enumerate(og.CONFIDENCES, 1):
-            sc(f"Alt+{i}", lambda c=c: self.set_confidence(c))
+            sc(f"Alt+{i}", self._on_conf_shortcut)
+            self.shortcuts[f"Alt+{i}"].setObjectName(c)
         sc("Ctrl+G", self.take_auto)
         sc("Ctrl+T", self.insert_time)
         sc("Ctrl+Return", self.save_current)
@@ -319,6 +350,16 @@ class OriginView(QWidget):
         sc("PgDown", self.next)
         sc("PgUp", self.prev)
         sc("Esc", self._on_cancel)
+
+    def _on_origin_shortcut(self) -> None:
+        s = self.sender()
+        if s is not None and s.objectName() in og.ORIGINS:
+            self.set_origin(s.objectName())
+
+    def _on_conf_shortcut(self) -> None:
+        s = self.sender()
+        if s is not None and s.objectName() in og.CONFIDENCES:
+            self.set_confidence(s.objectName())
 
     def set_play_keys(self, on: bool) -> None:
         self.shortcuts["R"].setEnabled(bool(on))

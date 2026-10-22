@@ -184,7 +184,8 @@ def test_step_list_matches_c5_49_with_renames():
     names = set(re.findall(r'self\.check\("([a-z_0-9]+)"', src))
     pref = set(re.findall(r'self\.check\(f"\{p\}_([a-z_0-9]+)"', src))
     names |= {f"{p}_{s}" for s in pref for p in ("agree", "adj", "an")}
-    names -= {"labeling_flow", "agreement_flow", "adjudication_flow", "analysis_flow"}  # 건너뜀·예외 때만 찍는 묶음 이름
+    names -= {"labeling_flow", "agreement_flow", "adjudication_flow", "analysis_flow",
+              "training_flow"}                                      # 건너뜀·예외 때만 찍는 묶음 이름
     names -= {"agree_b_missed", "agree_tools", "agree_cancel_plan", "agree_origin", "agree_adjudicate",
               "adj_analysis"}                                       # 도우미가 흐름마다 다르게 찍는 것
     # 흐름 머리글자 f"{p}_…" 는 흐름마다 자기 단계만 찍는다: agree·adj 는 E 분석 단계를, an 은 agree·adj 전용 단계를 찍지 않는다
@@ -195,9 +196,12 @@ def test_step_list_matches_c5_49_with_renames():
     names -= {n for n in names if n.startswith("an_") and n not in gs.STEPS_ANALYSIS}
     want_an = gs.expected_steps(analysis=True)
     assert len(want_an) == 49 + len(gs.STEPS_ANALYSIS) and want_an[-1] == "cache_drop"
-    assert names <= set(want_an), sorted(names - set(want_an))
+    want_all = gs.expected_steps(analysis=True, training=True)     # F 훈련 흐름(--training-flow) 단계도 cache_drop 앞
+    assert len(want_all) == len(want_an) + len(gs.STEPS_TRAINING) and want_all[-1] == "cache_drop"
+    assert names <= set(want_all), sorted(names - set(want_all))
     assert set(gs.STEPS_ANALYSIS) <= names                          # 분석 흐름 단계가 모두 gui_smoke 안에 있다
-    assert gs.compare_steps(want + ["analysis_flow"]) == ([], [])   # 건너뜀 표시는 대조하지 않는다
+    assert set(gs.STEPS_TRAINING) <= names                          # 훈련 흐름 단계도
+    assert gs.compare_steps(want + ["analysis_flow", "training_flow"]) == ([], [])   # 건너뜀 표시는 대조하지 않는다
 
 
 # ---------------------------------------------------------------------------- 12. 잠그기 직전 구간표가 바뀌면 다시 계산

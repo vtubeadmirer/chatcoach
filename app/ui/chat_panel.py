@@ -262,6 +262,10 @@ class ChatTableModel(QAbstractTableModel):
         self.hl_src = -1               # 재생 위치 행(원본 인덱스), 없으면 -1
         self.marks: dict[int, str] = {}  # 원본 인덱스 → 사람 라벨 표시(set_label_marks)
         self.marks_own = False           # True = 이 라벨링 세션 자기 라벨(초록), False = 분석 세션의 잠긴 1차 라벨(보라)
+        self.marks_tip: str | None = None  # 표시 칸 풍선 글(없으면 쓰임에 맞는 기본 글)
+        # 흐르는 채팅(스트리머 훈련, 18 6-2): reveal_until 이 있으면 rows 중 t_ms ≤ reveal_until 인 앞쪽 n_vis 행만 보인다
+        self.reveal_until: int | None = None
+        self.n_vis = 0
         self._label_bg = QBrush(COLOR_LABEL_BG)
         self._label_fg = QBrush(COLOR_LABEL_FG)
         self._own_bg = QBrush(COLOR_OWN_BG)
@@ -275,7 +279,7 @@ class ChatTableModel(QAbstractTableModel):
 
     # Qt 모델 인터페이스 --------------------------------------------------
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008
-        return 0 if parent.isValid() else len(self.rows)
+        return 0 if parent.isValid() else self.n_vis
 
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008
         return 0 if parent.isValid() else 5
@@ -291,7 +295,7 @@ class ChatTableModel(QAbstractTableModel):
             return None
         r = index.row()
         rows = self.rows
-        if r < 0 or r >= len(rows):
+        if r < 0 or r >= self.n_vis:
             return None
         src = rows[r]
         d = self.data_
@@ -338,6 +342,8 @@ class ChatTableModel(QAbstractTableModel):
             return self._bold if (src == self.hl_src and c == COL_TIME) else None
         if role == _R_TOOLTIP:
             if c == COL_KIND and self.marks and src in self.marks:
+                if self.marks_tip:
+                    return self.marks_tip
                 return (tr("이 세션에서 이미 매긴 채팅 — 두 번 누르면 그 라벨을 고칩니다") if self.marks_own
                         else tr("잠긴 1차 세션의 사람 라벨 (분석 보기)"))
             if c != COL_TEXT:
@@ -351,40 +357,63 @@ class ChatTableModel(QAbstractTableModel):
         return None
 
     # 내부 조작 ------------------------------------------------------------
+    def _count_until(self, vod_ms: int) -> int:
+        """rows 중 t_ms ≤ vod_ms 인 행 수 (rows 는 시각 순)."""
+        rows, times = self.rows, self.data_.times
+        if isinstance(rows, range):
+            return bisect_right(times, vod_ms, 0, len(rows))
+        return bisect_right(rows, vod_ms, key=times.__getitem__)
+
+    def _vis_for_rows(self) -> int:
+        return len(self.rows) if self.reveal_until is None else self._count_until(self.reveal_until)
+
     def reset_all(self, data: ChatData, rows: Sequence[int]) -> None:
         self.beginResetModel()
         self.data_ = data
         self.rows = rows
         self.hl_src = -1
+        self.n_vis = self._vis_for_rows()
         self.endResetModel()
 
     def reset_rows(self, rows: Sequence[int]) -> None:
         self.beginResetModel()
         self.rows = rows
+        self.n_vis = self._vis_for_rows()
         self.endResetModel()
 
+    def set_reveal(self, vod_ms: int | None) -> None:
+        """흐르는 채팅: t_ms ≤ vod_ms 인 행까지만 보인다(None = 전부). 늘거나 준 행만 넣고 뺀다(리셋 없음)."""
+        self.reveal_until = None if vod_ms is None else int(vod_ms)
+        new = self._vis_for_rows()
+        old = self.n_vis
+        if new > old:
+            self.beginInsertRows(QModelIndex(), old, new - 1)
+            self.n_vis = new
+            self.endInsertRows()
+        elif new < old:
+            self.beginRemoveRows(QModelIndex(), new, old - 1)
+            self.n_vis = new
+            self.endRemoveRows()
+
     def view_row_of(self, src: int) -> int:
-        """원본 인덱스 → 보이는 행. 걸러져 없으면 -1."""
+        """원본 인덱스 → 보이는 행. 걸러져 없거나 아직 드러나지 않았으면 -1."""
         rows = self.rows
         if isinstance(rows, range):
-            return src if 0 <= src < len(rows) else -1
+            return src if 0 <= src < self.n_vis else -1
         i = bisect_left(rows, src)
-        return i if i < len(rows) and rows[i] == src else -1
+        return i if i < self.n_vis and rows[i] == src else -1
 
     def view_row_at_time(self, vod_ms: int) -> int:
         """보이는 행 중 t_ms ≤ vod_ms 인 마지막 행. 없으면 -1."""
-        rows, times = self.rows, self.data_.times
-        if isinstance(rows, range):
-            return bisect_right(times, vod_ms, 0, len(rows)) - 1
-        return bisect_right(rows, vod_ms, key=times.__getitem__) - 1
+        return min(self._count_until(vod_ms), self.n_vis) - 1
 
     def emit_row_changed(self, view_row: int) -> None:
-        if 0 <= view_row < len(self.rows):
+        if 0 <= view_row < self.n_vis:
             self.dataChanged.emit(self.index(view_row, 0), self.index(view_row, 4))
 
     def emit_all_changed(self) -> None:
-        if self.rows:
-            self.dataChanged.emit(self.index(0, 0), self.index(len(self.rows) - 1, 4))
+        if self.n_vis:
+            self.dataChanged.emit(self.index(0, 0), self.index(self.n_vis - 1, 4))
 
 
 # ── 표 위젯 ───────────────────────────────────────────────────────────────
@@ -407,12 +436,15 @@ class ChatPanel(QWidget):
     """작업대 오른쪽 채팅 표 (02 7-3). 시각은 VOD 시각(ms).
 
     공개 API: set_messages · set_time_ms · set_filter · set_kind_filter · set_dim_ranges ·
-    selected_chat_id · select_chat · highlighted_chat_id · row_count.
+    selected_chat_id · select_chat · highlighted_chat_id · row_count · set_reveal_until(스트리머 훈련: 흐르는 채팅).
     Signals: chatActivated(chat_id, vod_ms) — 더블클릭·Enter. chatSelected(chat_id) — 선택이 바뀔 때(빈 문자열 = 선택 없음).
+    chatClicked(chat_id, vod_ms) — 한 번 누름(스트리머 훈련의 '읽겠다', D-16). 더블클릭이면 Qt 가 두 번 낼 수 있다 —
+    받는 쪽이 같은 채팅의 더블클릭 간격 안 두 번째를 버린다. 시각이 없는 채팅은 vod_ms = -1.
     """
 
     chatActivated = Signal(str, int)
     chatSelected = Signal(str)
+    chatClicked = Signal(str, int)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -467,6 +499,7 @@ class ChatPanel(QWidget):
 
         v.doubleClicked.connect(self._on_activated)
         v.enterPressed.connect(self._on_activated)
+        v.clicked.connect(self._on_clicked)
         # 오른쪽 메뉴: 작업대가 context_actions(chat_id) → [(글자, fn(chat_id), 켜짐, 풍선 도움말)] 를 준다(14 4-2 의 11)
         self.context_actions = None
         v.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -502,13 +535,21 @@ class ChatPanel(QWidget):
         self.model.reset_all(data, range(data.n))
         self._update_count()
 
-    def set_label_marks(self, marks: dict[str, str] | None, *, own: bool = False) -> int:
+    def set_reveal_until(self, vod_ms: int | None) -> None:
+        """흐르는 채팅(스트리머 훈련, 18 6-2): t_ms ≤ vod_ms 인 채팅까지만 표에 둔다 — 스크롤해도 아직 안 온 채팅이
+        보이지 않는다. None = 전부(기본). 재생 위치마다 불러도 된다(늘어난·준 행만 넣고 뺀다)."""
+        self.model.set_reveal(vod_ms)
+        self._update_count()
+
+    def set_label_marks(self, marks: dict[str, str] | None, *, own: bool = False, tooltip: str | None = None) -> int:
         """chat_id → 짧은 표시. '종류' 칸 글씨·행 배경으로 보인다. None·빈 dict 면 지운다. 표에 있는 채팅 수를 돌려준다.
 
         두 쓰임만 있다(블라인드, 안내서 원칙 3):
         - own=False: 분석 세션의 잠긴 1차 라벨(예: '1차 직접', 보라, 08 D-09 5).
         - own=True: 라벨링 세션(1차·재라벨)이 **자기 세션에서** 이미 매긴 현재 유효 반응 라벨(예: '✓ 직접', 초록,
           08 D-16). 다시 켰을 때 같은 채팅을 또 매기지 않게. 다른 세션의 라벨은 절대 넘기지 않는다(작업대가 거른다).
+          스트리머 훈련의 '고름' 표시도 이 초록을 쓴다(tooltip 으로 풍선 글을 바꾼다).
+        tooltip: 표시 칸 풍선 글. None 이면 위 두 쓰임의 기본 글.
         """
         out: dict[int, str] = {}
         for cid, text in (marks or {}).items():
@@ -517,6 +558,7 @@ class ChatPanel(QWidget):
                 out[src] = str(text)
         self.model.marks = out
         self.model.marks_own = bool(own)
+        self.model.marks_tip = str(tooltip) if tooltip else None
         self.model.emit_all_changed()
         return len(out)
 
@@ -566,7 +608,7 @@ class ChatPanel(QWidget):
         if not idx:
             return None
         r = idx[0].row()
-        if r >= len(self.model.rows):
+        if r >= self.model.n_vis:
             return None
         return self._data.chat_ids[self.model.rows[r]]
 
@@ -587,7 +629,7 @@ class ChatPanel(QWidget):
         return self._data.chat_ids[s] if s >= 0 else None
 
     def row_count(self) -> int:
-        return len(self.model.rows)
+        return self.model.n_vis
 
     def total_count(self) -> int:
         return self._data.n
@@ -688,7 +730,7 @@ class ChatPanel(QWidget):
     def _on_context_menu(self, pos) -> None:
         idx = self.view.indexAt(pos)
         r = idx.row() if idx.isValid() else -1
-        if not (0 <= r < len(self.model.rows)):
+        if not (0 <= r < self.model.n_vis):
             return
         self._select_row(r)
         menu = self.context_menu_for(self._data.chat_ids[self.model.rows[r]])
@@ -722,7 +764,7 @@ class ChatPanel(QWidget):
         if self._resetting:  # 필터 리셋·복원 중의 선택 변화는 사용자 선택이 아니다
             return
         r = cur.row()
-        if 0 <= r < len(self.model.rows):
+        if 0 <= r < self.model.n_vis:
             src = self.model.rows[r]
             self._sel_src, self._sel_y = src, None
             self.chatSelected.emit(self._data.chat_ids[src])
@@ -730,9 +772,17 @@ class ChatPanel(QWidget):
             self._sel_src, self._sel_y = -1, None
             self.chatSelected.emit("")
 
+    def _on_clicked(self, idx: QModelIndex) -> None:
+        r = idx.row() if idx.isValid() else -1
+        if not (0 <= r < self.model.n_vis):
+            return
+        src = self.model.rows[r]
+        t = self._data.times[src]
+        self.chatClicked.emit(self._data.chat_ids[src], -1 if t == NULL_T else int(t))
+
     def _on_activated(self, idx: QModelIndex) -> None:
         r = idx.row()
-        if not (0 <= r < len(self.model.rows)):
+        if not (0 <= r < self.model.n_vis):
             return
         src = self.model.rows[r]
         t = self._data.times[src]
@@ -741,5 +791,5 @@ class ChatPanel(QWidget):
         self.chatActivated.emit(self._data.chat_ids[src], int(t))
 
     def _update_count(self) -> None:
-        n, shown = self._data.n, len(self.model.rows)
+        n, shown = self._data.n, self.model.n_vis
         self.count_label.setText(f"{n:,}" if shown == n else tr("{0} / {1}").format(f"{shown:,}", f"{n:,}"))

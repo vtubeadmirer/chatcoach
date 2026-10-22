@@ -15,6 +15,11 @@
 3. 시각을 읽지 못하면(빈 값·형식 틀림·시간대 없음) 그 세션은 노출로 본다(사유 `time_unknown`). 취소·해제 시각을 읽지
    못하면 그 기록은 '맨 처음' 으로 본다(모든 대상 세션이 그 뒤).
 4. 분석·조정·출처 판정 세션은 라벨링 세션이 아니라 표시하지 않는다(그 세션들의 노출은 visibility·agreement 가 따로 본다).
+5. **훈련 열기**(D-18 7, 18 6-5 3): 스트리머 훈련은 견주기에서 사람 최종 세트(또는 손라벨)를 보인다. 그래서 그 프로젝트에서
+   훈련 세션을 연 시각(training\\<id>.jsonl 의 training.start 줄 created_at)에 아직 잠기지 않았던 라벨링 세션과 그 뒤에
+   만든 라벨링 세션은 노출로 본다(what = other_session_labels, 사유 training_opened). 누가 훈련했는지는 가리지 않는다
+   (D-17 3 노출 범위는 프로젝트 단위). 열기 시각을 읽지 못하면 '맨 처음' 으로 본다(규칙 3 과 같음).
+   ai_results 가 아니라 other_session_labels 로 친다 — 보고서는 what 과 상관없이 view_exposed 가 있으면 대표값에서 뺀다.
 
 시각 비교는 벽시계 값(ISO 8601, 시간대 오프셋 포함)끼리 한다. 순서 판단에 벽시계를 쓰지 않는 원칙(03 13-1)의 예외인데,
 취소·해제 기록과 세션 기록은 서로 다른 파일이라 (파일, seq) 순서가 없다. PC 시계 조작은 06 7-4 대로 보장 밖이다.
@@ -35,7 +40,9 @@ RELABEL_KINDS = frozenset({vis.RELABEL_SAME, vis.RELABEL_SECOND})
 REASON_PLAN_CANCELLED = "plan_cancelled"          # 규칙 1
 REASON_AI_UNSEALED = "ai_unsealed"                # 규칙 2
 REASON_TIME_UNKNOWN = "time_unknown"              # 규칙 3 (세션 시각을 읽지 못함)
-REASONS = (REASON_PLAN_CANCELLED, REASON_AI_UNSEALED, REASON_TIME_UNKNOWN)
+REASON_TRAINING_OPENED = "training_opened"        # 규칙 5 (스트리머 훈련을 엶, D-18 7)
+REASONS = (REASON_PLAN_CANCELLED, REASON_AI_UNSEALED, REASON_TIME_UNKNOWN, REASON_TRAINING_OPENED)
+TRAINING_WHAT = vis.OTHER_SESSION_LABELS          # 훈련이 보이는 것 = 사람 라벨(최종 세트·손라벨)
 
 
 # ----------------------------------------------------------------------------- 입력
@@ -115,6 +122,10 @@ class ExposureView:
         """그 what 에 노출로 표시된 세션 ID 들 (view.exposed(ai_results) 를 계산한 것)."""
         return frozenset(m.session_id for m in self.marks if m.what == what)
 
+    def exposed_any(self) -> frozenset:
+        """what 과 상관없이 노출로 표시된 세션 ID 들 (AI 결과 노출 + 훈련 노출)."""
+        return frozenset(m.session_id for m in self.marks)
+
     def whats(self, session_id: str) -> tuple:
         """그 세션의 계산된 노출 what 들(정렬)."""
         return tuple(sorted({m.what for m in self.marks if m.session_id == session_id}))
@@ -146,7 +157,7 @@ def _event_time(doc: Mapping, keys: tuple) -> tuple[datetime | None, str | None]
 
 
 def compute_exposure(sessions: Iterable, cancels: Iterable[Mapping] = (),
-                     unseals: Iterable[Mapping] = ()) -> ExposureView:
+                     unseals: Iterable[Mapping] = (), trainings: Iterable[Mapping] = ()) -> ExposureView:
     """노출 표시를 계산한다.
 
     - sessions: SessionInfo 또는 {session_id, session_kind, created_at|session_created_at, locked_at?, relabel_plan_id?}.
@@ -155,6 +166,8 @@ def compute_exposure(sessions: Iterable, cancels: Iterable[Mapping] = (),
       `plan_id`·`cancelled_at` 만 본다.
     - unseals: 봉인 해제 기록(seal.jsonl 의 ai.unsealed 줄, app/seal.py). `run_id` 와 시각만 본다 — 시각 칸은
       `unsealed_at` → `at`(app/seal.py 가 쓰는 이름) → `created_at` 순으로 찾는다.
+    - trainings: 훈련 세션 열기(규칙 5). {session_id, started_at|created_at} — app.exposure_io.project_trainings 가
+      training\\<id>.jsonl 의 training.start 줄에서 만든다. 시각을 읽지 못하면 맨 처음으로 본다.
     같은 세션·같은 사유·같은 근거는 한 번만 남는다. 순서: 세션 ID, 사유, 근거.
     """
     infos = [x for x in (_as_session(s) for s in sessions) if x is not None]
@@ -170,6 +183,12 @@ def compute_exposure(sessions: Iterable, cancels: Iterable[Mapping] = (),
             t, raw = _event_time(u, ("unsealed_at", "at", "created_at"))
             rid = u.get("run_id")
             unseal_ev.append((t, raw, rid if isinstance(rid, str) else None))
+    train_ev = []
+    for g in trainings:
+        if isinstance(g, Mapping):
+            t, raw = _event_time(g, ("started_at", "created_at"))
+            tid = g.get("session_id")
+            train_ev.append((t, raw, tid if isinstance(tid, str) else None))
     marks: set[ExposureMark] = set()
     for s in infos:
         if s.session_kind not in vis.LABELING_SESSIONS:
@@ -189,11 +208,19 @@ def compute_exposure(sessions: Iterable, cancels: Iterable[Mapping] = (),
             locked_before = locked is not None and t is not None and locked < t
             if not locked_before:
                 marks.add(ExposureMark(s.session_id, AI_RESULTS, REASON_AI_UNSEALED, rid, raw))
+        for t, raw, tid in train_ev:
+            if created is None:
+                marks.add(ExposureMark(s.session_id, TRAINING_WHAT, REASON_TIME_UNKNOWN, tid, raw))
+                continue
+            locked_before = locked is not None and t is not None and locked < t
+            if not locked_before:
+                marks.add(ExposureMark(s.session_id, TRAINING_WHAT, REASON_TRAINING_OPENED, tid, raw))
     order = sorted(marks, key=lambda m: (m.session_id, m.reason, m.basis or "", m.basis_at or ""))
     return ExposureView(marks=tuple(order))
 
 
 __all__ = [
     "AI_RESULTS", "RELABEL_KINDS", "REASON_PLAN_CANCELLED", "REASON_AI_UNSEALED", "REASON_TIME_UNKNOWN", "REASONS",
+    "REASON_TRAINING_OPENED", "TRAINING_WHAT",
     "SessionInfo", "session_info", "parse_time", "ExposureMark", "ExposureView", "compute_exposure",
 ]

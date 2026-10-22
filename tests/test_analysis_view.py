@@ -27,19 +27,9 @@ def qapp():
     yield app
 
 
-@pytest.fixture(autouse=True)
-def _close_views():
-    """시험마다 만든 최상위 창을 그 자리에서 지운다. 남겨 두면 프로세스가 끝날 때 QApplication 보다 늦게
-    지워지며 접근 위반(0xC0000005)으로 pytest 종료 코드가 깨진다(시험 결과는 통과라도)."""
-    yield
-    app = QApplication.instance()
-    if app is None:
-        return
-    from PySide6.QtCore import QCoreApplication, QEvent
-    for w in app.topLevelWidgets():
-        w.close()
-        w.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+# 시험마다 창을 지우는 고정 장치는 두지 않는다(D-18 10). 화면이 자기를 잡은 람다 없이 만들어져야
+# 부모 없는 화면도 이름이 사라지는 순간 지워지고, 프로세스 끝(QApplication 뒤)까지 남지 않는다.
+# 아래 test_view_is_freed_when_dropped 가 그것을 본다.
 
 
 def cid(i):
@@ -497,3 +487,52 @@ def test_runs_mode_opens_no_files(qapp, monkeypatch):
     v.next_diff()
     v.select_run("run-old")
     assert opened == []
+
+
+def test_view_is_freed_when_dropped(qapp):
+    """부모 없는 화면은 이름이 사라지면 바로 지워진다(D-18 10). 자기를 잡은 람다 연결이 있으면 남아 프로세스 끝에
+    QApplication 보다 늦게 지워지며 접근 위반(0xC0000005·0xC0000409)이 났다."""
+    import gc
+    import weakref
+    new, old, rows = runs_fixture()
+
+    def make(kind):
+        if kind == "sealed":
+            v = av.AnalysisView(run=None, final_rows=rows, sealed_count=2)
+        else:
+            v = av.AnalysisView(run=new, final_rows=rows, runs=CHOICES, run_loader=FakeLoader({"run-old": old}))
+            v.compare_with("run-old")
+            v.next_btn.click()                      # 버튼·필터 연결도 그대로 동작한다
+            v.prev_btn.click()
+            v.filter_box.setCurrentIndex(0)
+        return weakref.ref(v)
+
+    for kind in ("sealed", "runs"):
+        r = make(kind)
+        gc.collect()
+        assert r() is None, kind
+    assert not any(isinstance(w, av.AnalysisView) for w in QApplication.topLevelWidgets())
+
+
+def test_process_exit_clean_with_views_left(tmp_path):
+    """화면을 지우지 않고 프로세스를 끝내도 종료 코드 0 (고정 장치 없이)."""
+    import subprocess
+    import textwrap
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = tmp_path / "exit_check.py"
+    script.write_text(textwrap.dedent("""
+        import os, sys
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        sys.path.insert(0, sys.argv[1])
+        from PySide6.QtWidgets import QApplication
+        app = QApplication(sys.argv[:1])
+        from app.ui import analysis_view as av
+        keep = [av.AnalysisView(run=None, sealed_count=1) for _ in range(3)]
+        for _ in range(5):
+            av.AnalysisView(run=None, sealed_count=2)
+        print("ok")
+    """), encoding="utf-8")
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    for _ in range(3):
+        p = subprocess.run([sys.executable, str(script), root], capture_output=True, timeout=60, env=env)
+        assert p.returncode == 0 and b"ok" in p.stdout, (p.returncode, p.stderr[-400:])
