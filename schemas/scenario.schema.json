@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/chatcoach/blob/main/schemas/scenario.schema.json",
+  "title": "가상 채팅 시나리오 한 줄 (scenarios/<scenario_id>.jsonl)",
+  "description": "chatcoach-scenario-v1. 훈련 화면 안에서만 쓰는 가상 채팅 목록(08 D-05·D-19 2, 20 3장). 파일은 JSON Lines(UTF-8, BOM 없음, LF): 첫 줄 scenario.header 1줄, 그다음 scenario.chat 줄(보일 시각 순), 마지막 scenario.end 1줄. 끝 줄이 없으면 쓰다 끊긴 파일로 보고 열지 않는다. 한 번 쓰면 고치지 않는다. 실제 채팅 파일(chat/messages.jsonl)·labels\\·samples\\·origin\\ 와 섞지 않는다. 실제 시청자 닉네임·viewer_id·가림 닉네임 칸은 없다 — 표시 이름은 시나리오가 정한 가명(display_mask: '시청자N' 또는 '하**' 모양)만. replay·retrieved 는 본문을 적지 않고 chat_id 만 적는다(앱이 원 messages.jsonl 에서 읽어 화면에만 보인다). 칸 사이의 규칙(줄 순서·건수·해시·구간)은 app/core/scenario.py 가 검사한다. 이 스키마의 예문은 모두 합성이다.",
+  "type": "object",
+  "required": ["kind"],
+  "properties": {
+    "kind": {"enum": ["scenario.header", "scenario.chat", "scenario.end"]}
+  },
+  "allOf": [
+    {"if": {"properties": {"kind": {"const": "scenario.header"}}}, "then": {"$ref": "#/$defs/header"}},
+    {"if": {"properties": {"kind": {"const": "scenario.chat"}}}, "then": {"$ref": "#/$defs/chat"}},
+    {"if": {"properties": {"kind": {"const": "scenario.end"}}}, "then": {"$ref": "#/$defs/end"}}
+  ],
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ms": {"type": "integer", "minimum": 0, "maximum": 172800000},
+    "count": {"type": "integer", "minimum": 0},
+    "datetime": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?([+-][0-9]{2}:[0-9]{2}|Z)$"},
+    "chatId": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$", "description": "실제 채팅 ID(chat-message.schema.json 의 chat_id)."},
+    "scenarioId": {"type": "string", "pattern": "^SC-[0-9]{8}-[0-9a-f]{4}$", "description": "'SC-<yyyymmdd>-<4자>'. 4자는 scenario.end 의 lines_sha256 앞 4자."},
+    "lineId": {"type": "string", "pattern": "^s[0-9]{4,6}$", "description": "시나리오 안 줄 번호 s0001 … (보일 시각 순으로 1부터)."},
+    "displayMask": {
+      "type": "string",
+      "maxLength": 10,
+      "pattern": "^(시청자[1-9][0-9]{0,3}|[^*\\s{}:@]\\*{2,7})$",
+      "description": "화면 표시 이름. 가명만: '시청자N' 또는 '한 글자 + 별 2~7개' 모양(실제 가림 닉네임과 같은 모양 — 이름 모양으로 진짜·가짜가 드러나지 않게, 20 7장). 시나리오가 새로 정한다. 원래 채팅의 가림 닉네임을 옮겨 적지 않는다(20 8장 3번). 화면에서 실제 채팅의 가림 이름과 겹치면 앱이 '시청자N' 으로 바꿔 보인다."
+    },
+    "chatKind": {"const": "text", "description": "가상 채팅의 종류는 일반 채팅만. 후원·구독·운영자·시스템 표시나 배지는 만들지 않는다(20 8장 2번, 사칭 막기)."},
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "거르기 결과(숫자만). 걸린 줄은 시나리오에 들어오지 않으므로 nickname_hit·blocked·llm_flag 는 0 이어야 한다(app/core/scenario.py 가 검사).",
+      "properties": {
+        "nickname_hit": {"$ref": "#/$defs/count"},
+        "copy_max": {"type": "number", "minimum": 0, "maximum": 1},
+        "blocked": {"$ref": "#/$defs/count"},
+        "llm_flag": {"$ref": "#/$defs/count"}
+      }
+    },
+    "header": {
+      "type": "object",
+      "required": ["kind", "schema", "scenario_id", "project_id", "range", "created_at", "created_by", "inputs", "external", "counts"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "scenario.header"},
+        "schema": {"const": "chatcoach-scenario-v1"},
+        "scenario_id": {"$ref": "#/$defs/scenarioId"},
+        "project_id": {"$ref": "#/$defs/uuid", "description": "이 시나리오가 붙는 프로젝트(project.json 의 project_id)."},
+        "range": {
+          "type": "object",
+          "required": ["vod_from_ms", "vod_to_ms"],
+          "additionalProperties": false,
+          "description": "훈련 구간 [vod_from_ms, vod_to_ms) (VOD 시각 ms).",
+          "properties": {"vod_from_ms": {"$ref": "#/$defs/ms"}, "vod_to_ms": {"$ref": "#/$defs/ms"}}
+        },
+        "created_at": {"$ref": "#/$defs/datetime"},
+        "created_by": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[^\\r\\n]*$", "description": "도구 이름·판(예: 'engine scenario 0.1.0')."},
+        "inputs": {
+          "type": "object",
+          "required": ["messages_sha256"],
+          "additionalProperties": false,
+          "properties": {
+            "messages_sha256": {"$ref": "#/$defs/sha256", "description": "이 프로젝트 chat/messages.jsonl 의 SHA-256."},
+            "asr_sha256": {"$ref": "#/$defs/sha256"},
+            "topic_flow_sha256": {"$ref": "#/$defs/sha256"},
+            "from_projects": {
+              "type": "array",
+              "maxItems": 64,
+              "description": "retrieved 를 가져온 다른 프로젝트(같은 channel_id). 시범 프로젝트(pilot-*)는 잠기기 전 넣지 않는다.",
+              "items": {
+                "type": "object",
+                "required": ["project_id", "messages_sha256"],
+                "additionalProperties": false,
+                "properties": {"project_id": {"$ref": "#/$defs/uuid"}, "messages_sha256": {"$ref": "#/$defs/sha256"}}
+              }
+            }
+          }
+        },
+        "fill": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "채우기 규칙 시작값(20 5-1).",
+          "properties": {
+            "quiet_window_ms": {"type": "integer", "minimum": 1000, "maximum": 3600000},
+            "quiet_max_real": {"$ref": "#/$defs/count"},
+            "target_per_min": {"type": "integer", "minimum": 0, "maximum": 600},
+            "max_virtual_ratio": {"type": "number", "minimum": 0, "maximum": 1}
+          }
+        },
+        "retrieval": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "method": {"enum": ["topic_words", "topic_words+e5"]},
+            "min_score": {"type": "number", "minimum": 0, "maximum": 1},
+            "max_per_viewer": {"type": "integer", "minimum": 1, "maximum": 100},
+            "seed": {"type": "integer", "minimum": 0}
+          }
+        },
+        "generator": {
+          "type": "object",
+          "required": ["backend"],
+          "additionalProperties": false,
+          "description": "생성기. 이번 묶음(D-19 2)은 생성이 없어 backend 'none'.",
+          "properties": {
+            "backend": {"enum": ["none", "lmstudio"], "description": "외부 AI 는 이번 H 범위 밖(20 4-4·8장 8번) — 값으로도 받지 않는다."},
+            "model_id": {"type": "string", "maxLength": 120, "pattern": "^[^\\r\\n]*$"},
+            "model_sha256": {"$ref": "#/$defs/sha256"},
+            "prompt_template_id": {"type": "string", "maxLength": 60, "pattern": "^[A-Za-z0-9_.-]+$"},
+            "prompt_sha256": {"$ref": "#/$defs/sha256"},
+            "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+            "seed": {"type": "integer", "minimum": 0},
+            "context_ms": {"type": "integer", "minimum": 0, "maximum": 600000}
+          }
+        },
+        "filters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "versions": {"type": "array", "uniqueItems": true, "items": {"enum": ["nickname-v1", "copy-v1", "block-v1", "llm-check-v1"]}},
+            "blocklist_sha256": {"$ref": "#/$defs/sha256"},
+            "dropped": {"type": "object", "additionalProperties": {"$ref": "#/$defs/count"}, "description": "거르기마다 걸러 낸 줄 수(숫자만)."}
+          }
+        },
+        "external": {
+          "type": "object",
+          "required": ["enabled"],
+          "additionalProperties": false,
+          "properties": {"enabled": {"const": false, "description": "외부 AI 는 기본 꺼짐(D-06 1). 이번 판은 켤 수 없다."}}
+        },
+        "counts": {
+          "type": "object",
+          "required": ["replay", "retrieved", "generated"],
+          "additionalProperties": false,
+          "description": "출처별 scenario.chat 줄 수.",
+          "properties": {"replay": {"$ref": "#/$defs/count"}, "retrieved": {"$ref": "#/$defs/count"}, "generated": {"$ref": "#/$defs/count"}}
+        }
+      }
+    },
+    "chat": {
+      "type": "object",
+      "required": ["source"],
+      "properties": {"source": {"enum": ["replay", "retrieved", "generated"]}},
+      "allOf": [
+        {"if": {"properties": {"source": {"const": "replay"}}}, "then": {"$ref": "#/$defs/chatReplay"}},
+        {"if": {"properties": {"source": {"const": "retrieved"}}}, "then": {"$ref": "#/$defs/chatRetrieved"}},
+        {"if": {"properties": {"source": {"const": "generated"}}}, "then": {"$ref": "#/$defs/chatGenerated"}}
+      ]
+    },
+    "showTime": {
+      "description": "보일 시각은 둘 가운데 하나만: show_vod_ms(VOD 시각) 또는 show_rel_ms(훈련 구간 시작에서 잰 시각). 둘 다 적거나 둘 다 없으면 거부.",
+      "oneOf": [{"required": ["show_vod_ms"]}, {"required": ["show_rel_ms"]}]
+    },
+    "chatReplay": {
+      "type": "object",
+      "required": ["kind", "line_id", "source", "chat_kind", "chat_id"],
+      "additionalProperties": false,
+      "description": "그 자리의 실제 채팅. 본문·이름은 적지 않는다(앱이 messages.jsonl 에서 읽는다). 첫 판은 replay 줄을 적지 않는다 = 구간의 실제 채팅을 다 보인다.",
+      "allOf": [{"$ref": "#/$defs/showTime"}],
+      "properties": {
+        "kind": {"const": "scenario.chat"},
+        "line_id": {"$ref": "#/$defs/lineId"},
+        "source": {"const": "replay"},
+        "chat_kind": {"$ref": "#/$defs/chatKind"},
+        "show_vod_ms": {"$ref": "#/$defs/ms"},
+        "show_rel_ms": {"$ref": "#/$defs/ms"},
+        "chat_id": {"$ref": "#/$defs/chatId"}
+      }
+    },
+    "chatRetrieved": {
+      "type": "object",
+      "required": ["kind", "line_id", "source", "chat_kind", "from_project_id", "from_chat_id", "from_t_ms", "from_scope", "display_mask"],
+      "additionalProperties": false,
+      "description": "다른 시각의 실제 채팅을 옮겨 놓은 것. 본문은 적지 않고 출처 방송(from_project_id)·from_chat_id 만. 같은 방송이면 훈련 구간 밖(from_scope same_broadcast), 다른 방송이면 같은 channel_id(same_channel).",
+      "allOf": [{"$ref": "#/$defs/showTime"}],
+      "properties": {
+        "kind": {"const": "scenario.chat"},
+        "line_id": {"$ref": "#/$defs/lineId"},
+        "source": {"const": "retrieved"},
+        "chat_kind": {"$ref": "#/$defs/chatKind"},
+        "show_vod_ms": {"$ref": "#/$defs/ms"},
+        "show_rel_ms": {"$ref": "#/$defs/ms"},
+        "from_project_id": {"$ref": "#/$defs/uuid"},
+        "from_chat_id": {"$ref": "#/$defs/chatId"},
+        "from_t_ms": {"$ref": "#/$defs/ms", "description": "원 채팅의 VOD 시각. 앱이 읽은 원 채팅의 t_ms 와 다르면 그 줄을 건너뛴다."},
+        "from_scope": {"enum": ["same_broadcast", "same_channel"]},
+        "retrieval_score": {"type": "number", "minimum": 0, "maximum": 1},
+        "display_mask": {"$ref": "#/$defs/displayMask"},
+        "checks": {"$ref": "#/$defs/checks"}
+      }
+    },
+    "chatGenerated": {
+      "type": "object",
+      "required": ["kind", "line_id", "source", "chat_kind", "gen_id", "text", "display_mask"],
+      "additionalProperties": false,
+      "description": "로컬 LLM 이 만든 채팅(H-3, 이번 묶음은 만들지 않음). 만든 글자만 적는다.",
+      "allOf": [{"$ref": "#/$defs/showTime"}],
+      "properties": {
+        "kind": {"const": "scenario.chat"},
+        "line_id": {"$ref": "#/$defs/lineId"},
+        "source": {"const": "generated"},
+        "chat_kind": {"$ref": "#/$defs/chatKind"},
+        "show_vod_ms": {"$ref": "#/$defs/ms"},
+        "show_rel_ms": {"$ref": "#/$defs/ms"},
+        "gen_id": {"type": "string", "pattern": "^g[0-9]{4,6}$"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[^\\r\\n\\u0000]*$"},
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "asr_from_ms": {"$ref": "#/$defs/ms"},
+            "asr_to_ms": {"$ref": "#/$defs/ms"},
+            "topic_id": {"type": "string", "pattern": "^t[0-9]{1,4}$"}
+          }
+        },
+        "display_mask": {"$ref": "#/$defs/displayMask"},
+        "emotes": {
+          "type": "array",
+          "maxItems": 10,
+          "uniqueItems": true,
+          "description": "본문에 쓴 이모티콘 코드(허용 목록). 본문의 {:…:} 토큰은 모두 여기 있어야 한다.",
+          "items": {"type": "string", "pattern": "^\\{:[A-Za-z0-9_]{1,40}:\\}$"}
+        },
+        "checks": {"$ref": "#/$defs/checks"}
+      }
+    },
+    "end": {
+      "type": "object",
+      "required": ["kind", "lines", "lines_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "scenario.end"},
+        "lines": {"$ref": "#/$defs/count", "description": "scenario.chat 줄 수."},
+        "lines_sha256": {"$ref": "#/$defs/sha256", "description": "scenario.chat 줄들을 정규 직렬화(app.jsonl.dumps_line 과 같은 바이트)해 이어 붙인 것의 SHA-256."}
+      }
+    }
+  }
+}

@@ -280,3 +280,79 @@ def test_pilot_project_refuses_new_session(tmp_path):
     with pytest.raises(ts.TrainingBlockedError):
         _log(root)
     assert not os.path.exists(os.path.join(root, "training"))
+
+
+# ----------------------------------------------------------------------------- 가상 채팅 (H-4, 20 5장)
+V_TEXT = "합성가상본문"          # 합성 가상 채팅 본문
+REAL_NICK = "합성실제닉***"     # 실제 채팅의 가림 닉네임(합성) — 가상 줄 이름에 나오면 안 된다
+
+
+def _real(n, t):
+    return {"chat_id": cid(n), "t_ms": t, "viewer_id": "vw_aaaaaaaaaaaa", "nickname_masked": REAL_NICK,
+            "kind": "text", "role": "viewer", "text": f"합성실제 {n}"}
+
+
+def test_split_mixed_dicts_pseudonym_and_ids():
+    real = [_real(1, 1000), _real(2, 3000)]
+    mixed = [real[0],
+             {"source": "retrieved", "line_id": "s0001", "show_vod_ms": 2000, "text": V_TEXT,
+              "display_mask": "시**", "nickname_masked": REAL_NICK, "viewer_id": "vw_bbbbbbbbbbbb"},
+             real[1],
+             {"source": "generated", "line_id": "s0002", "show_vod_ms": 4000, "text": V_TEXT + " {:zz_test_01:}"},
+             {"source": "generated", "line_id": "s0002", "show_vod_ms": 4100, "text": "겹침"},     # 같은 line_id
+             {"source": "generated", "line_id": "s0003", "text": "시각 없음"}]                    # 시각 없음
+    rows, virt = tr.split_mixed(mixed, real=real)
+    assert rows[0] is real[0] and rows[2] is real[1]                  # 실제 줄은 같은 dict (고치지 않음)
+    assert set(virt) == {"v:s0001", "v:s0002"} and len(rows) == 4
+    r1, r3 = rows[1], rows[3]
+    assert r1["chat_id"] == "v:s0001" and r1["nickname_masked"] == "시**" and r1["t_ms"] == 2000
+    assert r3["nickname_masked"] == tr.VIRTUAL_PSEUDONYM.format(2)    # 가림 이름이 없으면 가명 '시청자2'
+    assert REAL_NICK not in repr([r1, r3]) and "vw_" not in repr([r1, r3])   # 원 닉네임·viewer_id 를 버린다
+    assert virt["v:s0001"] == tr.VirtualLine("v:s0001", "s0001", "retrieved", 2000)
+    assert tr.is_virtual_id("v:s0001") and not tr.is_virtual_id(cid(1))
+    assert not tr.CHAT_ID_RE.match("v:s0001")                          # 실제 chat_id 와 섞이지 않는다
+    # 가상 줄만 돌려주는 mix: 실제 줄을 앞에 붙인다
+    rows2, virt2 = tr.split_mixed([mixed[1]], real=real)
+    assert rows2[:2] == real and len(virt2) == 1
+    with pytest.raises(tr.TrainingError):
+        tr.virtual_id("")
+
+
+def test_split_mixed_from_scenario_merge():
+    """core.scenario.merge_for_display 결과(MergeResult·DisplayRow)도 받는다 — 합성 시나리오."""
+    scn = pytest.importorskip("app.core.scenario")
+    if not hasattr(scn, "merge_for_display"):
+        pytest.skip("core.scenario.merge_for_display 없음")
+    real = [_real(1, 1000), _real(2, 3000)]
+    src = {"chat_id": cid(9), "t_ms": 90_000, "kind": "text", "nickname_masked": REAL_NICK, "text": V_TEXT}
+    recs = [{"kind": "scenario.header", "scenario_id": "SC-20261022-abcd", "range": {"vod_from_ms": 0, "vod_to_ms": 10_000}},
+            {"kind": "scenario.chat", "line_id": "s0001", "source": "retrieved", "show_vod_ms": 2000,
+             "from_project_id": "p0", "from_chat_id": cid(9), "from_t_ms": 90_000, "display_mask": "하**"},
+            {"kind": "scenario.chat", "line_id": "s0002", "source": "generated", "show_vod_ms": 2500,
+             "gen_id": "g0001", "text": V_TEXT, "display_mask": "두*"},
+            {"kind": "scenario.end", "lines": 2, "lines_sha256": "0" * 64}]
+    res = scn.merge_for_display(real, recs, resolve=lambda p, c: src if c == cid(9) else None, clip_to_range=False)
+    rows, virt = tr.split_mixed(res, real=real)
+    assert [r["chat_id"] for r in rows] == [cid(1), "v:s0001", "v:s0002", cid(2)]
+    assert rows[0] is real[0]
+    assert {v.source for v in virt.values()} == {"retrieved", "generated"}
+    assert REAL_NICK not in repr(rows[1:3])
+
+
+def test_compare_virtual_separate_from_score():
+    lines = {"v:s0001": tr.VirtualLine("v:s0001", "s0001", "retrieved", 2000),
+             "v:s0002": tr.VirtualLine("v:s0002", "s0002", "generated", 6000),
+             "v:s0003": tr.VirtualLine("v:s0003", "s0003", "generated", 12_000)}   # 구간 밖
+    vs = tr.compare_virtual({"v:s0002": 6500, "v:zzz": 1}, lines, range_ms=(0, 10_000))
+    assert vs.shown == 2 and vs.picked == 1
+    assert vs.by_source == {"retrieved": {"shown": 1, "picked": 0}, "generated": {"shown": 1, "picked": 1}}
+    assert vs.picks == [{"vid": "v:s0002", "line_id": "s0002", "source": "generated", "show_vod_ms": 6000,
+                         "picked_vod_ms": 6500}]
+    assert vs.numbers() == {"virtual_shown": 2, "virtual_picked": 1}
+    assert tr.compare_virtual({}, lines, range_ms=(0, 10_000), until_ms=3000).shown == 1    # 이른 견주기
+    # 점수(compare)는 실제 고르기만 — 가상과 상관없이 같은 숫자, summary 칸도 그대로(스키마 additionalProperties)
+    c = tr.compare({cid(1): 1500}, [ref(1, 1000, 1400)], range_ms=(0, 10_000))
+    assert set(c.summary()) == {"same", "mine_only", "orig_only", "reference_count", "hit_rate", "median_diff_ms",
+                                "diff_count"}
+    with pytest.raises(tr.TrainingError):
+        tr.compare_virtual({}, [object()])

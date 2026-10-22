@@ -60,10 +60,41 @@
         "source": {"enum": ["replay"], "description": "채팅 출처(D-05). F 첫 판은 실제 채팅 재생만."},
         "audio": {"enum": ["muted"], "description": "첫 판은 영상 소리를 통째로 끈다(18 6-2)."},
         "range": {"$ref": "#/$defs/range"},
-        "reference": {"$ref": "#/$defs/reference"}
+        "reference": {"$ref": "#/$defs/reference"},
+        "scenario_id": {"$ref": "#/$defs/scenarioId", "description": "(선택, 20 5-3) 섞은 가상 채팅 시나리오. 없으면 실제 채팅만(F)."},
+        "scenario_sha256": {"$ref": "#/$defs/sha256", "description": "(선택) 그 시나리오 파일의 sha256."},
+        "virtual_lines": {"type": "integer", "minimum": 0, "description": "(선택) 화면에 섞은 가상 채팅 수."}
       }
     },
-    "pickBody": {
+    "scenarioId": {"type": "string", "pattern": "^SC-[0-9]{8}-[0-9a-f]{4}$"},
+    "lineId": {"type": "string", "pattern": "^s[0-9]{4,6}$", "description": "시나리오 줄 번호(scenarios\\<scenario_id>.jsonl 의 line_id)."},
+    "virtualSource": {"enum": ["retrieved", "generated"], "description": "가상 채팅 출처(20 2장). 견주기 점수에 넣지 않는다."},
+    "pickBody": {"oneOf": [{"$ref": "#/$defs/pickReplay"}, {"$ref": "#/$defs/pickVirtual"}]},
+    "unpickBody": {"oneOf": [{"$ref": "#/$defs/unpickReplay"}, {"$ref": "#/$defs/unpickVirtual"}]},
+    "pickVirtual": {
+      "type": "object",
+      "required": ["line_id", "picked_vod_ms", "wall_at", "source"],
+      "additionalProperties": false,
+      "description": "(20 5-3) 가상 채팅 고르기: chat_id 대신 line_id. 본문·가림 이름은 넣지 않는다.",
+      "properties": {
+        "line_id": {"$ref": "#/$defs/lineId"},
+        "picked_vod_ms": {"$ref": "#/$defs/ms"},
+        "wall_at": {"$ref": "#/$defs/datetime"},
+        "source": {"$ref": "#/$defs/virtualSource"}
+      }
+    },
+    "unpickVirtual": {
+      "type": "object",
+      "required": ["line_id", "source", "vod_ms", "wall_at"],
+      "additionalProperties": false,
+      "properties": {
+        "line_id": {"$ref": "#/$defs/lineId"},
+        "source": {"$ref": "#/$defs/virtualSource"},
+        "vod_ms": {"$ref": "#/$defs/ms"},
+        "wall_at": {"$ref": "#/$defs/datetime"}
+      }
+    },
+    "pickReplay": {
       "type": "object",
       "required": ["chat_id", "picked_vod_ms", "wall_at", "source"],
       "additionalProperties": false,
@@ -74,7 +105,7 @@
         "source": {"enum": ["replay"]}
       }
     },
-    "unpickBody": {
+    "unpickReplay": {
       "type": "object",
       "required": ["chat_id", "vod_ms", "wall_at"],
       "additionalProperties": false,
@@ -98,7 +129,9 @@
         "diff_count": {"type": "integer", "minimum": 0},
         "reference_sha256": {"$ref": "#/$defs/sha256"},
         "range": {"$ref": "#/$defs/range"},
-        "until_ms": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/ms"}], "description": "이 시각까지 본 채팅만 셌다(구간 끝 전에 견주기를 눌렀을 때)."}
+        "until_ms": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/ms"}], "description": "이 시각까지 본 채팅만 셌다(구간 끝 전에 견주기를 눌렀을 때)."},
+        "virtual_shown": {"type": "integer", "minimum": 0, "description": "(선택, 20 5-3) 범위 안에서 보인 가상 채팅 수. 위 숫자(replay)와 섞지 않는다."},
+        "virtual_picked": {"type": "integer", "minimum": 0, "description": "(선택) 그 가운데 고른 수."}
       }
     },
     "endBody": {
@@ -107,7 +140,8 @@
       "additionalProperties": false,
       "properties": {
         "reason": {"enum": ["compare", "segment_end", "closed"]},
-        "picks": {"type": "integer", "minimum": 0, "description": "끝날 때 고른 채팅 수."}
+        "picks": {"type": "integer", "minimum": 0, "description": "끝날 때 고른 채팅 수(실제 채팅만)."},
+        "virtual_picks": {"type": "integer", "minimum": 0, "description": "(선택, 20 5-3) 끝날 때 고른 가상 채팅 수."}
       }
     }
   }

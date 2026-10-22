@@ -40,9 +40,25 @@ training_menu_state() 는 폴더 이름(pilot-*)만 보는 이중 잠금이고, 
 
 시각: 플레이어는 영상 파일 시각, 채팅·타임라인·기록은 VOD 시각. 변환은 timemap(to_file·to_vod, 작업대 TimeMap 과 같은 모양).
 로그에는 건수·시각만 남긴다.
+
+가상 채팅 섞기(H-4, 20 5장, D-19 2): start(scenario=…) 를 주면 mix_fn(real, scenario) 로 실제 채팅과 시나리오 줄을
+섞어 흘린다. 기본 mix_fn 은 app.core.scenario.mix(real, scenario) 가 있으면 그것, 없으면 같은 모듈의
+merge_for_display(real, records, resolve=…) (시나리오 담당이 정한 지금 이름). scenario = 시나리오 줄 목록 또는
+{"records", "resolve"}(retrieved 본문을 원 messages.jsonl 에서 읽는 함수 — 부르는 쪽이 준다).
+결과는 app.core.training.split_mixed 로 화면 줄을 만든다: 가상 줄의 화면 id 는 'v:'+line_id, 이름은 시나리오의 가림
+이름(없으면 '시청자N'), 원래 채팅의 닉네임·viewer_id 는 버린다. messages.jsonl 에는 아무것도 쓰지 않는다.
+- 연습 화면 표시(20 2장·5-2·9장 3): 가상 줄의 닉네임 칸 뒤에 ' · 가져옴'·' · 생성'. show_virtual_marks=False 면
+  숨긴다(H-5 가려내기용 — 그 화면은 '생성 채팅이 섞여 있음' 한 줄을 따로 보여야 한다). 견주기는 늘 드러낸다.
+- 가상 채팅도 고르기·취소(한 번 누름)가 된다. 견주기 점수(같음·나만·원래만·맞힌 비율·시각 차)는 replay 만으로
+  낸다 — compare_fn 에는 실제 채팅 고르기만 넘긴다. 가상 고르기는 core.training.compare_virtual 로 따로 세어
+  견주기 아래 '가상 채팅 m개 가운데 k개 고름' 과 '가상 고름' 행으로 보인다.
+- 기록: 가상 고르기의 trainingEvent 는 chat_id 대신 line_id·source. 파일 기록은 log 에 toggle_virtual(line_id, source,
+  vod_ms) 가 있을 때만 쓴다(training-event 스키마에 선택 칸이 더해진 뒤). start·compare 의 선택 칸(scenario·virtual)도
+  log 가 그 인자를 받을 때만 넘긴다. 시나리오가 없으면 지금(F)과 바이트까지 같다.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import time
@@ -66,7 +82,10 @@ PICK_FUTURE_TOL_MS = 1_000      # 재생 위치보다 이만큼 뒤의 채팅까
 END_TOL_MS = 200                # 구간 끝 이만큼 앞이면 끝난 것으로 본다
 SOURCE_REPLAY = "replay"        # D-05: 실제 채팅 재생
 
+VIRTUAL_TAG = {"retrieved": "가져옴", "generated": "생성"}   # 연습 화면의 가상 표시 (20 2장)
+
 REASON_NO_REFERENCE = "라벨이 잠긴 구간이 없습니다"
+REASON_NO_SCENARIO = "가상 채팅이 아직 없습니다"
 REASON_PILOT = "시범 세션이 모두 잠기기 전에는 시범 프로젝트로 훈련하지 않습니다"
 
 
@@ -154,6 +173,61 @@ def _default_compare(picks, refs, *, range_ms=None, chat_times=None, until_ms=No
     return trn.compare(dict(picks), rr, range_ms=range_ms, chat_times=chat_times, until_ms=until_ms)
 
 
+def _scenario_parts(scenario):
+    """scenario → (시나리오 줄 목록, resolve). 받는 모양: 줄 목록 · {"records", "resolve"?} · .records/.resolve 객체."""
+    if isinstance(scenario, (list, tuple)):
+        return list(scenario), None
+    if isinstance(scenario, Mapping):
+        return scenario.get("records"), scenario.get("resolve")
+    return getattr(scenario, "records", None), getattr(scenario, "resolve", None)
+
+
+def _default_mix(real, scenario):
+    """시나리오 담당(H-1, app.core.scenario)의 섞기 함수를 부른다.
+    - mix(real, scenario) 가 있으면 그것(작업 지시의 가정 이름).
+    - 없으면 merge_for_display(real, records, resolve=…, clip_to_range=False) — 지금 그 모듈의 이름.
+      clip_to_range=False: 실제 채팅은 지금(F)처럼 다 싣는다(구간 밖 고르기는 이 화면이 막는다).
+    돌려준 것(줄 목록 또는 MergeResult)은 core.training.split_mixed 가 화면 줄로 고른다."""
+    from ..core import scenario as scn
+    if hasattr(scn, "mix"):
+        return scn.mix(real, scenario)
+    records, resolve = _scenario_parts(scenario)
+    if not records:
+        raise ValueError("시나리오 줄이 없습니다")
+    return scn.merge_for_display(real, records, resolve=resolve, clip_to_range=False)
+
+
+def _scenario_info(scenario) -> dict:
+    """시나리오의 id·해시 (기록 선택 칸 scenario_id·scenario_sha256). 모르면 비운다."""
+    out = {}
+    records, _ = _scenario_parts(scenario)
+    hdr0 = records[0] if records and isinstance(records[0], Mapping) and records[0].get("kind") == "scenario.header" \
+        else None
+    if hdr0 is not None and isinstance(hdr0.get("scenario_id"), str):
+        out["scenario_id"] = hdr0["scenario_id"]
+    for key, names in (("scenario_id", ("scenario_id", "id")), ("scenario_sha256", ("scenario_sha256", "sha256"))):
+        if key in out:
+            continue
+        for n in names:
+            v = scenario.get(n) if isinstance(scenario, Mapping) else getattr(scenario, n, None)
+            if v is None and not isinstance(scenario, Mapping):
+                hdr = getattr(scenario, "header", None)
+                v = hdr.get(n) if isinstance(hdr, Mapping) else None
+            if isinstance(v, str) and v:
+                out[key] = v
+                break
+    return out
+
+
+def _accepts(fn, name: str) -> bool:
+    """fn 이 이름 인자 name 을 받는가 (기록 쪽에 선택 칸이 생겼는지 볼 때)."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
 # ---------------------------------------------------------------------------- 부품
 def _default_part(kind: str):
     if kind == "player":
@@ -178,9 +252,15 @@ class TrainerView(QWidget):
 
     def __init__(self, parent=None, *, parts: dict | None = None,
                  compare_fn: Callable[..., object] | None = None,
-                 clock: Callable[[], str] | None = None):
+                 clock: Callable[[], str] | None = None,
+                 mix_fn: Callable[..., object] | None = None):
         super().__init__(parent)
         self._compare_fn = compare_fn or _default_compare
+        self._mix_fn = mix_fn or _default_mix
+        self._vlines: dict = {}                   # 가상 화면 id → core.training.VirtualLine (시나리오가 있을 때만)
+        self._vpicks: dict[str, int] = {}         # 가상 화면 id → 고른 순간의 VOD 시각
+        self._scenario: dict | None = None        # {"scenario_id", "scenario_sha256"} (없으면 None = 지금의 F)
+        self._vsum = None                         # 마지막 견주기의 core.training.VirtualSummary
         self._clock = clock or _now_iso
         self.events: list[dict] = []
         self._picks: dict[str, int] = {}          # chat_id → 고른 순간의 VOD 시각 (고른 순서)
@@ -320,7 +400,8 @@ class TrainerView(QWidget):
               viewer_no: Mapping[str, int] | None = None, duration_ms: int | None = None,
               density: Sequence[int] | None = None, density_bucket_ms: int = 10_000,
               project_name: str | None = None, pilot_locked: bool = False,
-              log=None, project_id: str | None = None) -> bool:
+              log=None, project_id: str | None = None, scenario=None,
+              show_virtual_marks: bool = True) -> bool:
         """훈련을 연다. 막히면 까닭 한 줄을 보이고 False.
 
         chat: messages.jsonl 줄 목록 또는 chat_panel.ChatData.
@@ -328,6 +409,9 @@ class TrainerView(QWidget):
         reference: ReferenceSet · RefReaction 목록 · dict 목록, 또는 그것을 돌려주는 함수(견주기 때만 부른다).
         reference_hash: 기준 해시(없으면 ReferenceSet.sha256). timemap: to_file·to_vod (작업대 TimeMap). 없으면 같은 시각.
         log: app.training_store.TrainingLog (TrainingLog.create 가 시범 잠금을 한 번 더 본다). project_id: start 줄 칸.
+        scenario: 섞을 시나리오(core.scenario 가 읽은 것, mix_fn 에 그대로 넘긴다). None 이면 지금의 F(실제 채팅만).
+          섞기가 실패하거나 가상 줄이 0개면 막고 까닭 한 줄(기록 시작 전에 — 노출로 세지 않는다).
+        show_virtual_marks: 연습 화면의 '가져옴'·'생성' 표시(기본 보임, 20 5-2). False 는 가려내기(H-5)용.
         """
         ok, why = training_menu_state(project_name, has_reference=reference is not None, pilot_locked=pilot_locked)
         if not ok:
@@ -342,11 +426,21 @@ class TrainerView(QWidget):
         if seg is None or seg[1] <= seg[0]:
             self.set_blocked(tr(REASON_NO_REFERENCE))
             return False
+        vlines: dict = {}
+        scen_info = None
+        if scenario is not None:
+            mixed = self._mix_scenario(chat, scenario, viewer_no, show_virtual_marks)
+            if mixed is None:
+                return False
+            chat, viewer_no, vlines = mixed
+            scen_info = _scenario_info(scenario)
         self._log = log
         if log is not None:
             ref_info = reference.log_reference() if hasattr(reference, "log_reference") else {}
+            extra = ({"scenario": {**scen_info, "virtual_lines": len(vlines)}}
+                     if scen_info is not None and _accepts(log.start, "scenario") else {})
             try:
-                log.start(project_id=project_id or "", range_ms=seg, reference=ref_info)
+                log.start(project_id=project_id or "", range_ms=seg, reference=ref_info, **extra)
             except Exception as e:  # noqa: BLE001 — 기록 없이 훈련하지 않는다(노출을 세어야 한다)
                 LOG.warning("훈련 기록 시작 실패: %s", type(e).__name__)
                 self._log = None
@@ -357,6 +451,10 @@ class TrainerView(QWidget):
         self._reference_hash = reference_hash or (getattr(reference, "sha256", None)
                                                   if isinstance(getattr(reference, "sha256", None), str) else None)
         self._picks = {}
+        self._vpicks = {}
+        self._vlines = vlines
+        self._scenario = scen_info
+        self._vsum = None
         self._result = None
         self._listen_end = None
         self._last_click = None
@@ -398,23 +496,73 @@ class TrainerView(QWidget):
             self._autoplay = False
             self._say(tr("영상이 연결되지 않아 채팅만 보입니다"))
         self._started = True
+        start_extra = {}
+        if scen_info is not None:       # 20 5-3 선택 칸 (없으면 생략 = 지금의 F)
+            start_extra = {**scen_info, "virtual_lines": len(vlines)}
         self._emit("training.start", mode="streamer", source=SOURCE_REPLAY, audio="muted",
-                   range={"start_ms": seg[0], "end_ms": seg[1]}, wall_at=self._clock())
+                   range={"start_ms": seg[0], "end_ms": seg[1]}, wall_at=self._clock(), **start_extra)
         self._update_count()
-        LOG.info("스트리머 훈련 시작: 구간 %d~%d ms", seg[0], seg[1])
+        LOG.info("스트리머 훈련 시작: 구간 %d~%d ms · 가상 채팅 %d줄", seg[0], seg[1], len(vlines))
         QTimer.singleShot(0, self, self.setFocus)
         return True
 
+    def _mix_scenario(self, chat, scenario, viewer_no, show_marks: bool):
+        """실제 채팅 + 시나리오 → (화면 줄 목록, viewer_no, 가상 줄 dict). 막히면 까닭을 보이고 None."""
+        from ..core import training as trn
+        if not isinstance(chat, (list, tuple)):
+            self.set_blocked(tr("가상 채팅을 섞으려면 채팅 줄 목록이 필요합니다"))
+            return None
+        try:
+            mixed = self._mix_fn(list(chat), scenario)
+            if isinstance(mixed, tuple) and len(mixed) == 2 and isinstance(mixed[0], (list, tuple)):
+                mixed = mixed[0]             # (줄 목록, 정보) 모양도 받는다
+            rows, vlines = trn.split_mixed(mixed, real=chat)
+        except Exception as e:  # noqa: BLE001 — 깨진 시나리오·섞기 모듈 없음: 훈련을 열지 않는다
+            LOG.warning("가상 채팅 섞기 실패: %s", type(e).__name__)
+            self.set_blocked(tr("가상 채팅을 섞지 못했습니다 ({0})").format(type(e).__name__))
+            return None
+        if not vlines:
+            self.set_blocked(tr(REASON_NO_SCENARIO))
+            return None
+        vno = None
+        if viewer_no is not None:            # 넘겨받은 번호표에 가상 가명 번호를 뒤에 붙인다('-' 로 드러나지 않게)
+            vno = dict(viewer_no)
+            nxt = max([n for n in vno.values() if isinstance(n, int)], default=0)
+            for r in rows:
+                vid = r.get("viewer_id")
+                if trn.is_virtual_id(r.get("chat_id")) and isinstance(vid, str) and vid not in vno:
+                    nxt += 1
+                    vno[vid] = nxt
+        if show_marks:
+            for r in rows:
+                if trn.is_virtual_id(r.get("chat_id")) and r.get("source") in VIRTUAL_TAG:
+                    r["nickname_masked"] = f"{r['nickname_masked']} · {tr(VIRTUAL_TAG[r['source']])}"
+        return rows, vno, vlines
+
     # ------------------------------------------------------------------ 고르기
     def picks(self) -> list[dict]:
-        """지금 고른 것 [{"chat_id", "picked_vod_ms"}] (고른 시각 순)."""
+        """지금 고른 실제 채팅 [{"chat_id", "picked_vod_ms"}] (고른 시각 순). 가상 채팅은 virtual_picks()."""
         return [{"chat_id": c, "picked_vod_ms": t} for c, t in sorted(self._picks.items(), key=lambda kv: (kv[1], kv[0]))]
 
+    def virtual_picks(self) -> list[dict]:
+        """지금 고른 가상 채팅 [{"line_id", "source", "picked_vod_ms"}] (고른 시각 순)."""
+        out = []
+        for vid, t in sorted(self._vpicks.items(), key=lambda kv: (kv[1], kv[0])):
+            ln = self._vlines.get(vid)
+            if ln is not None:
+                out.append({"line_id": ln.line_id, "source": ln.source, "picked_vod_ms": t})
+        return out
+
+    def virtual_line_count(self) -> int:
+        """섞인 가상 채팅 줄 수 (시나리오가 없으면 0)."""
+        return len(self._vlines)
+
     def pick_count(self) -> int:
-        return len(self._picks)
+        """고른 수 (실제 + 가상). 맨 위 '고른 수 n' 과 같다."""
+        return len(self._picks) + len(self._vpicks)
 
     def is_picked(self, chat_id: str) -> bool:
-        return chat_id in self._picks
+        return chat_id in self._picks or chat_id in self._vpicks
 
     def _chat_time(self, chat_id: str) -> int | None:
         data = self._chat_data()
@@ -447,6 +595,8 @@ class TrainerView(QWidget):
         if self._state != "training" or not chat_id:
             return None
         now = max(0, int(self._vod_pos))
+        if chat_id in self._vlines:
+            return self._toggle_virtual(chat_id, now)
         if chat_id in self._picks:
             if not self._log_toggle(chat_id, now):
                 return None
@@ -472,6 +622,49 @@ class TrainerView(QWidget):
         self._refresh_picks()
         self._say("")
         return "pick"
+
+    def _toggle_virtual(self, vid: str, now: int) -> str | None:
+        """가상 채팅 한 번 누름: 실제 채팅과 같은 규칙(구간 안·아직 안 온 채팅 금지)으로 고름·취소.
+        견주기 점수와는 따로 센다. 기록 줄은 chat_id 대신 line_id·source (20 5-3)."""
+        ln = self._vlines[vid]
+        if vid in self._vpicks:
+            if not self._log_virtual(ln, now):
+                return None
+            del self._vpicks[vid]
+            self._emit("training.unpick", line_id=ln.line_id, source=ln.source, vod_ms=now, wall_at=self._clock())
+            self._refresh_picks()
+            return "unpick"
+        t = ln.show_vod_ms
+        seg = self._segment
+        if t is None:
+            self._say(tr("시각이 없는 채팅은 고를 수 없습니다"))
+            return None
+        if seg is not None and not (seg[0] <= t < seg[1]):
+            self._say(tr("훈련 구간 밖의 채팅입니다"))
+            return None
+        if t > now + PICK_FUTURE_TOL_MS:
+            self._say(tr("아직 올라오지 않은 채팅입니다"))
+            return None
+        if not self._log_virtual(ln, now):
+            return None
+        self._vpicks[vid] = now
+        self._emit("training.pick", line_id=ln.line_id, picked_vod_ms=now, wall_at=self._clock(), source=ln.source)
+        self._refresh_picks()
+        self._say("")
+        return "pick"
+
+    def _log_virtual(self, ln, vod_ms: int) -> bool:
+        """가상 고르기 기록. log 에 toggle_virtual 이 있을 때만 쓴다(training-event 에 선택 칸이 더해진 뒤, 20 5-3).
+        없으면 파일에 쓰지 않고 화면 신호(trainingEvent)만 낸다 — 지금 스키마는 pick 줄에 chat_id·source=replay 만 받는다."""
+        if self._log is None or not hasattr(self._log, "toggle_virtual"):
+            return True
+        try:
+            self._log.toggle_virtual(ln.line_id, ln.source, vod_ms)
+            return True
+        except Exception as e:  # noqa: BLE001
+            LOG.warning("훈련 기록 쓰기 실패(가상): %s", type(e).__name__)
+            self._say(tr("훈련 기록을 쓰지 못해 반영하지 않았습니다 ({0})").format(type(e).__name__))
+            return False
 
     def _log_toggle(self, chat_id: str, vod_ms: int) -> bool:
         """기록이 있으면 먼저 쓴다. 실패면 이 누름을 반영하지 않는다(기록과 화면이 어긋나지 않게)."""
@@ -517,19 +710,20 @@ class TrainerView(QWidget):
 
     def _refresh_picks(self) -> None:
         if hasattr(self.chat, "set_label_marks"):
-            marks = {c: tr(PICK_MARK) for c in self._picks}
+            marks = {c: tr(PICK_MARK) for c in (*self._picks, *self._vpicks)}
             tip = tr(PICK_TIP)
             try:
                 self.chat.set_label_marks(marks, own=True, tooltip=tip)
             except TypeError:            # tooltip 인자가 없는 부품(시험 가짜)
                 self.chat.set_label_marks(marks, own=True)
         if hasattr(self.timeline, "set_markers"):
-            self.timeline.set_markers("train_pick", [(t, "train_pick") for t in self._picks.values()],
+            self.timeline.set_markers("train_pick", [(t, "train_pick") for t in (*self._picks.values(),
+                                                                                 *self._vpicks.values())],
                                       label=tr("고른 채팅"))
         self._update_count()
 
     def _update_count(self) -> None:
-        n = len(self._picks)
+        n = self.pick_count()
         self.count_label.setText(tr("고른 수 {0}").format(n))
         self.pickCountChanged.emit(n)
 
@@ -640,10 +834,17 @@ class TrainerView(QWidget):
             LOG.warning("견주기 계산 실패: %s", type(e).__name__)
             self._say(tr("견주기 계산에 실패했습니다 ({0})").format(type(e).__name__))
             return False
+        # 가상 채팅 고르기는 점수와 따로 센다 (compare_fn 에는 실제 고르기만 넘겼다)
+        vsum = None
+        if self._scenario is not None:
+            from ..core import training as trn
+            vsum = trn.compare_virtual(self._vpicks, self._vlines, range_ms=seg, until_ms=until)
         # 정답을 보이기 전에 기록한다(노출을 세게, 06 7장). 못 쓰면 보이지 않는다
         if self._log is not None and hasattr(result, "summary"):
+            extra = ({"virtual": vsum.numbers()} if vsum is not None and _accepts(self._log.compare, "virtual")
+                     else {})
             try:
-                self._log.compare(result, self._reference_hash or "", seg)
+                self._log.compare(result, self._reference_hash or "", seg, **extra)
             except Exception as e:  # noqa: BLE001
                 LOG.warning("훈련 기록 견주기 줄 실패: %s", type(e).__name__)
                 self._say(tr("훈련 기록을 쓰지 못해 견주기를 열지 않았습니다 ({0})").format(type(e).__name__))
@@ -655,12 +856,15 @@ class TrainerView(QWidget):
             self.chat.set_reveal_until(None)          # 정답을 본 뒤에는 채팅도 다 보여도 된다
         self._end_reason = reason if reason in ("compare", "segment_end") else "compare"
         self._result = result if result is not None else {}
-        self.compare_view.set_result(self._result, chat_time=self._chat_time, chat_text=self._chat_text)
+        self._vsum = vsum
+        self.compare_view.set_result(self._result, chat_time=self._chat_time, chat_text=self._chat_text,
+                                     virtual=vsum)
         nums = self.compare_view.summary()
         self._emit("training.compare", same=nums["same"], mine_only=nums["mine_only"], orig_only=nums["orig_only"],
                    reference_count=nums["reference"], hit_rate=nums["hit_rate"],
                    median_diff_ms=nums["median_delta_ms"], reference_sha256=self._reference_hash,
-                   range={"start_ms": seg[0], "end_ms": seg[1]} if seg else None, until_ms=until)
+                   range={"start_ms": seg[0], "end_ms": seg[1]} if seg else None, until_ms=until,
+                   **(vsum.numbers() if vsum is not None else {}))
         # 이제 정답이 보여도 된다: 타임라인에 원래 반응 자리
         if hasattr(self.timeline, "set_markers"):
             marks = [(r.reaction_ms, "train_orig") for r in self.compare_view.rows() if r.reaction_ms is not None]
@@ -668,14 +872,19 @@ class TrainerView(QWidget):
         self.right.setCurrentWidget(self.compare_view)
         self.btn_compare.setEnabled(False)
         self._say(tr("행을 누르면 소리를 켜고 원래 대답을 듣습니다 · N / Shift+N = 다음·앞 '원래만'"))
-        self.compareShown.emit(dict(nums))
-        LOG.info("스트리머 훈련 견주기: 고른 %d · 같음 %d · 원래만 %d", len(self._picks), nums["same"], nums["orig_only"])
+        self.compareShown.emit({**nums, **(vsum.numbers() if vsum is not None else {})})
+        LOG.info("스트리머 훈련 견주기: 고른 %d · 같음 %d · 원래만 %d · 가상 고름 %d/%d", len(self._picks), nums["same"],
+                 nums["orig_only"], vsum.picked if vsum else 0, vsum.shown if vsum else 0)
         QTimer.singleShot(0, self, self.compare_view.table.setFocus)
         return True
 
     def compare_result(self):
         """마지막 견주기 결과 (core.training.Comparison 또는 dict). 견주기 전이면 None."""
         return self._result
+
+    def virtual_result(self):
+        """마지막 견주기의 가상 채팅 묶음 (core.training.VirtualSummary). 시나리오가 없거나 견주기 전이면 None."""
+        return self._vsum
 
     def listen(self, chat_id: str, a_vod: int, b_vod: int) -> None:
         """견주기 행 누름: 그 자리로 가서 소리를 켜고 [a, b] 를 한 번 재생하고 멈춘다."""
@@ -703,7 +912,8 @@ class TrainerView(QWidget):
                     self._log.end(reason)
                 except Exception as e:  # noqa: BLE001 — 닫기는 막지 않는다
                     LOG.warning("훈련 기록 끝 줄 실패: %s", type(e).__name__)
-            self._emit("training.end", reason=reason, picks=len(self._picks))
+            self._emit("training.end", reason=reason, picks=len(self._picks),
+                       **({"virtual_picks": len(self._vpicks)} if self._scenario is not None else {}))
         self._state = "closed"
         try:
             self.player.close_player()

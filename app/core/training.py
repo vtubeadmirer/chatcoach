@@ -13,7 +13,12 @@
     센다(구간 끝 전에 '견주기' 를 누른 경우 — 아직 지나가지 않은 채팅을 '원래만' 으로 세지 않는다).
 - 견주기 화면 도움: next_orig_only(N / Shift+N), listen_start_ms(행을 누르면 소리를 켜고 재생할 자리).
 
+- 가상 채팅(H-4, 20 5장): split_mixed 가 core.scenario.mix 결과를 화면 줄로 고르고(가림 이름·'v:' id),
+  compare_virtual 이 가상 채팅 고르기를 견주기 점수와 따로 센다('가상 채팅 m개 가운데 k개 고름').
+
 core 층: 파일·시계·난수·Qt 를 쓰지 않는다. 채팅 본문·닉네임은 다루지 않는다(chat_id·시각·숫자만, D-17 8).
+예외는 split_mixed 하나: 가상 줄의 본문을 화면용 dict 로 옮기기만 하고(기록·로그로는 넘기지 않는다), 원래 채팅의
+닉네임·viewer_id 는 버린다.
 """
 from __future__ import annotations
 
@@ -323,9 +328,175 @@ def listen_start_ms(row: CompareRow, lead_ms: int = DEFAULT_LEAD_MS) -> int:
     return max(0, min(ts) - lead_ms)
 
 
+# ----------------------------------------------------------------------------- 가상 채팅 (H-4, 20 5장)
+# 훈련 재생에 시나리오의 가상 채팅(retrieved·generated)을 섞는다. 섞기 자체(시나리오 읽기·retrieved 본문 찾기)는
+# core.scenario.mix(real, scenario) 가 한다. 이 칸은 그 결과를 화면용 줄로 고르고(가림 이름·가상 표시), 가상 채팅
+# 고르기를 견주기 점수와 **따로** 센다(20 5-2: F 의 표·숫자는 replay 만, 가상은 '가상 채팅 m개 가운데 k개 고름').
+#
+# 지키는 것 (20 1장·8장)
+# - 가상 채팅 줄의 이름은 시나리오가 정한 가림 이름(display_mask)만 쓴다. 없거나 모양이 이상하면 '시청자N' 가명.
+#   원래 채팅의 nickname_masked·viewer_id 는 **버린다**(다른 맥락에 실제 시청자 이름을 붙이지 않게).
+# - 가상 채팅의 화면 id 는 'v:' 로 시작한다(VIRTUAL_ID_PREFIX). 실제 chat_id(CHAT_ID_RE)와 섞이지 않는다.
+# - 실제 채팅 줄(dict)은 고치지 않고 그대로 넘긴다. 가상 줄은 새 dict 로 만든다(messages.jsonl 에 쓰지 않는다).
+SRC_REPLAY = "replay"
+SRC_RETRIEVED = "retrieved"
+SRC_GENERATED = "generated"
+VIRTUAL_SOURCES = (SRC_RETRIEVED, SRC_GENERATED)
+VIRTUAL_ID_PREFIX = "v:"
+VIRTUAL_PSEUDONYM = "시청자{0}"        # display_mask 가 없을 때의 가명 (번호는 가상 줄 순서로 매김)
+_MASK_MAX = 12                         # 가림 이름 최대 글자 수 (넘으면 가명으로)
+
+
+@dataclass(frozen=True)
+class VirtualLine:
+    """화면에 섞인 가상 채팅 한 줄. 본문·이름은 담지 않는다(화면 표의 ChatData 에만 있다)."""
+    vid: str                 # 화면 id ('v:' + line_id)
+    line_id: str             # 시나리오 줄 id (s0001 …)
+    source: str              # retrieved · generated
+    show_vod_ms: int | None  # 보일 VOD 시각
+
+
+def is_virtual_id(chat_id) -> bool:
+    """가상 채팅의 화면 id 인가."""
+    return isinstance(chat_id, str) and chat_id.startswith(VIRTUAL_ID_PREFIX)
+
+
+def virtual_id(line_id: str) -> str:
+    if not isinstance(line_id, str) or not line_id or len(line_id) > 64:
+        raise TrainingError("line_id 형식이 아닙니다")
+    return VIRTUAL_ID_PREFIX + line_id
+
+
+def _virtual_source(rec: Mapping) -> str | None:
+    """mix 결과의 한 줄이 가상이면 그 출처. 실제(replay)면 None. 출처 칸(source)이 가상 출처이거나 line_id 가 있으면 가상."""
+    s = rec.get("source")
+    if s in VIRTUAL_SOURCES:
+        return s
+    if rec.get("kind") == "scenario.chat" or (isinstance(rec.get("line_id"), str) and s != SRC_REPLAY):
+        # 출처를 모르는 가상 줄: 본문을 적은 생성 줄이면 generated, 아니면 retrieved 로 본다
+        return SRC_GENERATED if isinstance(rec.get("gen_id"), str) else SRC_RETRIEVED
+    return None
+
+
+def _clean_mask(m) -> str | None:
+    if not isinstance(m, str):
+        return None
+    m = m.strip()
+    if not m or len(m) > _MASK_MAX or any(ord(ch) < 32 for ch in m):
+        return None
+    return m
+
+
+def _row_to_mapping(row) -> Mapping | None:
+    """core.scenario.DisplayRow 모양(virtual·source·vod_ms·line_id·display_name·text·message) → dict.
+    실제 행은 원 messages.jsonl dict(row.message) 그대로, 가상 행은 가상 줄 dict. 모르는 모양이면 None."""
+    if not hasattr(row, "virtual"):
+        return None
+    if not getattr(row, "virtual"):
+        m = getattr(row, "message", None)
+        return m if isinstance(m, Mapping) else None
+    return {"source": getattr(row, "source", None), "line_id": getattr(row, "line_id", None),
+            "show_vod_ms": getattr(row, "vod_ms", None), "text": getattr(row, "text", ""),
+            "display_mask": getattr(row, "display_name", None)}
+
+
+def split_mixed(mixed: Iterable[Mapping], real: Sequence[Mapping] | None = None
+                ) -> tuple[list[dict], dict[str, VirtualLine]]:
+    """mix(real, scenario) 결과 → (화면 표에 실을 줄 목록, 가상 화면 id → VirtualLine).
+
+    mixed: dict 목록(가상 줄은 source·line_id·show_vod_ms|t_ms·text·display_mask), 또는
+      core.scenario.merge_for_display 의 MergeResult·DisplayRow 목록.
+    - 실제 줄은 그대로(같은 dict). 가상 줄은 화면용 dict 로 새로 만든다:
+      {chat_id: 'v:'+line_id, t_ms: show_vod_ms, text, nickname_masked: 가림 이름 또는 '시청자N',
+       viewer_id: 'virtual-N'(가명 번호용, 실제 viewer_id 모양 아님), kind: 'text', role: 'viewer', source}.
+    - mix 결과에 실제 줄이 하나도 없고 real 을 주면 real 을 앞에 더한다(가상 줄만 돌려주는 mix 도 받게).
+    - line_id 가 없거나 겹치는 가상 줄, 시각이 없는 가상 줄은 뺀다.
+    """
+    out: list[dict] = []
+    virt: dict[str, VirtualLine] = {}
+    n_real = 0
+    pseudo: dict[str, int] = {}
+    rows = getattr(mixed, "rows", mixed)           # core.scenario.MergeResult 도 받는다
+    for rec in rows or ():
+        if not isinstance(rec, Mapping):
+            rec = _row_to_mapping(rec)
+            if rec is None:
+                continue
+        src = _virtual_source(rec)
+        if src is None:
+            out.append(rec)            # 실제 채팅 — 고치지 않는다
+            n_real += 1
+            continue
+        lid = rec.get("line_id")
+        t = rec.get("show_vod_ms", rec.get("t_ms"))
+        if not isinstance(lid, str) or not lid or len(lid) > 64 or not _is_int(t) or t < 0:
+            continue
+        vid = virtual_id(lid)
+        if vid in virt:
+            continue
+        mask = _clean_mask(rec.get("display_mask"))
+        key = mask or ("#" + lid)
+        if key not in pseudo:
+            pseudo[key] = len(pseudo) + 1
+        n = pseudo[key]
+        text = rec.get("text")
+        out.append({"chat_id": vid, "t_ms": int(t), "text": text if isinstance(text, str) else "",
+                    "nickname_masked": mask or VIRTUAL_PSEUDONYM.format(n), "viewer_id": f"virtual-{n}",
+                    "kind": "text", "role": "viewer", "source": src})
+        virt[vid] = VirtualLine(vid, lid, src, int(t))
+    if n_real == 0 and real:
+        out = [r for r in real if isinstance(r, Mapping)] + out
+    return out, virt
+
+
+@dataclass
+class VirtualSummary:
+    """견주기의 가상 채팅 묶음 — '연습용, 점수 없음'. F 의 숫자(Comparison.summary)에는 들어가지 않는다."""
+    shown: int                                   # 범위 안에서 화면에 나온 가상 채팅 수
+    picked: int                                  # 그 가운데 고른 수
+    by_source: dict                              # {retrieved: {shown, picked}, generated: {shown, picked}}
+    picks: list[dict]                            # [{vid, line_id, source, show_vod_ms, picked_vod_ms}] 고른 시각 순
+
+    def numbers(self) -> dict:
+        """training.compare 의 선택 칸 (20 5-3): 건수만."""
+        return {"virtual_shown": self.shown, "virtual_picked": self.picked}
+
+
+def compare_virtual(vpicks: Mapping[str, int], lines: Mapping[str, VirtualLine] | Iterable[VirtualLine], *,
+                    range_ms: tuple[int, int] | None = None, until_ms: int | None = None) -> VirtualSummary:
+    """가상 채팅 고르기를 센다(원래 반응과 섞지 않는다). vpicks: 가상 화면 id → 고른 순간의 VOD 시각.
+    shown = 범위([시작, 끝)) 안이고 until_ms 까지 나온 가상 줄 수. 고른 줄은 범위·until 과 상관없이 picked 로 센다
+    (고를 때 이미 화면에 있었다)."""
+    if isinstance(lines, Mapping):
+        lines = list(lines.values())
+    by = {s: {"shown": 0, "picked": 0} for s in VIRTUAL_SOURCES}
+    shown = 0
+    by_vid: dict[str, VirtualLine] = {}
+    for ln in lines or ():
+        if not isinstance(ln, VirtualLine):
+            raise TrainingError("VirtualLine 이 아닙니다")
+        by_vid[ln.vid] = ln
+        if _in_range(ln.show_vod_ms, range_ms, until_ms):
+            shown += 1
+            by[ln.source]["shown"] += 1
+    picks: list[dict] = []
+    for vid, pms in (vpicks or {}).items():
+        ln = by_vid.get(vid)
+        if ln is None:
+            continue
+        _check_ms("picked_vod_ms", pms)
+        by[ln.source]["picked"] += 1
+        picks.append({"vid": vid, "line_id": ln.line_id, "source": ln.source, "show_vod_ms": ln.show_vod_ms,
+                      "picked_vod_ms": pms})
+    picks.sort(key=lambda d: (d["picked_vod_ms"], d["vid"]))
+    return VirtualSummary(shown=shown, picked=len(picks), by_source=by, picks=picks)
+
+
 __all__ = [
     "K_START", "K_PICK", "K_UNPICK", "K_COMPARE", "K_END", "KINDS", "SAME", "MINE_ONLY", "ORIG_ONLY", "STATUSES",
     "REFERENCE_GRADES", "REF_FINAL_SET", "REF_MANUAL_CSV", "REF_SOURCES", "DEFAULT_LEAD_MS", "TrainingError",
     "same_chat", "RefReaction", "normalize_reference", "reference_sha256", "toggle_pick", "picks_from_events",
     "CompareRow", "Comparison", "median_int", "compare", "next_orig_only", "listen_start_ms",
+    "SRC_REPLAY", "SRC_RETRIEVED", "SRC_GENERATED", "VIRTUAL_SOURCES", "VIRTUAL_ID_PREFIX", "VirtualLine",
+    "is_virtual_id", "virtual_id", "split_mixed", "VirtualSummary", "compare_virtual",
 ]

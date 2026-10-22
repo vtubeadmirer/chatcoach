@@ -6,6 +6,9 @@
 - 채팅 본문·닉네임·전사문은 칸이 없다(스키마가 모르는 칸을 거부한다). chat_id·VOD 시각·숫자만.
 - 세션 ID: '<labeler_id>-TR-<yyyymmdd>-<4자>' (라벨 세션 종류 코드와 겹치지 않는다).
 - 시범 프로젝트(pilot-* 등)는 시범 세션이 모두 잠기기 전에는 새 세션을 만들지 않는다(D-18 7, reference_set).
+- 가상 채팅을 섞은 훈련(20 5-3): start 에 scenario_id·scenario_sha256·virtual_lines, 가상 pick·unpick 은 chat_id 대신
+  line_id·source(retrieved·generated), compare 에 virtual_shown·virtual_picked, end 에 virtual_picks (모두 선택 칸 —
+  없으면 F 의 줄과 같다). 본문·가림 이름은 여기에도 없다.
 
 이 모듈은 labels\\ 를 열지 않는다. 시계·난수는 바꿔 끼울 수 있다(시험).
 """
@@ -32,6 +35,10 @@ TRAINING_SESSION_ID_RE = re.compile(r"\A([A-Z][A-Z0-9]{1,7})-TR-([0-9]{8})-([a-z
 LABELER_ID_RE = re.compile(r"\A[A-Z][A-Z0-9]{1,7}\Z")
 _RAND_ALPHABET = string.ascii_lowercase + string.digits
 END_REASONS = ("compare", "segment_end", "closed")
+# 가상 채팅 섞기(20 5-3)의 선택 칸. 없으면 F 의 줄과 같다.
+SCENARIO_START_KEYS = ("scenario_id", "scenario_sha256", "virtual_lines")
+VIRTUAL_SOURCES = ("retrieved", "generated")
+LINE_ID_RE = re.compile(r"\As[0-9]{4,6}\Z")
 
 
 class TrainingStoreError(RuntimeError):
@@ -158,6 +165,8 @@ class TrainingLog:
         self._app_version = app_version or _app_version()
         self._seq = 0
         self.picks: dict[str, int] = {}
+        self.vpicks: dict[str, int] = {}          # 가상 채팅: line_id → 고른 순간의 VOD 시각 (20 5-3)
+        self.virtual_on = False                   # start 에 시나리오를 적었나 (end 에 virtual_picks 를 붙인다)
         if os.path.exists(self.path):
             res = read_session(self.path)
             if res.corrupt_lines:
@@ -206,12 +215,40 @@ class TrainingLog:
         self._seq += 1
         return rec
 
-    def start(self, *, project_id: str, range_ms: tuple[int, int], reference: Mapping) -> dict:
-        """training.start. reference = ReferenceSet.log_reference()."""
+    def start(self, *, project_id: str, range_ms: tuple[int, int], reference: Mapping,
+              scenario: Mapping | None = None) -> dict:
+        """training.start. reference = ReferenceSet.log_reference().
+        scenario(선택, 20 5-3): 가상 채팅을 섞었으면 {scenario_id, scenario_sha256, virtual_lines} 가운데 아는 칸만 적는다.
+        없으면 지금(F)과 같은 줄."""
         a, b = range_ms
-        return self._write(tr.K_START, {"mode": "streamer", "project_id": project_id, "source": "replay",
-                                        "audio": "muted", "range": {"start_ms": a, "end_ms": b},
-                                        "reference": dict(reference)})
+        body = {"mode": "streamer", "project_id": project_id, "source": "replay", "audio": "muted",
+                "range": {"start_ms": a, "end_ms": b}, "reference": dict(reference)}
+        if scenario:
+            for k in SCENARIO_START_KEYS:
+                if scenario.get(k) is not None:
+                    body[k] = scenario[k]
+        rec = self._write(tr.K_START, body)
+        self.virtual_on = bool(scenario)
+        return rec
+
+    def toggle_virtual(self, line_id: str, source: str, vod_ms: int) -> dict:
+        """가상 채팅 한 번 누름 → pick 또는 unpick 줄(chat_id 대신 line_id·source, 20 5-3). 견주기 점수와 따로 센다."""
+        if not isinstance(line_id, str) or not LINE_ID_RE.match(line_id):
+            raise TrainingStoreError("시나리오 줄 번호 형식이 아닙니다")
+        if source not in VIRTUAL_SOURCES:
+            raise TrainingStoreError("가상 채팅 출처가 아닙니다")
+        if not isinstance(vod_ms, int) or isinstance(vod_ms, bool) or vod_ms < 0:
+            raise TrainingStoreError("시각이 0 이상 정수가 아닙니다")
+        now = self._clock()
+        if line_id in self.vpicks:
+            body = {"line_id": line_id, "source": source, "vod_ms": vod_ms, "wall_at": _iso(now)}
+            rec = self._write(tr.K_UNPICK, body, now)
+            del self.vpicks[line_id]
+        else:
+            body = {"line_id": line_id, "picked_vod_ms": vod_ms, "wall_at": _iso(now), "source": source}
+            rec = self._write(tr.K_PICK, body, now)
+            self.vpicks[line_id] = vod_ms
+        return rec
 
     def toggle(self, chat_id: str, vod_ms: int) -> dict:
         """채팅 한 번 누름 → pick 또는 unpick 줄. 쓴 줄을 돌려준다(줄을 쓴 뒤에만 상태를 바꾼다)."""
@@ -225,17 +262,26 @@ class TrainingLog:
         self.picks = nxt
         return rec
 
-    def compare(self, result: tr.Comparison, reference_sha256: str, range_ms: tuple[int, int]) -> dict:
-        """training.compare — 숫자만(건수·맞힌 비율·시각 차 중앙값·기준 해시)."""
+    def compare(self, result: tr.Comparison, reference_sha256: str, range_ms: tuple[int, int], *,
+                virtual: Mapping | None = None) -> dict:
+        """training.compare — 숫자만(건수·맞힌 비율·시각 차 중앙값·기준 해시).
+        virtual(선택, 20 5-3): VirtualSummary.numbers() = {virtual_shown, virtual_picked}. replay 숫자와 섞지 않는다."""
         a, b = range_ms
         body = {**result.summary(), "reference_sha256": reference_sha256, "range": {"start_ms": a, "end_ms": b},
                 "until_ms": result.until_ms}
+        if virtual:
+            for k in ("virtual_shown", "virtual_picked"):
+                if virtual.get(k) is not None:
+                    body[k] = virtual[k]
         return self._write(tr.K_COMPARE, body)
 
     def end(self, reason: str = "closed") -> dict:
         if reason not in END_REASONS:
             raise TrainingStoreError("모르는 끝 사유입니다")
-        return self._write(tr.K_END, {"reason": reason, "picks": len(self.picks)})
+        body = {"reason": reason, "picks": len(self.picks)}
+        if self.virtual_on:
+            body["virtual_picks"] = len(self.vpicks)
+        return self._write(tr.K_END, body)
 
 
 def load_records(project_root: str, session_ids: Iterable[str] | None = None) -> list[dict]:

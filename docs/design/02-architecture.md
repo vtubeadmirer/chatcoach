@@ -237,7 +237,14 @@ flowchart TB
 | `app/ai_compare.py` | **AI 비교 보고서**: 해제된 run 만 읽는다. 06 6-3 매칭, 6-4 평가 집합(E1·E2·E3), 6-5 엄격·참고 점수, 6-6 제외 계단표. 보고서 폴더(06 6-7)에 `report.json`·`report.md`·`tables/*.csv`(UTF-8 BOM, 셀 보호)·`manifest.json`. 채팅 본문·닉네임·근거 한 줄은 넣지 않는다 | seal, core.final_set, core.exposure, agreement_report(관문) | Qt 없음 | E (만드는 중, 16 8-1 6번) |
 | `app/core/final_set.py` | **최종 세트**: 잠긴 세션의 유효 라벨에 조정 기록을 덮는다 — `adjudicate.case_states` 를 열쇠로 원 라벨을 조정 값으로 바꾸고 `exclude_from_eval` 은 뺀다(06 6-6 의 `adjudicated_exclude`). 조정 값이 없는 재라벨 불일치는 `human_disagreement`. 내보내기·AI 비교·나란히 보기가 같은 함수를 쓴다 | resolve, adjudicate | 순수 함수 (파일·시계 없음) | E (만드는 중, D-13 2, 16 8-1 4번) |
 | `app/core/exposure.py` | **AI 노출 판정**: 계획 취소 시각 `cancelled_at`·봉인 조기 해제 시각과 세션 생성 시각을 견줘, 그 뒤에 만든 세션에 `view.exposed(what = ai_results)` 가 필요한지와 `view_exposed` 로 뺄 세션을 정한다. 시각은 인자로 받는다. 기록을 쓰는 것은 store 다(기존 `view.exposed` 기록 종류 — 스키마는 그대로, D-15 7) | — | 순수 함수 | E (만드는 중, D-13 2, 16 8-1 7번) |
-| `app/ui/analysis_view.py` | **나란히 보기 (방송 분석 모드)**: 해제된 엔진 판정과 최종 세트만 읽는다. 타임라인 위아래 두 트랙(엔진 / 최종 세트), 채팅마다 같음·다름·놓침 표시, 다른 곳으로 건너뛰기. **해제 전에는 열지 않고 '봉인됨(n건)' 만 보인다**(D-15 7). 분석 세션을 연 라벨러는 D-14 3 대로 노출 표시. 블라인드 시험: 라벨링·재라벨 세션은 이 화면과 `data\ai\`·`data\reports\` 를 열지 않는다(06 7-3) | seal, ai_compare, core.final_set, timeline | 작업대 부품 재사용 | E (만드는 중, D-14 8, D-15 7, 16 8-1 5·8번) |
+| `app/ui/analysis_view.py` | **나란히 보기 (방송 분석 모드)**: 해제된 엔진 판정과 최종 세트만 읽는다. 타임라인 위아래 두 트랙(엔진 / 최종 세트), 채팅마다 같음·다름·놓침 표시, 다른 곳으로 건너뛰기. **해제 전에는 열지 않고 '봉인됨 n건' 만 보인다**(D-15 7, 문구 D-18 3). 분석 세션을 연 라벨러는 D-14 3 대로 노출 표시. 블라인드 시험: 라벨링·재라벨 세션은 이 화면과 `data\ai\`·`data\reports\` 를 열지 않는다(06 7-3) | seal, ai_compare, core.final_set, timeline | 작업대 부품 재사용 | E (만드는 중, D-14 8, D-15 7, 16 8-1 5·8번) |
+| `app/analysis_flow.py` | **방송 분석 메뉴의 자료 모으기** (Qt 없음): 자리(세션 종류)마다 막힘 까닭(`menu_block_reason`·`seal_block_reason`·`view_block_reason`), 해제된 run 고르기 목록(`run_choices` — 지금은 가장 늦게 해제한 run 이 A 기본, 18 5-2 7번 제안은 남음), 해제된 run 읽기(`RunLoader`), 짝 주제 흐름(`topic_flow`)·방송 요약 숫자(`broadcast_summary`), 사람 일치도 관문(`agreement_gate` — 최신 일치도 보고서의 기준 판정을 ai_compare 의 human_gate 로) | seal, core.final_set, core.topics, agreement_report | Qt 없음 | E (D-15 7, D-17 5, 18 5-2 16번) |
+| `app/core/topics.py` · `app/ui/summary_view.py` · `app/ui/topic_track.py` | 주제 흐름(엔진이 냄, 앱은 보이기만) 검사·방송 요약 계산 / 요약 표 화면 / 타임라인 위 주제 띠. 화면 둘은 디스크를 열지 않는다. 띠에는 주제 이름만(D-17 8) | analysis_flow | 순수 함수 · 위젯 | E (D-01, D-17 5·8) |
+| `app/exposure_io.py` | 노출 판정(`core.exposure`)의 입력 모으기: 계획 취소 기록·`seal.jsonl` 의 해제 줄·**훈련 기록의 `training.start` 줄**(규칙 5, `project_trainings`). 라벨 파일·봉인 원본·runs 는 열지 않는다 | core.exposure | Qt 없음 | E·F (D-18 7) |
+| `app/reference_set.py` | **훈련 기준 '원래 반응'** 읽기와 훈련 메뉴 켜기 판단(`training_availability`): 사람 최종 세트(세션 밖 읽기, 잠긴 세션만), 없으면 `labels\manual-*.csv` 이름 순 첫 파일(읽기만). 시범 프로젝트는 시범 세션이 모두 잠기기 전에는 아무 라벨도 읽지 않는다 | export, seal | Qt 없음 | F (D-18 7) |
+| `app/core/training.py` · `app/training_store.py` | 고르기(pick·unpick)·견주기(같음·나만·원래만·맞힌 비율·시각 차 중앙값) 순수 계산 / `training\<id>.jsonl` 쓰기·읽기(training-event 스키마 검사, 본문·닉네임 칸 없음, 시범은 잠기기 전 거부) | reference_set, jsonl | 순수 함수 · 파일 | F (D-18 6·8, [03](03-data-model.md) 6-16) |
+| `app/ui/trainer_view.py` · `app/ui/train_compare_view.py` | **스트리머 훈련 화면**: 소리 끈 다시보기·흐르는 채팅(재생 위치까지만)·타임라인·'고른 수 n', 채팅 한 번 누르기 = 읽겠다. 견주기 화면(Ctrl+Enter): 같음·나만·원래만 표, 행을 누르면 소리를 켜고 원래 대답 앞뒤를 듣는다. 입력 칸 없음. 메인 창(`mainwindow`)이 작업대 위에 쌓고, 라벨링·출처 판정 세션에서는 '보기 전용으로 다시 열고 훈련'(D-19 3) | core.training, training_store, chat_panel, timeline, player | 작업대 부품 재사용 | F (D-16, D-18 6, D-19 3·4) |
+| `app/core/scenario.py` · `app/scenario_store.py` | **가상 채팅 시나리오**(H-1·H-2·H-4): 시나리오 검사·조립·실제 채팅과 시간축 섞기 / `scenarios\SC-*.jsonl` 원자 쓰기·읽기. `messages.jsonl`·`labels\` 와 섞지 않고, 가상 줄은 늘 출처 칸으로 표시한다. 라벨링 세션은 `scenarios\` 를 열지 않는다 | — | 순수 함수 · 파일 | H (D-05, D-19 2, [20](20-plan-virtual-chat.md)) |
 | `compare_view` · `origin_match` | 사람끼리 비교 화면(06 4-9 첫 장), 가상 채팅 생성 기록 대조기. (옛 `missed_view` 는 `forms/missed_form.py`, `relabel_view` 는 `relabel_dialog.py`·`session_dialog.py`, `origin_view` 는 `ui/origin_view.py` 로 만들었고, `ai_compare` 는 E 의 `app/ai_compare.py` 로 옮겼다, D-15 7) | — | — | v1 (`origin_match` 는 H 와 같이) |
 
 ### 3-3. 모듈 사이의 계약
@@ -323,6 +330,11 @@ chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 │  ├─ ai_results.py                         (E 만드는 중 — 엔진 결과 가져오기·06 6-2 검사, D-15 7)
 │  ├─ seal.py                               (E 만드는 중 — 봉인·해제, data\ai\, D-15 7·8)
 │  ├─ ai_compare.py                         (E 만드는 중 — AI 비교 보고서, 06 6장)
+│  ├─ analysis_flow.py                      (E — 분석 메뉴 자료 모으기·판 고르기·주제 흐름·방송 요약, D-15 7·D-17 5)
+│  ├─ exposure_io.py                        (E·F — 노출 판정 입력 모으기, 훈련 start 줄 포함)
+│  ├─ reference_set.py                      (F — 훈련 기준 '원래 반응'·메뉴 켜기 판단, D-18 7)
+│  ├─ training_store.py                     (F — training\<id>.jsonl, D-18 8)
+│  ├─ scenario_store.py                     (H-1 — scenarios\SC-*.jsonl, 20 3장)
 │  ├─ chzzk_chat.py
 │  ├─ media.py
 │  ├─ analysis.py                           ffmpeg_tools.py 의 5함수 개작
@@ -345,7 +357,10 @@ chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 │  │  ├─ missed.py                          (C단계, D-12 5)
 │  │  ├─ origin.py                          (C단계, D-12 6 — 출처 κ 는 여기 하나)
 │  │  ├─ final_set.py                       (E 만드는 중 — 조정 반영 최종 세트, D-13 2)
-│  │  └─ exposure.py                        (E 만드는 중 — AI 노출 판정, D-13 2·D-15 7)
+│  │  ├─ exposure.py                        (E 만드는 중 — AI 노출 판정, D-13 2·D-15 7. 규칙 5 훈련 노출은 F)
+│  │  ├─ topics.py                          (E — 주제 흐름 검사·방송 요약 계산, D-17 5)
+│  │  ├─ training.py                        (F — 고르기·견주기 계산, D-18 6)
+│  │  └─ scenario.py                        (H — 가상 채팅 시나리오 검사·섞기, 20 3·5장)
 │  └─ ui/
 │     ├─ __init__.py
 │     ├─ mainwindow.py
@@ -363,6 +378,8 @@ chatcoach/                              공개 저장소 vtubeadmirer/chatcoach
 │     ├─ adjudication_view.py               (C단계, D-12 3·4)
 │     ├─ origin_view.py                     (C단계, D-12 6)
 │     ├─ analysis_view.py                   (E 만드는 중 — 나란히 보기, 해제 전에는 '봉인됨 n건' 만, D-15 7)
+│     ├─ summary_view.py · topic_track.py   (E — 방송 요약 표·타임라인 주제 띠, D-17 5·8)
+│     ├─ trainer_view.py · train_compare_view.py   (F — 스트리머 훈련 재생·견주기, D-18 6, D-19 3·4)
 │     ├─ ops_dialogs.py                     (C 마무리 M4 — 백업·되살리기·지우기 대화상자, 16 5-2 1번)
 │     ├─ shortcuts.py                       (계획 — 파일 없음, D-13 2)
 │     ├─ update_dialog.py                   ⟵* dialogs.UpdateDialog
@@ -564,6 +581,8 @@ ChatCoach\                          = <앱>
 │  └─ <session_id>.json          세션 잠금 (기록 파일 해시·시각, 한 번만 만들고 풀지 않음)
 ├─ relabel\<plan_id>.json        재라벨 계획 (불변, 03 6-14)
 ├─ origin\                       (v1) ★ 보호 구역: 가상 채팅 생성 기록·대조 결과
+├─ training\<session_id>.jsonl   (F) 스트리머 훈련 기록 training-event (추가만, 03 6-16). 라벨 기록과 다른 폴더
+├─ scenarios\SC-*.jsonl          (H-1) ★ 가상 채팅 시나리오. messages.jsonl·labels\ 와 섞지 않는다 (20 3장)
 └─ derived\                      (v1) 다시 만들기 비싼 보조 도구 결과: asr.json · vad.json · ocr.jsonl — asr·ocr 는 보호 구역
 ```
 
@@ -646,7 +665,9 @@ flowchart LR
   CMP --> AV["analysis_view 나란히 보기 (E)<br/>해제 전에는 '봉인됨 n건' 만"]
 ```
 
-E 첫 묶음 (D-15 7·8): 엔진 결과는 처음부터 봉인 경로로만 들어온다. 시범 프로젝트(`pilot-*`)에 엔진을 돌린 결과도 같다 — 시범 세션이 잠기기 전에는 아무도 열지 않는다. 봉인·해제 기록은 `data\ai\` 쪽 파일이고, 라벨 기록(label-event)은 시범 고정판 그대로 읽는다.
+E 첫 묶음 (D-15 7·8): 엔진 결과는 처음부터 봉인 경로로만 들어온다. 시범 프로젝트(`pilot-*`)에 엔진을 돌린 결과도 같다 — 시범 세션이 잠기기 전에는 아무도 열지 않는다. 봉인·해제 기록은 `data\ai\` 쪽 파일이고, 라벨 기록(label-event)은 시범 고정판 그대로 읽는다. 엔진 주제 흐름(`*.topics.json`)은 판정 결과의 짝으로 같이 봉인·해제된다(D-17 5).
+
+F·H (D-18 6·7·8, D-19 2): 스트리머 훈련은 사람 최종 세트(없으면 `labels\manual-*.csv` 손라벨, 읽기만)를 `reference_set` 으로 읽어 '원래 반응' 으로 쓰고, 기록은 `training\<id>.jsonl`(training-event)에만 쓴다 — `labels\` 에는 한 줄도 쓰지 않는다. 가상 채팅 시나리오는 `scenarios\`(H-1)에만 있고 `messages.jsonl` 과 섞지 않으며, 훈련 재생에서만 시간축으로 섞는다(H-4, [20](20-plan-virtual-chat.md)).
 
 한 방향 규칙:
 
@@ -691,7 +712,7 @@ stateDiagram-v2
 
 구현 메모 (D-13 1·3·4, 14 4-1 22번): 위 그림의 ④ 는 **재라벨 세션에서만** 있다. 1차 세션은 ③ 다음에 바로 잠근다(1차는 ④ 를 하지 않는다, D-12 5·D-13 4). ③ 모드의 [표본 완료 표시] 는 1차에서도 보이고 ④ 를 여는 관문(`phase.mark(samples)`)이다. 조정·출처 판정 세션은 단계가 없고 자기 화면 하나다(3-2 `core/phase.py` 행). 놓친 후보 일치도는 같은 블록의 같은 사람 재라벨 ↔ 다른 사람 재라벨 사이에서 낸다([06](06-evaluation-and-agreement.md) 4-6).
 
-AI 결과는 어느 단계에서든 받을 수 있다. 받으면 해시·크기·시각만 기록하고 봉인한다. 내용은 comparison 진입 전까지 보이지 않는다([06](06-evaluation-and-agreement.md) 7-2). 나란히 보기 화면(`ui/analysis_view.py`)도 해제 전에는 열지 않고 '봉인됨(n건)' 만 보인다 (D-15 7). 봉인을 앞당겨 열려면 사유를 받고, 그 뒤 만든 재라벨 세션은 `ai_exposed` 로 표시한다(판정은 `core/exposure.py`, D-13 2).
+AI 결과는 어느 단계에서든 받을 수 있다. 받으면 해시·크기·시각만 기록하고 봉인한다. 내용은 comparison 진입 전까지 보이지 않는다([06](06-evaluation-and-agreement.md) 7-2). 나란히 보기 화면(`ui/analysis_view.py`)도 해제 전에는 열지 않고 '봉인됨 n건' 만 보인다 (D-15 7, D-18 3). 봉인을 앞당겨 열려면 사유를 받고, 그 뒤 만든 재라벨 세션은 `ai_exposed` 로 표시한다(판정은 `core/exposure.py`, D-13 2).
 
 ### 6-3. 라벨 한 건이 저장되는 길
 
@@ -764,8 +785,10 @@ sequenceDiagram
 | 재라벨 계획 취소 | 메뉴 '세션 → 재라벨 계획 취소…'(조정 세션에서만) 대화상자 하나. 조정 화면 아래 칸의 취소 칸은 지웠다 | C단계 (D-12 7, D-13 1, D-14 1·2) |
 | `relabel_second` 계획 · 출처 판정 대상 만들기 | 조정 화면 아래 칸 | C단계 (D-14 1, 15 1-2 7·9번) |
 | 프로젝트 백업 · 되살리기 · 지우기(휴지통) | 메뉴 '파일'. `ui/ops_dialogs.py` | C 마무리 (M4, 16 5-2 1번) |
-| 방송 분석 (나란히 보기) | 해제된 엔진 판정 ↔ 최종 세트. 해제 전에는 열지 않고 '봉인됨(n건)' 만 | E (만드는 중, D-14 8, D-15 7) |
-| AI 비교 보고서 | 해제된 run 만. 메뉴 자리는 E 묶음 보고에서 적는다 | E (만드는 중, D-15 7) |
+| 방송 분석 (나란히 보기) | 메뉴 '분석 → 엔진과 나란히 보기'(분석 세션). 해제된 엔진 판정 ↔ 최종 세트. 해제 전에는 열지 않고 '봉인됨 n건' 만(D-18 3). run 이 둘 이상이면 판 고르기·판끼리 견주기 | E (D-14 8, D-15 7, 17 6-1 4번) |
+| 방송 요약 | 메뉴 '분석 → 방송 요약'(같은 자리·같은 조건). 주제 덩어리별 채팅·반응률·놓친 질문. 분석 세션 작업대에는 타임라인 위 주제 트랙도 | E (D-01, D-17 5·8) |
+| AI 비교 보고서 | 메뉴 '보고 → AI 비교 보고서…'(세션 밖·조정 세션). 해제된 run 만 | E (D-15 7) |
+| 스트리머 훈련 | 메뉴 '훈련 → 스트리머 훈련' 한 번. 작업대 위에 쌓는 화면(소리 끈 다시보기·흐르는 채팅·'고른 수 n') → '견주기'(같음·나만·원래만) → [닫기] 로 작업대. 라벨링·출처 판정 세션에서는 같은 메뉴가 '보기 전용으로 다시 열고 훈련'. 시범(잠기기 전)·기준 없음·영상 없음이면 메뉴 안에 까닭 한 줄. 훈련 중에는 분석 메뉴·AI 비교 보고서·일치도 보고서를 끈다 | F (D-18 6·7·8, D-19 3·4, [06](06-evaluation-and-agreement.md) 7-5) |
 | 사람끼리 비교 화면 | 비교 화면 첫 장([06](06-evaluation-and-agreement.md) 4-9) | v1 |
 
 목표 해상도는 1920×1080. 최소 1366×768 을 지원한다(폼은 세로 스크롤). 1366×768 에서 반응 편집기가 쓸 만한지는 확인 필요.

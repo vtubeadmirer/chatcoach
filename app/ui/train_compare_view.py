@@ -14,6 +14,9 @@
   **소리를 켜고** 원래 대답 앞뒤를 한 번 재생한다. 이 화면은 플레이어를 직접 만지지 않는다(플레이어는 하나, 옮기지 않음).
 - N / Shift+N: 다음·앞 '원래만' 으로 건너뛰고 같은 재생을 한다(나란히 보기와 같은 키). 단추에도 같은 동작과 풍선 도움말.
 - 입력 칸·고르는 창은 없다(D-16).
+- 가상 채팅을 섞은 훈련(H-4, 20 5-2): 위 표·숫자는 **replay 만**으로 낸다. 숫자 줄 아래 한 줄 '가상 채팅 m개 가운데
+  k개 고름 (연습용, 점수 없음)', 고른 가상 채팅은 표 아래쪽에 '가상 고름 · 가져옴/생성' 행으로 따로 붙는다(원래 반응과
+  섞지 않음). 가상 행을 누르면 그 시각 앞뒤를 듣는다 — '원래 대답' 은 없다. N / Shift+N 은 '원래만' 만 건넌다.
 
 계산은 이 화면이 하지 않는다. 훈련 화면이 app.core.training.compare(...) 를 불러 받은 결과를 set_result 로 넘긴다.
 받는 결과는 두 모양이다.
@@ -42,9 +45,13 @@ from ..i18n import tr
 LOG = logging.getLogger(__name__)
 
 CAT_SAME, CAT_MINE, CAT_ORIG = "same", "mine_only", "orig_only"
-CATEGORIES = (CAT_SAME, CAT_MINE, CAT_ORIG)
-CAT_KO = {CAT_SAME: "같음", CAT_MINE: "나만", CAT_ORIG: "원래만"}
-CAT_COLORS = {CAT_SAME: QColor("#81c784"), CAT_MINE: QColor("#64b5f6"), CAT_ORIG: QColor("#e0b252")}
+CATEGORIES = (CAT_SAME, CAT_MINE, CAT_ORIG)       # 점수 칸 (replay 만)
+CAT_VIRTUAL = "virtual"                           # 가상 채팅을 골랐다 — '연습용, 점수 없음' 묶음 (20 5-2)
+CAT_KO = {CAT_SAME: "같음", CAT_MINE: "나만", CAT_ORIG: "원래만", CAT_VIRTUAL: "가상 고름"}
+CAT_COLORS = {CAT_SAME: QColor("#81c784"), CAT_MINE: QColor("#64b5f6"), CAT_ORIG: QColor("#e0b252"),
+              CAT_VIRTUAL: QColor("#9e9e9e")}
+# 견주기에서는 가상 표시를 드러낸다(정답을 본 뒤). 훈련 재생 중 표시는 trainer_view 가 정한다.
+SOURCE_KO = {"retrieved": "가져옴", "generated": "생성"}
 
 # 원래 대답 앞뒤 재생 범위: 채팅이 뜨기 조금 전 ~ 원래 대답 시각 조금 뒤.
 LISTEN_PRE_MS = 5_000       # app.core.training.DEFAULT_LEAD_MS 와 같은 값
@@ -81,12 +88,13 @@ def listen_window(chat_ms: int | None, reaction_ms: int | None, pre_ms: int = LI
 
 @dataclass(frozen=True)
 class CompareRow:
-    category: str                 # same · mine_only · orig_only
-    chat_id: str
+    category: str                 # same · mine_only · orig_only · virtual(가상 채팅을 골랐다)
+    chat_id: str                  # 실제는 chat_id, 가상은 화면 id ('v:' + line_id)
     chat_ms: int | None           # 채팅 VOD 시각 (모르면 None)
     picked_ms: int | None         # 내가 고른 순간의 재생 위치
-    reaction_ms: int | None       # 원래 대답 시각
+    reaction_ms: int | None       # 원래 대답 시각 (가상은 늘 None — 원래 대답이 없다)
     delta_ms: int | None          # 고른 시각 − 원래 대답 시각 (같음만)
+    source: str | None = None     # 가상만: retrieved · generated
 
     def window(self) -> tuple[int, int] | None:
         return listen_window(self.chat_ms if self.chat_ms is not None else self.picked_ms, self.reaction_ms)
@@ -198,6 +206,54 @@ def summary_numbers(result, rows: Iterable[CompareRow]) -> dict:
             "hit_rate": None if hr is None else float(hr), "median_delta_ms": med}
 
 
+def virtual_rows(virtual) -> list[CompareRow]:
+    """가상 채팅 묶음(core.training.VirtualSummary 또는 {"picks": [...]} dict) → '가상 고름' 행 (보일 시각 순).
+    picks 항목: {vid, line_id?, source, show_vod_ms, picked_vod_ms}. 원래 반응과 섞지 않는다(점수 없음)."""
+    picks = virtual.get("picks") if isinstance(virtual, Mapping) else getattr(virtual, "picks", None)
+    out: list[CompareRow] = []
+    seen: set[str] = set()
+    for p in picks or ():
+        if not isinstance(p, Mapping):
+            continue
+        vid = p.get("vid") or p.get("chat_id")
+        if not isinstance(vid, str) or not vid or vid in seen:
+            continue
+        seen.add(vid)
+        src = p.get("source") if p.get("source") in SOURCE_KO else None
+        out.append(CompareRow(CAT_VIRTUAL, vid, _first_int(p, "show_vod_ms", "chat_vod_ms"),
+                              _first_int(p, "picked_vod_ms"), None, None, src))
+    out.sort(key=lambda r: (r.chat_ms is None, r.chat_ms if r.chat_ms is not None else 0, r.chat_id))
+    return out
+
+
+def virtual_numbers(virtual) -> dict | None:
+    """가상 채팅 숫자 {"shown", "picked", "by_source"}. 가상 채팅이 없는 훈련이면 None."""
+    if virtual is None:
+        return None
+    g = virtual.get if isinstance(virtual, Mapping) else (lambda k: getattr(virtual, k, None))
+    shown = _int_or_none(g("shown"))
+    picked = _int_or_none(g("picked"))
+    if picked is None:
+        picked = len(virtual_rows(virtual))
+    by = g("by_source")
+    return {"shown": shown if shown is not None else 0, "picked": picked,
+            "by_source": dict(by) if isinstance(by, Mapping) else {}}
+
+
+def fmt_virtual(vn: Mapping | None) -> str:
+    """'가상 채팅 m개 가운데 k개 고름 (연습용, 점수 없음)' 한 줄. 출처별 수가 있으면 뒤에 붙인다."""
+    if not vn:
+        return ""
+    s = tr("가상 채팅 {m}개 가운데 {k}개 고름 (연습용, 점수 없음)").format(m=vn.get("shown", 0), k=vn.get("picked", 0))
+    parts = []
+    for src in ("retrieved", "generated"):
+        d = (vn.get("by_source") or {}).get(src)
+        if isinstance(d, Mapping) and (d.get("shown") or d.get("picked")):
+            parts.append(tr("{name} {k}/{m}").format(name=tr(SOURCE_KO[src]), k=d.get("picked", 0),
+                                                      m=d.get("shown", 0)))
+    return s + (" · " + " · ".join(parts) if parts else "")
+
+
 def _fmt_sec(ms: int | None, signed: bool = False) -> str:
     if ms is None:
         return "—"
@@ -232,6 +288,7 @@ class TrainCompareView(QWidget):
         self._result = None
         self._rows: list[CompareRow] = []
         self._nums: dict = summary_numbers(None, [])
+        self._vnums: dict | None = None
         self._chat_text = chat_text
         self._current = -1
         self.listen_count = 0          # 시험·점검용: 듣기를 부른 횟수
@@ -245,6 +302,13 @@ class TrainCompareView(QWidget):
         self.numbers.setObjectName("panelTitle")
         self.numbers.setWordWrap(True)
         lay.addWidget(self.numbers)
+        # 가상 채팅 한 줄 (시나리오를 섞은 훈련만 보인다). 위 숫자 줄은 replay 만으로 낸 것이다.
+        self.virtual_label = QLabel("")
+        self.virtual_label.setObjectName("hint")
+        self.virtual_label.setWordWrap(True)
+        self.virtual_label.setToolTip(tr("시나리오에서 섞은 가상 채팅(가져옴·생성)은 원래 반응이 없어 점수에 넣지 않습니다"))
+        self.virtual_label.setVisible(False)
+        lay.addWidget(self.virtual_label)
 
         self.table = QTableWidget(0, len(HEADERS), self)
         self.table.setHorizontalHeaderLabels([tr(h) for h in HEADERS])
@@ -289,23 +353,30 @@ class TrainCompareView(QWidget):
 
     # ------------------------------------------------------------------ 자료
     def set_result(self, result, *, chat_time: Callable[[str], int | None] | None = None,
-                   chat_text: Callable[[str], str | None] | None = None) -> None:
+                   chat_text: Callable[[str], str | None] | None = None, virtual=None) -> None:
         """compare 결과(Comparison 또는 dict, None = 비움)를 싣는다.
-        chat_time(chat_id) → VOD ms, chat_text(chat_id) → 화면용 본문(한 줄)."""
+        chat_time(chat_id) → VOD ms, chat_text(chat_id) → 화면용 본문(한 줄).
+        virtual: 가상 채팅 묶음(core.training.VirtualSummary 또는 {"shown", "picked", "by_source"?, "picks"} dict).
+        None 이면 가상 채팅이 없는 훈련(지금의 F). 가상 행은 점수 행 **아래에** '가상 고름' 으로 따로 붙고,
+        숫자 줄(summary)에는 들어가지 않는다."""
         if chat_text is not None:
             self._chat_text = chat_text
         self._result = result
-        self._rows = rows_from_result(self._result, chat_time)
-        self._nums = summary_numbers(self._result, self._rows)
+        scored = rows_from_result(self._result, chat_time)
+        self._nums = summary_numbers(self._result, scored)
+        self._vnums = virtual_numbers(virtual)
+        self._rows = scored + (virtual_rows(virtual) if virtual is not None else [])
         self._current = -1
         self.numbers.setText(fmt_summary(self._nums))
+        self.virtual_label.setText(fmt_virtual(self._vnums))
+        self.virtual_label.setVisible(self._vnums is not None)
         self._fill()
         has_orig = self._nums["orig_only"] > 0
         self.prev_btn.setEnabled(has_orig)
         self.next_btn.setEnabled(has_orig)
         self.nav_msg.setText("" if self._rows else tr("고른 채팅도 원래 반응도 없습니다"))
-        LOG.info("견주기: 같음 %d · 나만 %d · 원래만 %d", self._nums["same"], self._nums["mine_only"],
-                 self._nums["orig_only"])
+        LOG.info("견주기: 같음 %d · 나만 %d · 원래만 %d · 가상 고름 %d", self._nums["same"], self._nums["mine_only"],
+                 self._nums["orig_only"], (self._vnums or {}).get("picked", 0))
 
     def _fill(self) -> None:
         t = self.table
@@ -318,7 +389,10 @@ class TrainCompareView(QWidget):
                     text = self._chat_text(r.chat_id) or ""
                 except Exception:  # noqa: BLE001 — 본문은 보조. 못 읽어도 표는 보인다
                     text = ""
-            cells = (tr(CAT_KO[r.category]), _fmt_t(r.chat_ms), text, _fmt_t(r.picked_ms), _fmt_t(r.reaction_ms),
+            cat = tr(CAT_KO[r.category])
+            if r.category == CAT_VIRTUAL and r.source in SOURCE_KO:
+                cat = f"{cat} · {tr(SOURCE_KO[r.source])}"     # 견주기에서 가상 표시를 드러낸다
+            cells = (cat, _fmt_t(r.chat_ms), text, _fmt_t(r.picked_ms), _fmt_t(r.reaction_ms),
                      _fmt_sec(r.delta_ms, signed=True) if r.delta_ms is not None else "")
             for c, v in enumerate(cells):
                 it = QTableWidgetItem(v)
@@ -332,7 +406,15 @@ class TrainCompareView(QWidget):
         return list(self._rows)
 
     def summary(self) -> dict:
+        """replay 만으로 낸 숫자 (가상 채팅은 넣지 않는다)."""
         return dict(self._nums)
+
+    def virtual_summary(self) -> dict | None:
+        """가상 채팅 숫자 {"shown", "picked", "by_source"}. 가상 채팅이 없는 훈련이면 None."""
+        return None if self._vnums is None else dict(self._vnums)
+
+    def virtual_text(self) -> str:
+        return self.virtual_label.text()
 
     def current_row(self) -> int:
         return self._current

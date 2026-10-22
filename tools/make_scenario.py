@@ -1,0 +1,164 @@
+"""가상 채팅 시나리오 만들기 — 첫 판은 'retrieved' 만 (docs/design/20-plan-virtual-chat.md H-2, D-19 2).
+
+사용:
+  python tools/make_scenario.py --project <프로젝트 폴더> --from <시각> --to <시각>
+         [--projects-root <폴더>] [--blocklist <txt>] [--topic-flow <topic-flow.json>] [--seed N] [--dry-run]
+         [--quiet-max-real 2] [--target-per-min 6] [--max-virtual-ratio 0.5]
+
+  --from/--to : 훈련 구간(VOD 시각). 1:02:03(.5) 형식 또는 정수 ms.
+  --projects-root : 같은 채널(project.json broadcast.channel_id) 프로젝트를 찾을 곳. 기본은 프로젝트 폴더의 부모.
+                    channel_id 가 없으면 같은 방송만 쓴다. pilot-* 폴더는 열지 않는다.
+  --blocklist : 금칙어 목록(한 줄에 하나, '#' 주석). 기본 <데이터 폴더>\\config\\blocklist-ko.txt (20 11-6). 없으면
+                금칙어 거르기 0낱말로 진행하고 시나리오 머리 filters 에 blocklist_sha256 을 적지 않는다(출력 blocklist_found=false).
+  --seed : 0 이상 정수. 같은 입력·seed 면 같은 줄.
+  --dry-run : 파일을 쓰지 않고 숫자만 낸다.
+
+잇는 것: engine.retrieve(고르기, 표준 라이브러리만) → app.core.scenario.assemble(줄 목록·ID·끝 줄) →
+  app.scenario_store.write_scenario(project_root, records)(검사 + scenarios\\<scenario_id>.jsonl 원자적 쓰기).
+  같은 프로젝트·구간·lines_sha256 인 시나리오가 이미 있으면 write_scenario 가 새로 쓰지 않고 그 ID 를 준다.
+  채울 줄이 0개면 쓰지 않는다(nothing_to_fill).
+시범 프로젝트(pilot-*)는 읽기 전에 거부한다(pilot_locked). AI·외부 호출·모델 없음. messages.jsonl 은 읽기만.
+출력: 표준 출력에 JSON 한 줄(숫자·ID·코드만. 본문·닉네임 없음).
+종료 코드: 0 정상(이미 있음·채울 것 없음 포함) · 1 입력 오류 · 2 시범 거부 · 3 scenario_store 없음 · 4 만들 수 없음
+"""
+from __future__ import annotations
+
+import sys
+
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+import argparse
+import json
+import os
+import re
+from datetime import datetime
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from engine import retrieve as R  # noqa: E402  (표준 라이브러리만 쓰는 모듈)
+
+
+def _store():
+    """(assemble, write_scenario, 오류 클래스들) 또는 None. H-1 담당 모듈(app.core.scenario, app.scenario_store)."""
+    try:
+        from app.core import scenario as sc
+        from app import scenario_store as st
+    except ImportError:
+        return None
+    return sc.assemble, st.write_scenario, st
+
+
+_TIME = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?$")
+
+
+def parse_ms(text: str) -> int:
+    s = str(text).strip()
+    if re.fullmatch(r"\d+", s):
+        return int(s)
+    m = _TIME.match(s)
+    if not m:
+        raise ValueError("시각 형식은 1:02:03(.5) 또는 정수 ms")
+    h, mi, se, fr = m.group(1), m.group(2), m.group(3), m.group(4)
+    ms = ((int(h or 0) * 60 + int(mi)) * 60 + int(se)) * 1000
+    if fr:
+        ms += int(fr.ljust(3, "0"))
+    return ms
+
+
+def default_blocklist(project_dir: str) -> str:
+    """<데이터 폴더>\\config\\blocklist-ko.txt. 데이터 폴더 = projects 폴더의 부모(…\\chatcoach-data)."""
+    projects = os.path.dirname(os.path.abspath(project_dir))
+    return os.path.join(os.path.dirname(projects), "config", "blocklist-ko.txt")
+
+
+def _emit(obj: dict) -> None:
+    print(json.dumps(obj, ensure_ascii=False, sort_keys=True))
+
+
+def main(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
+    d = R.RetrieveConfig()
+    ap = argparse.ArgumentParser(description="가상 채팅 시나리오(retrieved) 만들기")
+    ap.add_argument("--project", required=True)
+    ap.add_argument("--from", dest="from_t", required=True)
+    ap.add_argument("--to", dest="to_t", required=True)
+    ap.add_argument("--projects-root")
+    ap.add_argument("--blocklist")
+    ap.add_argument("--topic-flow")
+    ap.add_argument("--seed", default="0")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--quiet-max-real", type=int, default=d.quiet_max_real, help="이 수 이하인 1분 창을 채운다")
+    ap.add_argument("--target-per-min", type=int, default=d.target_per_min, help="채운 창의 실제+가상 목표")
+    ap.add_argument("--max-virtual-ratio", type=float, default=d.max_virtual_ratio)
+    ns = ap.parse_args(argv)
+
+    project = os.path.abspath(ns.project)
+    if R.is_pilot_dir(project):                    # 읽기 전에 거부
+        _emit({"error": "pilot_locked"})
+        return 2
+    try:
+        a, b = parse_ms(ns.from_t), parse_ms(ns.to_t)
+        seed = int(ns.seed)
+        if seed < 0:
+            raise ValueError
+        cfg = R.RetrieveConfig(quiet_max_real=ns.quiet_max_real, target_per_min=ns.target_per_min,
+                               max_virtual_ratio=ns.max_virtual_ratio)
+    except ValueError:
+        _emit({"error": "bad_argument"})
+        return 1
+    if not os.path.isdir(project):
+        _emit({"error": "no_project"})
+        return 1
+    store = _store()
+    if store is None:
+        _emit({"error": "scenario_store_missing"})
+        return 3
+    assemble, write_scenario, st = store
+    bl = ns.blocklist if ns.blocklist is not None else default_blocklist(project)
+    try:
+        header, chats, stats = R.make_retrieved_scenario(project, a, b, projects_root=ns.projects_root,
+                                                         blocklist_path=bl, topic_flow_path=ns.topic_flow,
+                                                         seed=seed, cfg=cfg, now=now)
+    except R.RetrieveError as e:
+        _emit({"error": e.code})
+        return 2 if e.code == "pilot_locked" else (1 if e.code in ("bad_range", "no_messages", "bad_seed") else 4)
+    when = now or datetime.now().astimezone()
+    records = assemble(header, chats, yyyymmdd=when.strftime("%Y%m%d"))
+    head = records[0]
+    out = {"scenario_id": head["scenario_id"], "counts": head["counts"], "stats": stats,
+           "blocklist_found": "blocklist_sha256" in head.get("filters", {}), "written": False}
+    if ns.dry_run:
+        problems = st.validate(records)
+        out["valid"] = not problems
+        out["problems"] = len(problems)
+        _emit(out)
+        return 0
+    if not head["counts"].get("retrieved"):          # 채울 드문 창이 없거나 후보가 없다: 빈 시나리오는 쓰지 않는다
+        out["reason"] = "nothing_to_fill"
+        _emit(out)
+        return 0
+    try:
+        res = write_scenario(project, records)
+    except st.ScenarioBlockedError:
+        _emit({"error": "pilot_locked"})
+        return 2
+    except st.ScenarioInvalidError as e:
+        _emit({"error": "invalid", "problems": len(getattr(e, "problems", ()) or ())})
+        return 4
+    except (st.ScenarioStoreError, OSError):
+        _emit({"error": "store_error"})
+        return 4
+    out.update({"scenario_id": res.scenario_id, "written": bool(res.created)})
+    if not res.created:
+        out["existing"] = res.scenario_id
+    _emit(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

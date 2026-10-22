@@ -72,6 +72,12 @@
   [견주기] → '원래만' 행 하나 눌러 소리 켜고 듣기(끝에서 멈춤) → [닫기] → 기록 줄(start·pick×5·unpick·compare·end, 본문·
   닉네임 없음) → 훈련 뒤 만든 라벨링 세션이 노출로 계산되는지. 단계마다 사람 클릭 수(clicks=)를 찍는다. 단계 이름 앞에 tr_.
   스크린샷 _tr_train · _tr_compare. 끝나면 사본을 지운다.
+  이어서 가상 채팅(H-4, 20 5장): 메뉴 '훈련 → 가상 채팅 만들기' 한 번(엔진 도구를 워커로, 문턱은 SMOKE_SCENARIO_ARGS —
+  사본의 scenarios\\ 에만 씀) → 메뉴에 '가상 채팅 섞기' 가 기본으로 켜짐 → '스트리머 훈련' 한 번(섞인 훈련, start 줄에
+  scenario_id) → 가상 채팅 1개('가져옴' 표시)·실제 채팅 1개 고르기 → [견주기]: 같음·나만은 실제 1개만, 가상은
+  '가상 고름' 묶음에 따로(1개) → [닫기] → 기록 줄(가상 pick 은 line_id·source, 본문·이름 없음) → 시나리오 파일에 실제
+  가림 닉네임·viewer_id·원 닉네임·user_id_hash·원 본문이 0건인지 바이트 검사(원 닉네임은 원본의 보호 구역 파일을 읽기만,
+  사본에 복사하지 않음). 스크린샷 _tr_virtual.
 
 외부 정지 감시: 감시 스레드가 3초 넘게 멈췄고 그동안 프로세스 CPU 가 거의 늘지 않았으면 그 단계 뒤에 external_suspend=초 를
   붙이고 끝에 합계를 찍는다(보안 프로그램이 프로세스를 통째로 일시 정지한 것 — 코드 멈춤과 구별, 18 보고 4-2).
@@ -222,7 +228,13 @@ STEPS_ANALYSIS = ("an_copy", "an_seal", "an_open_a", "an_a_label", "an_a_lock_pl
 
 # --training-flow (F 첫 묶음, 08 D-18 6·7·8) 의 단계. 켜면 cache_drop 앞에 붙고, 건너뛴 표시 'training_flow' 는 빠진다.
 STEPS_TRAINING = ("tr_copy", "tr_open", "tr_menu", "tr_space", "tr_pick", "tr_compare", "tr_listen", "tr_close",
-                  "tr_log", "tr_exposure", "tr_cleanup")
+                  "tr_log", "tr_exposure",
+                  # 가상 채팅 섞기(H-4, 20 5장, D-19 2): 만들기 → 섞인 훈련 → 가상 1개·실제 1개 고르기 → 견주기 따로 셈 →
+                  # 기록 줄 → 시나리오 파일 개인정보 바이트 검사
+                  "tr_v_make", "tr_v_menu", "tr_v_pick", "tr_v_compare", "tr_v_log", "tr_v_privacy",
+                  "tr_cleanup")
+# 가상 채팅 만들기의 시험 문턱(스모크만). 기본값(1분에 실제 2개 이하만 채움)이면 <P> 처럼 채팅이 많은 방송은 채울 곳이 0이다
+SMOKE_SCENARIO_ARGS = ("--quiet-max-real", "45", "--target-per-min", "60")
 SKIP_MARKS = ("analysis_flow", "training_flow")
 
 
@@ -2174,6 +2186,12 @@ class Smoke:
             self.check("tr_exposure", ok, t1, f"later_session_exposed={ok} menu_enabled_again="
                                               f"{self.win.a_streamer_training.isEnabled()} "
                                               f"human_clicks_total={clicks_total} keys_total=1")
+            # ---- 가상 채팅 섞기 (H-4)
+            v_clicks = self._training_virtual(dst, set(sids))
+            if v_clicks is None:
+                return False
+            print(f"    사람 클릭 합계: F 흐름 {clicks_total} + 가상 채팅 흐름 {v_clicks} = {clicks_total + v_clicks} "
+                  f"(키 1)")
             return True
         except Exception as e:  # noqa: BLE001
             traceback.print_exc(limit=3)
@@ -2189,6 +2207,210 @@ class Smoke:
                 self.check("tr_cleanup", False, t0, f"임시 사본을 다 지우지 못함({len(leftover)}개, {tmp}) — 직접 지우세요")
             else:
                 self.check("tr_cleanup", True, time.perf_counter(), f"사본 지움 (흐름 전체 {time.perf_counter() - t0:.1f}초)")
+
+    @staticmethod
+    def _file_set(root: str) -> set[str]:
+        out = set()
+        for d, _dirs, files in os.walk(root):
+            for f in files:
+                out.add(os.path.relpath(os.path.join(d, f), root).replace(os.sep, "/"))
+        return out
+
+    def _training_virtual(self, dst: str, old_sids: set) -> int | None:
+        """--training-flow 의 가상 채팅 흐름(H-4). 사람 클릭 수(키 제외) 또는 None(실패). 출력은 숫자·코드만."""
+        import json
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication
+        from app import jsonl
+        from app import scenario_store as sst
+        from app import training_store as ts
+        from app.core import training as trc
+        from app.ui.chat_panel import KIND_CODES
+        clicks = 0
+        # ---- 만들기: 메뉴 '훈련 → 가상 채팅 만들기' 한 번 (엔진 도구를 워커로, 사본의 scenarios\ 에만 쓴다)
+        t1 = time.perf_counter()
+        self.win.scenario_tool_args = SMOKE_SCENARIO_ARGS
+        self.win.m_training.aboutToShow.emit()
+        make_vis, make_en = self.win.a_make_virtual.isVisible(), self.win.a_make_virtual.isEnabled()
+        mix_vis_before = self.win.a_mix_virtual.isVisible()
+        before = self._file_set(dst)
+        t_make = time.perf_counter()
+        if make_vis and make_en:
+            self.win.a_make_virtual.trigger()
+        make_ms = (time.perf_counter() - t_make) * 1000
+        new_files = sorted(self._file_set(dst) - before)
+        ids = sst.list_scenarios(dst)
+        scn = None
+        try:
+            scn = sst.load_scenario(dst, ids[0]) if len(ids) == 1 else None
+        except (sst.ScenarioStoreError, OSError):
+            scn = None
+        n_lines = int((scn.header.get("counts") or {}).get("retrieved", 0)) if scn else 0
+        only_scen = bool(new_files) and all(f.startswith("scenarios/") and f.endswith(".jsonl") for f in new_files)
+        ok = make_vis and make_en and not mix_vis_before and scn is not None and n_lines > 0 and only_scen \
+            and QApplication.activeModalWidget() is None
+        clicks += 2
+        self.check("tr_v_make", ok, t1, f"menu_visible={make_vis} enabled={make_en} mix_before={mix_vis_before} "
+                                        f"scenarios={len(ids)} retrieved_lines={n_lines} new_files={len(new_files)} "
+                                        f"only_scenarios_dir={only_scen} canonical={scn.canonical if scn else '-'} "
+                                        f"make_ms={make_ms:.0f} clicks=2(메뉴 '훈련' + '가상 채팅 만들기')")
+        if not ok:
+            return None
+        # ---- 섞인 훈련: 메뉴에 '가상 채팅 섞기' 가 기본으로 켜져 있고 '스트리머 훈련' 한 번
+        t1 = time.perf_counter()
+        self.win.m_training.aboutToShow.emit()
+        mix_vis, mix_on = self.win.a_mix_virtual.isVisible(), self.win.a_mix_virtual.isChecked()
+        make_hidden = not self.win.a_make_virtual.isVisible()
+        t_menu = time.perf_counter()
+        self.win.a_streamer_training.trigger()
+        view = self.win.training_view
+        ok = view is not None and view.state() == "training" and view.virtual_line_count() > 0
+        playing = ok and self.wait(lambda: view.player.is_playing(), 20)
+        open_ms = (time.perf_counter() - t_menu) * 1000
+        new_sids = [s for s in ts.list_sessions(dst) if s not in old_sids]
+        recs0 = ts.read_valid(ts.session_path(dst, new_sids[0]))[0] if len(new_sids) == 1 else []
+        start = next((r["body"] for r in recs0 if r["kind"] == trc.K_START), {})
+        ok = ok and mix_vis and mix_on and make_hidden and playing and view.is_muted() \
+            and start.get("scenario_id") == scn.scenario_id and start.get("scenario_sha256") == scn.sha256 \
+            and start.get("virtual_lines") == view.virtual_line_count()
+        clicks += 2
+        self.check("tr_v_menu", ok, t1, f"mix_visible={mix_vis} mix_default_on={mix_on} make_hidden={make_hidden} "
+                                        f"virtual_lines={view.virtual_line_count() if view else 0} autoplay={playing} "
+                                        f"start_scenario_ok={start.get('scenario_id') == scn.scenario_id} "
+                                        f"open_to_play_ms={open_ms:.0f} clicks=2(메뉴 '훈련' + '스트리머 훈련')")
+        if not ok:
+            return None
+        self.pump(800)
+        # ---- 고르기: Space 로 멈추고, 가상 채팅 1개('가져옴' 표시) + 실제 채팅 1개
+        t1 = time.perf_counter()
+        view.setFocus()
+        self.pump(30)
+        QTest.keyClick(view, Qt.Key_Space)
+        if not self.wait(lambda: not view.player.is_playing(), 5):
+            view.toggle_play()
+            self.wait(lambda: not view.player.is_playing(), 5)
+        seg = view._segment
+        lines = sorted((ln for ln in view._vlines.values() if seg[0] + 20_000 <= ln.show_vod_ms < seg[1]),
+                       key=lambda ln: ln.show_vod_ms)
+        if not lines:
+            self.check("tr_v_pick", False, t1, "구간 안 가상 채팅 없음")
+            return None
+        ln = lines[0]
+        view.seek_vod(ln.show_vod_ms + 300)
+        self.pump(100)
+        chat = view.chat
+        data = chat.chat_data()
+        revealed = chat.row_count()
+        rows_src = [chat.model.rows[r] for r in range(revealed)]
+        v_row = next((r for r in range(revealed) if data.chat_ids[rows_src[r]] == ln.vid), None)
+        text_code = KIND_CODES.get("text")
+        real_rows = [r for r in range(revealed - 1, -1, -1)
+                     if not trc.is_virtual_id(data.chat_ids[rows_src[r]]) and data.kinds[rows_src[r]] == text_code
+                     and seg[0] <= data.times[rows_src[r]] < seg[1]]
+        badge = v_row is not None and data.nicks[rows_src[v_row]].endswith("가져옴")
+        n_click = 0
+        if v_row is not None and self._click_chat_row(chat, v_row):
+            n_click += 1
+        gap = QApplication.instance().doubleClickInterval() / 1000.0
+        time.sleep(gap + 0.1)
+        if real_rows and self._click_chat_row(chat, real_rows[0]):
+            n_click += 1
+        vp, rp = view.virtual_picks(), view.picks()
+        ok = v_row is not None and badge and n_click == 2 and len(vp) == 1 and len(rp) == 1 \
+            and vp[0]["line_id"] == ln.line_id and view.pick_count() == 2
+        clicks += n_click
+        self.check("tr_v_pick", ok, t1, f"virtual_row_found={v_row is not None} badge_shown={badge} "
+                                        f"virtual_picked={len(vp)} real_picked={len(rp)} "
+                                        f"pick_count={view.pick_count()} revealed_rows={revealed}/{data.n} "
+                                        f"keys=1(Space) clicks={n_click}(가상 1 + 실제 1)")
+        if not ok:
+            return None
+        # ---- 견주기: replay 숫자는 실제 1개만, 가상은 '가상 고름' 묶음에 따로
+        t1 = time.perf_counter()
+        view.btn_compare.click()
+        self.pump(50)
+        nums = view.compare_view.summary() if view.state() == "compare" else {}
+        vs = view.virtual_result()
+        vrows = [r for r in view.compare_view.rows() if r.category == "virtual"]
+        vtext = view.compare_view.virtual_text()
+        ok = view.state() == "compare" and vs is not None and vs.picked == 1 and vs.shown >= 1 \
+            and nums.get("same", 0) + nums.get("mine_only", 0) == 1 and len(vrows) == 1 and bool(vtext)
+        fit = self._fit(view) if self.args.window_size else "-"
+        clicks += 1
+        self.check("tr_v_compare", ok, t1, f"same={nums.get('same')} mine_only={nums.get('mine_only')} "
+                                           f"orig_only={nums.get('orig_only')} virtual_shown={vs.shown if vs else '-'} "
+                                           f"virtual_picked={vs.picked if vs else '-'} virtual_rows={len(vrows)} "
+                                           f"virtual_line_shown={bool(vtext)} fit={fit} clicks=1(견주기)")
+        self._shot("_tr_virtual")
+        if not ok:
+            return None
+        # ---- 닫기 → 기록 줄: start · pick(가상) · pick(실제) · compare · end
+        t1 = time.perf_counter()
+        picked_texts = [data.texts[rows_src[v_row]], data.texts[rows_src[real_rows[0]]],
+                        data.nicks[rows_src[real_rows[0]]]]
+        view.btn_close.click()
+        self.pump(100)
+        clicks += 1
+        path = ts.session_path(dst, new_sids[0])
+        recs, summ = ts.read_valid(path)
+        kinds = [r["kind"] for r in recs]
+        want = [trc.K_START, trc.K_PICK, trc.K_PICK, trc.K_COMPARE, trc.K_END]
+        blob = open(path, "rb").read()
+        leaked = sum(1 for s in picked_texts if s and len(s) >= 2 and s.encode("utf-8") in blob)
+        leaked += blob.count(b'"v:')
+        vb = recs[1]["body"] if len(recs) > 1 else {}
+        cb = recs[3]["body"] if len(recs) > 3 else {}
+        eb = recs[-1]["body"] if recs else {}
+        ok = kinds == want and summ.get("invalid") == 0 and leaked == 0 and vb.get("line_id") == ln.line_id \
+            and vb.get("source") == "retrieved" and "chat_id" not in vb and cb.get("virtual_picked") == 1 \
+            and cb.get("same", 0) + cb.get("mine_only", 0) == 1 and eb.get("virtual_picks") == 1 and eb.get("picks") == 1
+        self.check("tr_v_log", ok, t1, f"lines={len(recs)} kinds_ok={kinds == want} invalid={summ.get('invalid')} "
+                                       f"virtual_pick_by_line_id={vb.get('line_id') == ln.line_id} "
+                                       f"compare_virtual_picked={cb.get('virtual_picked')} "
+                                       f"end_virtual_picks={eb.get('virtual_picks')} text_or_nick_in_file={leaked} "
+                                       f"back_to_workbench={self.win.training_view is None} clicks=1(닫기)")
+        if not ok:
+            return None
+        # ---- 시나리오 파일 바이트 검사: 실제 가림 닉네임·viewer_id·원 닉네임·user_id_hash·원 본문 0건
+        t1 = time.perf_counter()
+        sblob = open(scn.path, "rb").read()
+        masks, vids, texts = set(), set(), {}
+        for m in jsonl.read(os.path.join(dst, "chat", "messages.jsonl")).records:
+            if isinstance(m.get("nickname_masked"), str) and m["nickname_masked"]:
+                masks.add(m["nickname_masked"])
+            if isinstance(m.get("viewer_id"), str) and len(m["viewer_id"]) >= 4:
+                vids.add(m["viewer_id"])
+            if isinstance(m.get("chat_id"), str):
+                texts[m["chat_id"]] = m.get("text")
+        hit_mask = sum(1 for s in masks if json.dumps(s, ensure_ascii=False).encode("utf-8") in sblob)
+        hit_vid = sum(1 for s in vids if s.encode("utf-8") in sblob)
+        used = [c.get("from_chat_id") for c in scn.chats]
+        hit_text = sum(1 for c in used if isinstance(texts.get(c), str) and len(texts[c]) >= 4
+                       and json.dumps(texts[c], ensure_ascii=False).encode("utf-8") in sblob)
+        # 원 닉네임·user_id_hash 는 원본 보호 구역 파일을 읽기만 한다(사본에 옮기지 않음, 값은 찍지 않음)
+        ident = os.path.join(self.args.project, "chat", "protected", "identities.jsonl")
+        names, uids = set(), set()
+        if os.path.isfile(ident):
+            for r in jsonl.read(ident).records:
+                nk = r.get("nicknames")
+                for s in (nk if isinstance(nk, list) else [nk]):
+                    if isinstance(s, str) and len(s) >= 2:
+                        names.add(s)
+                for k in ("user_id_hash", "viewer_id"):
+                    if isinstance(r.get(k), str) and len(r[k]) >= 4:
+                        uids.add(r[k])
+        hit_name = sum(1 for s in names if s.encode("utf-8") in sblob)
+        hit_uid = sum(1 for s in uids if s.encode("utf-8") in sblob)
+        keys_bad = sum(sblob.count(k) for k in (b'"nickname', b'"viewer_id"', b'"user_id', b'"text"'))
+        total = hit_mask + hit_vid + hit_text + hit_name + hit_uid + keys_bad
+        names_n, uids_n, masks_n, vids_n = len(names), len(uids), len(masks), len(vids)
+        names.clear(), uids.clear(), masks.clear(), vids.clear(), texts.clear()
+        self.check("tr_v_privacy", total == 0 and names_n > 0, t1,
+                   f"bytes={len(sblob)} lines={len(scn.records)} hits: masked={hit_mask}/{masks_n} "
+                   f"viewer_id={hit_vid}/{vids_n} orig_text={hit_text}/{len(used)} nickname={hit_name}/{names_n} "
+                   f"id_hash={hit_uid}/{uids_n} banned_keys={keys_bad} total={total}")
+        return clicks if total == 0 and names_n > 0 else None
 
     def _resize(self, spec: str) -> None:
         """--window-size '1366x768': 메인 창 바깥 크기(테두리 포함)를 그 크기로 맞춘다(노트북 화면 확인, 11 4-2 의 2)."""

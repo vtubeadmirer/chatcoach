@@ -33,9 +33,17 @@
 훈련 메뉴 (F, 08 D-01·D-16·D-18 6·7·8, 18 6-2):
 - [훈련 → 스트리머 훈련] 한 번으로 app/ui/trainer_view 를 작업대 위에 쌓아 연다(고르는 창 없음). 기준은
   app.reference_set.training_availability(사람 최종 세트, 없으면 labels\\manual-*.csv). 기준이 없거나 시범 프로젝트
-  (잠기기 전)·라벨링/출처 판정 세션·영상 없음이면 메뉴를 끄고 메뉴 안에 까닭 한 줄. 기록은 app.training_store(training\\),
+  (잠기기 전)·영상 없음이면 메뉴를 끄고 메뉴 안에 까닭 한 줄. 기록은 app.training_store(training\\),
   start 줄이 곧 노출 기록이다(app.core.exposure 규칙 5 — 그 뒤 이 프로젝트의 라벨링 세션은 대표값에서 빠진다).
   [닫기] 는 training.end 를 쓰고 작업대로 돌아간다. 작업대를 닫을 때도 먼저 닫는다.
+- 라벨링(1차·재라벨)·출처 판정 세션에서는 같은 메뉴 한 번이 '보기 전용으로 다시 열고 훈련'(D-19 3): 저장 안 한 구간
+  변경만 묻고, 세션을 닫아 잠금을 풀고, 세션 화면 없이 보기 전용으로 다시 연 뒤 채팅을 읽으면 훈련을 연다
+  (reopen_view_only_and_train). 훈련 화면을 라벨링 세션 위에 쌓지는 않는다(06 7장 블라인드).
+- 훈련 중에는 분석 메뉴·AI 비교 보고서·일치도 보고서를 끈다(D-18 6·8, D-19 4).
+- 가상 채팅 섞기(H-4, 20 5장, D-19 2): 보기 전용에서 이 구간의 가장 새 시나리오(scenarios\\, app.scenario_mix)가 있으면
+  [훈련 → 가상 채팅 섞기] 가 기본으로 켜져 '스트리머 훈련' 한 번에 섞인다(끄기 1클릭). 없으면 그 자리의
+  [훈련 → 가상 채팅 만들기] 한 번이 엔진 도구(tools/make_scenario.py, retrieved 만, AI 없음)를 따로 프로세스로 워커에서
+  돌린다. 라벨링·출처 판정 세션에서는 scenarios\\ 를 열지 않고 두 항목을 숨긴다(20 1장 4번).
 
 운영 메뉴 (07 M4):
 - [도움말 → 이전 버전으로 되돌리기…] (04 6-10): updater.rollback_status 로 켜고 끈다. 이번 실행이 _backup 을 지울 차례
@@ -85,6 +93,12 @@ PATH_ACK_GROUP = "path_ack"                 # 앱·데이터·백업 폴더 경�
 MANUAL_GUIDE =("수동 업데이트: 앱을 끄고 릴리스 페이지에서 전체 zip 을 받아 새 폴더에 푼 뒤, 옛 폴더의 data\\ 를 "
                 "새 폴더의 ChatCoach\\ 안으로 복사합니다 (docs/install.md, 04 8장).")
 TOPICS_SUFFIX = ".topics.json"
+# '보기 전용으로 다시 열고 훈련'(D-19 3): 라벨링 세션에서 메뉴를 누르면 세션을 닫고 보기 전용으로 다시 연 뒤, 채팅·영상
+# 확인이 끝나면 훈련을 연다. 기다리는 간격·상한(채팅 읽기는 보통 1초 안팎)
+TRAINING_REOPEN_POLL_MS = 150
+TRAINING_REOPEN_WAIT_S = 120
+TRAINING_REOPEN_TIP = ("이 세션을 닫고(저장 안 한 변경은 묻습니다) 보기 전용으로 다시 연 뒤 훈련을 엽니다. "
+                       "훈련을 열면 이 프로젝트의 잠기지 않은 라벨링 세션은 대표값에서 빠집니다")
 
 
 def topics_sibling(path: str | None) -> str | None:
@@ -649,6 +663,17 @@ class MainWindow(QMainWindow):
         self.a_streamer_training.setToolTip(tr("소리 끈 다시보기에서 읽고 싶은 채팅을 한 번씩 누르고, 원래 반응과 견줍니다"))
         self.a_streamer_training.triggered.connect(self._on_streamer_training)
         self.m_training.addAction(self.a_streamer_training)
+        # 가상 채팅 섞기(H-4, 20 5-2·11-9, D-16): 이 구간의 시나리오가 있으면 기본으로 켜져 '스트리머 훈련' 한 번에 섞인다
+        # (끄기 1클릭, 프로젝트마다 기억 — 이 실행 동안만). 없으면 그 자리에 '가상 채팅 만들기' 한 번(엔진 도구를 워커로)
+        self.a_mix_virtual = QAction(tr("가상 채팅 섞기(&V)"), self)
+        self.a_mix_virtual.setCheckable(True)
+        self.a_mix_virtual.setVisible(False)
+        self.a_mix_virtual.toggled.connect(self._on_mix_virtual_toggled)
+        self.m_training.addAction(self.a_mix_virtual)
+        self.a_make_virtual = QAction(tr("가상 채팅 만들기(&M)"), self)
+        self.a_make_virtual.setVisible(False)
+        self.a_make_virtual.triggered.connect(self._on_make_virtual)
+        self.m_training.addAction(self.a_make_virtual)
         self.a_training_reason = QAction("", self)      # 꺼졌을 때 까닭 한 줄(누를 수 없음)
         self.a_training_reason.setEnabled(False)
         self.a_training_reason.setVisible(False)
@@ -657,9 +682,138 @@ class MainWindow(QMainWindow):
         self.training_view = None
         self.training_log = None
         self._training_cache = None       # (프로젝트 폴더, reference_set.Availability)
+        self._reopen_view_only = False    # 다시 여는 중: choose_session 이 세션 화면 없이 보기 전용(None)을 돌려준다
+        self._pending_training = None     # (프로젝트 폴더, show): 다시 연 작업대가 채팅을 읽으면 훈련을 연다
+        self._pending_deadline = 0.0
+        self._training_labeler_hint = None
+        self._scenario_cache = None       # (프로젝트 폴더, 구간, scenario_store.Scenario 또는 None)
+        self._mix_off_roots: set[str] = set()   # 사용자가 '가상 채팅 섞기' 를 끈 프로젝트(이 실행 동안)
+        self._mix_syncing = False
+        self.scenario_tool_args: tuple[str, ...] = ()   # '가상 채팅 만들기' 도구에 더 넘길 인자(스모크의 시험 문턱)
+        self.scenario_runner = None       # 시험: run_make 대신 부를 함수 (cmd, cancelled) -> dict
 
     def _on_streamer_training(self, *_a) -> None:
         self.streamer_training()
+
+    def _on_make_virtual(self, *_a) -> None:
+        self.make_virtual_chat()
+
+    def _on_mix_virtual_toggled(self, on: bool) -> None:
+        if self._mix_syncing:
+            return
+        root = self._current_project_root()
+        if not root:
+            return
+        if on:
+            self._mix_off_roots.discard(root)
+        else:
+            self._mix_off_roots.add(root)
+
+    # ---- 가상 채팅 (H-4, 20 5장)
+    @staticmethod
+    def _training_range(av) -> tuple[int, int] | None:
+        """훈련 화면이 쓸 구간(trainer_view.start 와 같은 규칙: 기준의 첫 구간)."""
+        ref = getattr(av, "reference", None) if av is not None else None
+        rng = getattr(ref, "first_range", None) if ref is not None else None
+        if not rng or len(rng) != 2 or int(rng[1]) <= int(rng[0]):
+            return None
+        return int(rng[0]), int(rng[1])
+
+    def invalidate_scenario_cache(self) -> None:
+        self._scenario_cache = None
+
+    def training_scenario(self, root: str, av):
+        """이 프로젝트·훈련 구간의 가장 새 시나리오(없으면 None). 보기 전용에서만 부른다 — 라벨링·출처 판정 세션은
+        scenarios\\ 를 열지 않는다(20 1장 4번, 06 7장). 시범 판단은 scenario_store 가 한다. 프로젝트·구간마다 한 번 읽어 둔다."""
+        if self.training_needs_reopen():
+            return None
+        rng = self._training_range(av)
+        if rng is None:
+            return None
+        c = self._scenario_cache
+        if c is not None and c[0] == root and c[1] == rng:
+            return c[2]
+        from .. import scenario_mix
+        scn, counts = scenario_mix.find_scenario(root, rng)
+        if scn is not None and scenario_mix.virtual_count(scn) <= 0:
+            scn = None
+        self._scenario_cache = (root, rng, scn)
+        LOG.info("가상 채팅 시나리오: 파일 %s · 맞음 %s · 깨짐 %s · 다른 구간 %s", counts.get("files", 0),
+                 counts.get("ok", 0), counts.get("broken", 0), counts.get("other_range", 0))
+        return scn
+
+    def _update_virtual_actions(self, why: str | None, av) -> None:
+        """'가상 채팅 섞기'·'가상 채팅 만들기' 를 켜고 끈다. 훈련이 막혔거나 라벨링 세션이면 둘 다 숨긴다."""
+        from .. import scenario_mix
+        scn = None
+        show = why is None and not self.training_needs_reopen() and av is not None
+        if show:
+            scn = self.training_scenario(self._current_project_root() or "", av)
+        root = self._current_project_root() or ""
+        self._mix_syncing = True
+        try:
+            self.a_mix_virtual.setVisible(bool(show and scn is not None))
+            if scn is not None:
+                n = scenario_mix.virtual_count(scn)
+                self.a_mix_virtual.setText(tr("가상 채팅 섞기 ({0}줄)(&V)").format(n))
+                self.a_mix_virtual.setToolTip(tr("가져온 채팅을 '가져옴' 표시와 함께 섞습니다 — 견주기 점수에는 넣지 않습니다"))
+                self.a_mix_virtual.setEnabled(True)
+                self.a_mix_virtual.setChecked(root not in self._mix_off_roots)
+        finally:
+            self._mix_syncing = False
+        make = bool(show and scn is None)
+        self.a_make_virtual.setVisible(make)
+        if make:
+            ok_tool = scenario_mix.tool_available() or self.scenario_runner is not None
+            self.a_make_virtual.setEnabled(ok_tool)
+            self.a_make_virtual.setToolTip(
+                tr("같은 방송의 훈련 구간 밖 채팅을 골라 채팅이 드문 곳에 섞을 시나리오를 만듭니다 (AI 없음)")
+                if ok_tool else tr(scenario_mix.REASON_NO_TOOL))
+
+    def mix_virtual_wanted(self, root: str) -> bool:
+        return root not in self._mix_off_roots
+
+    def make_virtual_chat(self, *, extra_args=None):
+        """'훈련 → 가상 채팅 만들기' 한 번(20 11-9): 엔진 도구(tools/make_scenario.py, retrieved 만)를 따로 프로세스로,
+        UI 스레드 밖(JobWorker)에서 돌린다. 끝나면 상태 줄에 숫자 한 줄, 다음 '스트리머 훈련' 에 섞인다(기본 켬).
+        훈련을 열지는 않는다(노출이 생기지 않게). 결과 dict(도구 출력, 숫자·코드만) 또는 None(막힘)."""
+        from .. import scenario_mix
+        from ..workers import JobWorker
+        why, av = self.training_block_reason(compute=True)
+        if why is None and self.training_needs_reopen():
+            why = tr("보기 전용으로 연 프로젝트에서 만듭니다 — 먼저 '스트리머 훈련' 으로 다시 여세요")
+        rng = self._training_range(av) if why is None else None
+        if why is None and rng is None:
+            why = tr("훈련 구간을 정하지 못했습니다")
+        if why:
+            self.statusBar().showMessage(why, 6000)
+            return None
+        root = self.workbench.project.root
+        args = tuple(self.scenario_tool_args if extra_args is None else extra_args)
+        runner = self.scenario_runner
+        cmd = scenario_mix.make_command(root, rng, extra_args=args)
+        if cmd is None and runner is None:
+            self.statusBar().showMessage(tr(scenario_mix.REASON_NO_TOOL), 6000)
+            return None
+        box: dict = {}
+
+        def job(ctx):
+            fn = runner or (lambda c, cancelled: scenario_mix.run_make(c, cancelled=cancelled))
+            box["res"] = fn(cmd, ctx.cancelled)
+        w = JobWorker.single("make_scenario", job, name="가상 채팅 만들기", parent=self)
+        self.run_job_modal(w, title=tr("가상 채팅 만들기"), label=tr("같은 방송의 다른 구간에서 채팅을 고르는 중…"))
+        w.deleteLater()
+        res = box.get("res") if w.outcome == "done" else {"error": w.outcome or "failed"}
+        self.invalidate_scenario_cache()
+        qmr = next((int(args[i + 1]) for i, a in enumerate(args[:-1]) if a == "--quiet-max-real"), 2)
+        ok, msg = scenario_mix.describe(res or {}, quiet_max_real=qmr)
+        if ok:
+            self._mix_off_roots.discard(root)          # 만들었으면 섞기를 켠다(기본)
+        LOG.info("가상 채팅 만들기: rc=%s 결과=%s 줄=%s %sms", (res or {}).get("rc"),
+                 "ok" if ok else (res or {}).get("error") or (res or {}).get("reason") or "-",
+                 ((res or {}).get("counts") or {}).get("retrieved", 0), (res or {}).get("elapsed_ms", 0))
+        self.statusBar().showMessage(tr(msg), 10000)
+        return res
 
     def _training_labeler(self) -> str | None:
         """훈련 기록의 labeler_id: 세션의 라벨러 → 마지막에 고른 라벨러 → project.json 의 created_by. 묻지 않는다(D-16)."""
@@ -668,6 +822,7 @@ class MainWindow(QMainWindow):
         cands = []
         if wb is not None and wb.session is not None:
             cands.append(getattr(wb, "labeler_id", None))
+        cands.append(getattr(self, "_training_labeler_hint", None))   # 다시 열기 전 라벨링 세션의 라벨러(D-19 3)
         cands.append(self.settings.value(LAST_LABELER_KEY, ""))
         proj = getattr(wb, "project", None) if wb is not None else None
         cands.append(((proj.data or {}) if proj is not None else {}).get("created_by"))
@@ -696,7 +851,6 @@ class MainWindow(QMainWindow):
 
     def training_block_reason(self, *, compute: bool = True) -> tuple[str | None, object]:
         """(막힌 까닭 한 줄 또는 None, Availability 또는 None). compute=False 면 기준을 새로 읽지 않는다(캐시만)."""
-        from ..core import visibility as vis
         wb = self.workbench
         proj = getattr(wb, "project", None) if wb is not None else None
         if proj is None or proj.data is None:
@@ -705,15 +859,23 @@ class MainWindow(QMainWindow):
             return tr("훈련이 이미 열려 있습니다"), None
         if self.jobs_busy():
             return tr("작업이 도는 중입니다 — 끝난 뒤에 쓸 수 있습니다"), None
-        # 훈련은 견주기에서 사람 라벨(정답)을 보인다 — 라벨링·출처 판정 세션 중에는 열지 않는다(06 7장, D-18 7)
-        if wb.session is not None and (wb.session_kind in vis.LABELING_SESSIONS or wb.session_kind == vis.ORIGIN_REVIEW):
-            return tr("라벨링 세션 중에는 훈련을 열지 않습니다 — 보기 전용으로 여세요 (훈련은 정답을 보입니다)"), None
+        # 훈련은 견주기에서 사람 라벨(정답)을 보인다 — 라벨링·출처 판정 세션 위에는 열지 않는다(06 7장, D-18 7).
+        # 대신 메뉴 한 번으로 '보기 전용으로 다시 열고 훈련' 한다(D-19 3, training_needs_reopen). 그 전에 막힐 까닭
+        # (시범 잠금·기준 없음·영상 없음 등)은 여기서 먼저 걸러, 다시 열었는데 훈련이 안 열리는 일이 없게 한다
         root = proj.root
-        if not compute and (self._training_cache is None or self._training_cache[0] != root):
-            return None, None
-        av = self.training_availability(root)
-        if not av.enabled:
-            return tr(av.reason or "라벨이 잠긴 구간이 없습니다"), av
+        av = None
+        if self.training_needs_reopen():
+            # 라벨링 세션은 다른 세션 라벨·손라벨을 디스크에서 열지 않는다(06 7-3) — 기준(최종 세트·손라벨)은 다시 연 뒤
+            # 보기 전용에서 읽는다. 여기서는 폴더 이름만 보고(시범·잠금 파일·손라벨 파일 이름) 막힐 것을 먼저 거른다
+            why = self._labeling_training_precheck(root)
+            if why:
+                return why, None
+        else:
+            if not compute and (self._training_cache is None or self._training_cache[0] != root):
+                return None, None
+            av = self.training_availability(root)
+            if not av.enabled:
+                return tr(av.reason or "라벨이 잠긴 구간이 없습니다"), av
         if not getattr(wb, "media_path", None):
             return tr("영상을 먼저 연결하세요 — 훈련은 소리 끈 다시보기로 합니다"), av
         if "chat" in (getattr(wb, "_jobs", None) or {}) or not getattr(wb.chat_data, "count", 0):
@@ -722,14 +884,108 @@ class MainWindow(QMainWindow):
             return tr("라벨러를 한 번 고른 뒤에 열 수 있습니다 (세션 화면)"), av
         return None, av
 
+    @staticmethod
+    def _labeling_training_precheck(root: str) -> str | None:
+        """라벨링 세션에서 '다시 열고 훈련' 전에 막힐 까닭(없으면 None). 라벨·손라벨 파일을 열지 않는다(06 7-3):
+        - 시범 프로젝트(폴더 이름·시범 기록 freeze.json/setup.json)면 끈다 — 잠김 판정(계획·매니페스트 열기)도 하지 않는다.
+          시범 세션이 모두 잠긴 뒤에는 보기 전용으로 열어 훈련한다(D-18 7, D-19 3).
+        - 잠긴 세션(locks\\<id>.json)도 손라벨 파일(labels\\manual-*.csv) 이름도 없으면 기준이 없다."""
+        from .. import reference_set as rs
+        try:
+            pilot = rs.is_pilot_project(root)
+        except Exception:  # noqa: BLE001 — 판단이 안 되면 시범으로 본다(블라인드 쪽으로 안전하게)
+            pilot = True
+        if pilot:
+            return tr("시범 프로젝트는 라벨링 세션에서 훈련을 열지 않습니다 — 시범 세션이 모두 잠긴 뒤 보기 전용으로 "
+                      "여세요 (D-18 7)")
+        try:
+            locks = [n for n in os.listdir(os.path.join(root, "locks"))
+                     if n.lower().endswith(".json")]
+        except OSError:
+            locks = []
+        if not locks and not rs.manual_csv_files(root):
+            return tr(rs.REASON_NO_REFERENCE)
+        return None
+
+    def training_needs_reopen(self) -> bool:
+        """지금 작업대가 라벨링(1차·재라벨)·출처 판정 세션인가 — 그러면 훈련은 '보기 전용으로 다시 열고 훈련'(D-19 3)."""
+        from ..core import visibility as vis
+        wb = self.workbench
+        if wb is None or wb.session is None:
+            return False
+        return wb.session_kind in vis.LABELING_SESSIONS or wb.session_kind == vis.ORIGIN_REVIEW
+
     def update_training_actions(self, *_a) -> None:
-        """훈련 메뉴를 펼 때: 켜고 끄고, 꺼졌으면 메뉴 안에 까닭 한 줄."""
+        """훈련 메뉴를 펼 때: 켜고 끄고, 꺼졌으면 메뉴 안에 까닭 한 줄. 라벨링 세션이면 풍선에 다시 열기를 알린다."""
         why, _av = self.training_block_reason(compute=True)
         self.a_streamer_training.setEnabled(why is None)
-        self.a_streamer_training.setToolTip(why or tr("소리 끈 다시보기에서 읽고 싶은 채팅을 한 번씩 누르고, 원래 반응과 "
-                                                      "견줍니다"))
+        self._update_virtual_actions(why, _av)
+        tip = tr("소리 끈 다시보기에서 읽고 싶은 채팅을 한 번씩 누르고, 원래 반응과 견줍니다")
+        reopen = why is None and self.training_needs_reopen()
+        if reopen:
+            tip = tr(TRAINING_REOPEN_TIP)
+        self.a_streamer_training.setText(tr("스트리머 훈련 — 보기 전용으로 다시 열기(&S)") if reopen
+                                         else tr("스트리머 훈련(&S)"))
+        self.a_streamer_training.setToolTip(why or tip)
         self.a_training_reason.setText(why or "")
         self.a_training_reason.setVisible(bool(why))
+
+    # ---- 보기 전용으로 다시 열고 훈련 (D-19 3, 19 5-3 의 1번)
+    def reopen_view_only_and_train(self, *, show: bool = True) -> bool:
+        """라벨링·출처 판정 세션에서 '훈련 → 스트리머 훈련' 한 번: 저장 안 한 구간 변경이 있으면 묻고(저장·버리기·취소),
+        세션을 닫아 잠금을 풀고, 같은 프로젝트를 세션 화면 없이 보기 전용으로 다시 연 뒤, 채팅·영상 확인이 끝나면 훈련을
+        연다(_try_pending_training). 사람 클릭: 저장 안 한 변경이 없으면 0(메뉴 2 뿐), 있으면 묻는 창 1.
+        다시 열기를 시작했으면 True(훈련은 조금 뒤 열린다), 취소·실패면 False. 블라인드 규칙은 training_block_reason 이
+        먼저 본다(시범은 잠기기 전 금지)."""
+        wb = self.workbench
+        if wb is None or not self.training_needs_reopen():
+            return False
+        if not wb.resolve_unsaved(allow_cancel=True):        # '취소' 나 반응 편집 중이면 그대로 머문다
+            self.statusBar().showMessage(tr("저장하지 않은 변경이 있어 훈련을 열지 않았습니다"), 6000)
+            return False
+        root = wb.project.root
+        hint = getattr(wb, "labeler_id", None)
+        from .. import training_store as ts
+        self._training_labeler_hint = hint if isinstance(hint, str) and ts.LABELER_ID_RE.match(hint) else None
+        LOG.info("훈련: 라벨링 세션을 닫고 보기 전용으로 다시 엽니다")
+        self._close_workbench("user")                        # session.close 줄·잠금 풀기(저장 안 한 변경은 위에서 처리)
+        self._reopen_view_only = True
+        try:
+            out = self.project_view.open_path(root)
+        finally:
+            self._reopen_view_only = False
+        if out is None or not out.ok or self.workbench is None:
+            self.show_home()
+            self.statusBar().showMessage(tr("보기 전용으로 다시 열지 못했습니다"), 6000)
+            return False
+        self._pending_training = (root, show)
+        self._pending_deadline = datetime.now().timestamp() + TRAINING_REOPEN_WAIT_S
+        self.statusBar().showMessage(tr("보기 전용으로 다시 열었습니다 — 채팅을 읽으면 훈련이 열립니다"), 6000)
+        QTimer.singleShot(TRAINING_REOPEN_POLL_MS, self._try_pending_training)
+        return True
+
+    def _try_pending_training(self):
+        """다시 연 작업대가 채팅·영상 확인을 마치면 훈련을 연다. 아직이면 조금 뒤 다시 본다(최대 TRAINING_REOPEN_WAIT_S).
+        다른 프로젝트로 바뀌었거나 닫혔으면 그만둔다. 연 TrainerView 또는 None."""
+        pend = getattr(self, "_pending_training", None)
+        if pend is None:
+            return None
+        root, show = pend
+        wb = self.workbench
+        proj = getattr(wb, "project", None) if wb is not None else None
+        if proj is None or proj.root != root or wb.session is not None:
+            self._pending_training = None
+            return None
+        waiting = {"chat", "media_check"} & set(wb.busy_job_keys() if hasattr(wb, "busy_job_keys") else ())
+        if waiting:
+            if datetime.now().timestamp() < self._pending_deadline:
+                QTimer.singleShot(TRAINING_REOPEN_POLL_MS, self._try_pending_training)
+            else:
+                self._pending_training = None
+                self.statusBar().showMessage(tr("채팅을 읽는 데 오래 걸려 훈련을 열지 않았습니다 — 다시 눌러 주세요"), 8000)
+            return None
+        self._pending_training = None
+        return self.streamer_training(show=show)
 
     @staticmethod
     def _fresh_chat_data(cd):
@@ -753,6 +1009,10 @@ class MainWindow(QMainWindow):
         why, av = self.training_block_reason(compute=True)
         if why:
             self.statusBar().showMessage(why, 6000)
+            return None
+        if self.training_needs_reopen():
+            # 라벨링·출처 판정 세션 위에는 열지 않는다 — 보기 전용으로 다시 열고 훈련(D-19 3). 훈련은 조금 뒤 열린다
+            self.reopen_view_only_and_train(show=show)
             return None
         from .. import training_store as ts
         from .trainer_view import TrainerView
@@ -778,6 +1038,21 @@ class MainWindow(QMainWindow):
         self._close_analysis_windows()
         fn = getattr(wb.chat, "chat_data", None)
         chat = self._fresh_chat_data(fn()) if callable(fn) else list(wb.chat_data.records)
+        # 가상 채팅 섞기(H-4): 이 구간의 시나리오가 있고 끄지 않았으면 섞는다. 섞기에는 실제 채팅 줄(dict)이 필요해
+        # messages.jsonl 을 한 번 더 읽는다(읽기만) — retrieved 본문(같은 방송의 구간 밖)도 여기서 찾는다
+        scenario = None
+        scn = self.training_scenario(root, av) if self.mix_virtual_wanted(root) else None
+        if scn is not None:
+            from .. import scenario_mix
+            try:
+                real = scenario_mix.load_messages(root)
+            except OSError as e:
+                LOG.warning("가상 채팅 섞기: 채팅 읽기 실패 %s", type(e).__name__)
+                real = []
+            if real:
+                chat = real
+                scenario = {"records": scn.records, "scenario_id": scn.scenario_id, "scenario_sha256": scn.sha256,
+                            "resolve": scenario_mix.make_resolver(root, wb.project.project_id, real)}
         # 처음부터 이 창의 자식으로 만든다(작업대와 같은 길) — 최상위 창으로 만들었다가 옮기면 mpv 창 핸들(wid)이 따라오지
         # 않아 영상이 검게 남는다(10 5-3 의 8 '플레이어는 옮기지 않음')
         view = TrainerView(self)
@@ -788,7 +1063,7 @@ class MainWindow(QMainWindow):
                         viewer_no=dict(wb.chat_data.viewer_no or {}), duration_ms=int(getattr(wb, "_vod_duration", 0)),
                         density=list(wb.chat_data.density or []), density_bucket_ms=DENSITY_BUCKET_MS,
                         project_name=os.path.basename(root), pilot_locked=bool(av.pilot and av.enabled),
-                        log=log, project_id=wb.project.project_id)
+                        log=log, project_id=wb.project.project_id, scenario=scenario)
         self.invalidate_training_cache()            # start 줄이 생겼으면 노출이 바뀌었다(다음 판단은 새로)
         if not ok:
             reason = view.blocked_label.text()
@@ -803,12 +1078,13 @@ class MainWindow(QMainWindow):
         view.messageShown.connect(self._on_training_message)
         self.training_view, self.training_log = view, log
         self._apply_analysis_reasons(self.analysis_block_reasons(read_seal=False))   # 분석·AI 보고서 끔
+        self.update_session_actions()               # 일치도 보고서도 끔(D-19 4)
         if hasattr(wb, "detach_status_bar"):
             wb.detach_status_bar()          # 작업대의 VOD·파일 위치 칩이 훈련 화면 아래에 남아 헷갈리지 않게(닫을 때 다시 붙임)
         if show:
             view.setFocus()
-        LOG.info("스트리머 훈련 열기: 기준 %s %d건", av.reference.source if av.reference else "-",
-                 av.reference.count if av.reference else 0)
+        LOG.info("스트리머 훈련 열기: 기준 %s %d건 · 가상 채팅 %d줄", av.reference.source if av.reference else "-",
+                 av.reference.count if av.reference else 0, view.virtual_line_count())
         return view
 
     def _on_training_message(self, text: str) -> None:
@@ -833,8 +1109,9 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(wb)
             wb.setFocus()
         self.invalidate_training_cache()
-        # 꺼진 메뉴 막대 항목은 펼쳐지지 않아 aboutToShow 로 다시 켜지지 않는다 — 여기서 다시 판단한다
+        # 꺼진 메뉴 막대 항목은 펼쳐지지 않아 aboutToShow 로 다시 켜지지 않는다 — 여기서 다시 판단한다(일치도 보고서도)
         self._apply_analysis_reasons(self.analysis_block_reasons(read_seal=False))
+        self.update_session_actions()
 
     def _close_analysis_windows(self) -> None:
         """'엔진과 나란히 보기'·'방송 요약' 창을 닫는다(훈련을 열 때). 여러 번 불러도 된다."""
@@ -1252,6 +1529,9 @@ class MainWindow(QMainWindow):
         wb = self.workbench
         if wb is None or getattr(wb, "project", None) is None:
             return tr("프로젝트를 먼저 여세요")
+        if getattr(self, "training_view", None) is not None:
+            # 보고서는 채팅 단위로 사람 라벨(정답)을 보인다 — 훈련 중에는 끈다(D-19 4, 19 5-2 의 4번). 사람 클릭 0
+            return tr("훈련 중에는 쓰지 않습니다 — 훈련을 닫은 뒤에 쓸 수 있습니다")
         kind = wb.session_kind if wb.session is not None else None
         why = ar.reader_block_reason(kind)
         if why:
@@ -1502,7 +1782,10 @@ class MainWindow(QMainWindow):
 
     def choose_session(self, outcome):
         """세션 선택 화면(08 D-09 1). 고른 SessionContext, 보기 전용·취소면 None. session_chooser 가 있으면 그것을 쓴다.
-        시작할 때 이어서 열기(auto_resume) 중이면 먼저 auto_resume_session 으로 화면 없이 고를 수 있는지 본다."""
+        시작할 때 이어서 열기(auto_resume) 중이면 먼저 auto_resume_session 으로 화면 없이 고를 수 있는지 본다.
+        '보기 전용으로 다시 열고 훈련'(D-19 3) 중이면 묻지 않고 보기 전용(None)."""
+        if getattr(self, "_reopen_view_only", False):
+            return None
         if self._auto_resume:
             ctx = self.auto_resume_session(outcome)
             if ctx is not None:

@@ -545,3 +545,269 @@ def test_compare_view_empty(qapp):
     cv = tcv.TrainCompareView()
     assert cv.table.rowCount() == 0 and not cv.next_btn.isEnabled()
     assert cv.next_orig_only() is False and cv.activate_row(0) is False
+    assert cv.virtual_summary() is None and cv.virtual_label.isHidden()
+
+
+# ---------------------------------------------------------------------------- 가상 채팅 섞기 (H-4, 20 5장)
+V_TEXT = "합성가상본문"
+# 합성 시나리오 줄 (mix 가 돌려줄 가상 줄 모양). 이름은 시나리오의 가림 이름 또는 없음(→ 가명)
+V_LINES = [
+    {"source": "retrieved", "line_id": "s0001", "show_vod_ms": 6_500, "text": V_TEXT + " 가", "display_mask": "하**",
+     "nickname_masked": NICK_MARK, "viewer_id": "v001"},          # 원 채팅 이름·viewer_id 는 버려야 한다
+    {"source": "generated", "line_id": "s0002", "show_vod_ms": 9_500, "text": V_TEXT + " {:zz_test_01:}",
+     "display_mask": "두*"},
+    {"source": "generated", "line_id": "s0003", "show_vod_ms": 20_500, "text": V_TEXT + " 다"},
+    {"source": "retrieved", "line_id": "s0004", "show_vod_ms": 27_000, "text": V_TEXT + " 라", "display_mask": "세**"},
+]
+MIX_CALLS = []
+
+
+def fake_mix(real, scenario):
+    """core.scenario 의 섞기와 같은 인자(real, scenario) — 실제 줄 + 가상 줄을 시각 순으로."""
+    MIX_CALLS.append((len(real), scenario))
+    return sorted([*real, *[dict(x) for x in V_LINES]], key=lambda r: r.get("t_ms", r.get("show_vod_ms")))
+
+
+SCEN = {"scenario_id": "SC-20261022-abcd", "scenario_sha256": "b" * 64}
+
+
+def make_v(qapp, *, mix=fake_mix, scenario=SCEN, compare=fake_compare, **kw):
+    v = tv.TrainerView(parts={"player": FakePlayer}, compare_fn=compare, mix_fn=mix,
+                       clock=lambda: "2026-10-22T00:00:00.000Z")
+    kw.setdefault("reference_hash", "h" * 64)
+    ok = v.start(chat=messages(), segment=SEG, reference=REF, media_path="synthetic.mp4", timemap=Shift(),
+                 duration_ms=30_000, scenario=scenario, **kw)
+    return v, ok
+
+
+def _nick_of(v, chat_id):
+    d = v.chat.chat_data()
+    return d.nicks[d.index_of(chat_id)]
+
+
+def test_virtual_mixed_into_chat_with_marks(qapp):
+    v, ok = make_v(qapp)
+    assert ok and v.virtual_line_count() == 4 and v.chat.total_count() == 34
+    assert _nick_of(v, "v:s0001") == "하** · 가져옴" and _nick_of(v, "v:s0002") == "두* · 생성"
+    assert _nick_of(v, "v:s0003") == "시청자3 · 생성"             # 가림 이름이 없으면 가명 (가상 이름 차례 3)
+    d = v.chat.chat_data()
+    assert all(d.vnos[d.index_of(f"v:s000{i}")] > 0 for i in range(1, 5))   # 가명 번호 (실제 viewer_id 아님)
+    assert NICK_MARK not in [d.nicks[d.index_of(f"v:s000{i}")] for i in range(1, 5)]
+    ev = v.events[0]
+    assert ev["scenario_id"] == SCEN["scenario_id"] and ev["scenario_sha256"] == SCEN["scenario_sha256"]
+    assert ev["virtual_lines"] == 4 and ev["source"] == "replay"
+    # 흐르는 채팅: 아직 안 온 가상 채팅도 보이지 않는다
+    v.player.at(7_000 - 2000)
+    vis = {v.chat.model.data(v.chat.model.index(r, 0), Qt.UserRole) for r in range(v.chat.row_count())}
+    assert "v:s0001" in vis and "v:s0002" not in vis
+
+
+def test_virtual_marks_hidden_option(qapp):
+    v, ok = make_v(qapp, show_virtual_marks=False)
+    assert ok and _nick_of(v, "v:s0001") == "하**" and _nick_of(v, "v:s0002") == "두*"
+
+
+def test_virtual_pick_counts_separately(qapp):
+    # 같은 실제 고르기를 시나리오 없이 / 있이 — 견주기 점수는 같아야 한다 (20 10장 H-4)
+    base, _ = make(qapp)
+    base.player.at(7_000 - 2000)
+    base.toggle_pick(cid(6))
+    base.player.at(10_000 - 2000)
+    base.toggle_pick(cid(9))
+    base.player.at(SEG[1] - 2000)
+    base_nums = base.compare_view.summary()
+    base_last = dict(CALLS[-1])
+
+    v, _ = make_v(qapp)
+    v.player.at(7_000 - 2000)
+    assert v.toggle_pick(cid(6)) == "pick"
+    assert v.toggle_pick("v:s0001") == "pick"                         # 가상 채팅 한 번 누름 = 고름
+    assert v.toggle_pick("v:s0002") is None and "아직" in v.msg.text()
+    v.player.at(10_000 - 2000)
+    assert v.toggle_pick(cid(9)) == "pick"
+    assert v.toggle_pick("v:s0002") == "pick"
+    assert v.toggle_pick("v:s0002") == "unpick"                       # 다시 누름 = 취소
+    assert v.toggle_pick("v:s0002") == "pick"
+    assert v.toggle_pick("v:s0004") is None and "구간 밖" in v.msg.text()
+    assert v.toggle_pick("v:nope") is None
+    assert v.pick_count() == 4 and v.count_label.text() == "고른 수 4"
+    assert v.chat.label_marks() == {cid(6): tv.PICK_MARK, cid(9): tv.PICK_MARK, "v:s0001": tv.PICK_MARK,
+                                    "v:s0002": tv.PICK_MARK}
+    assert v.picks() == [{"chat_id": cid(6), "picked_vod_ms": 7_000}, {"chat_id": cid(9), "picked_vod_ms": 10_000}]
+    assert v.virtual_picks() == [{"line_id": "s0001", "source": "retrieved", "picked_vod_ms": 7_000},
+                                 {"line_id": "s0002", "source": "generated", "picked_vod_ms": 10_000}]
+    vp = [e for e in v.events if e["kind"] == "training.pick" and "line_id" in e]
+    assert vp[0] == {"kind": "training.pick", "line_id": "s0001", "picked_vod_ms": 7_000,
+                     "wall_at": "2026-10-22T00:00:00.000Z", "source": "retrieved"}
+    assert all("chat_id" not in e for e in vp)
+    un = [e for e in v.events if e["kind"] == "training.unpick"]
+    assert un == [{"kind": "training.unpick", "line_id": "s0002", "source": "generated", "vod_ms": 10_000,
+                   "wall_at": "2026-10-22T00:00:00.000Z"}]
+    v.player.at(SEG[1] - 2000)                                           # 구간 끝 → 견주기
+    assert v.state() == "compare"
+    # 점수 계산에는 실제 고르기만 넘어간다 → 시나리오 없을 때와 같은 숫자
+    assert CALLS[-1]["picks"] == base_last["picks"] == {cid(6): 7_000, cid(9): 10_000}
+    assert v.compare_view.summary() == base_nums
+    vs = v.compare_view.virtual_summary()
+    assert vs["shown"] == 3 and vs["picked"] == 2                       # s0004 는 구간 밖
+    assert vs["by_source"]["generated"] == {"shown": 2, "picked": 1}
+    assert v.compare_view.virtual_text().startswith("가상 채팅 3개 가운데 2개 고름 (연습용, 점수 없음)")
+    assert not v.compare_view.virtual_label.isHidden()
+    rows = v.compare_view.rows()
+    vr = [r for r in rows if r.category == tcv.CAT_VIRTUAL]
+    assert [(r.chat_id, r.source, r.reaction_ms) for r in vr] == [("v:s0001", "retrieved", None),
+                                                                  ("v:s0002", "generated", None)]
+    assert rows[-2:] == vr                                               # 점수 행 아래에 따로
+    # 견주기에서는 가상 표시를 드러낸다
+    cats = [v.compare_view.table.item(i, tcv.COL_CAT).text() for i in range(len(rows))]
+    assert cats[-2:] == ["가상 고름 · 가져옴", "가상 고름 · 생성"]
+    cmp_ev = v.events[-1]
+    assert cmp_ev["kind"] == "training.compare" and cmp_ev["virtual_shown"] == 3 and cmp_ev["virtual_picked"] == 2
+    assert cmp_ev["same"] == 1
+    # 원래 반응 자리 표시·N 은 가상 행과 상관없다
+    assert sorted(t for t, _k in v.timeline.markers("train_orig")) == [7_500, 12_000, 16_000]
+    i = len(rows) - 1
+    p = v.player
+    n = len(p.calls)
+    v.compare_view.table.cellClicked.emit(i, 0)                         # 가상 행 누름 = 그 시각 앞뒤 듣기
+    a, _b = tcv.listen_window(9_500, None)
+    assert p.calls[n:] == [("mute", False), ("seek", a - 2000), ("play",)]
+    v.close_view()
+    assert v.events[-1] == {"kind": "training.end", "reason": "segment_end", "picks": 2, "virtual_picks": 2}
+    assert no_private(v.events) and V_TEXT not in repr(v.events) and "zz_test" not in repr(v.events)
+    assert "하**" not in repr(v.events) and "두*" not in repr(v.events)
+
+
+def test_virtual_real_click_picks_once(qapp):
+    """가상 채팅도 표에서 한 번 누름 = 고름 (D-16 클릭 1)."""
+    v, _ = make_v(qapp)
+    v.resize(1200, 700)
+    v.show()
+    QApplication.processEvents()
+    v.player.at(10_000 - 2000)
+    QApplication.processEvents()
+    view = v.chat.view
+    row = v.chat.model.view_row_of(v.chat.chat_data().index_of("v:s0002"))
+    view.scrollTo(v.chat.model.index(row, 0))
+    QApplication.processEvents()
+    rect = view.visualRect(v.chat.model.index(row, 3))
+    QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+    assert v.is_picked("v:s0002") and v.pick_count() == 1
+
+
+def test_mix_failure_or_empty_blocks_before_log(qapp):
+    class Log:
+        def __init__(self):
+            self.calls = []
+
+        def start(self, **k):
+            self.calls.append(k)
+
+    def broken(_real, _scn):
+        raise ValueError("깨진 시나리오")
+    log = Log()
+    v, ok = make_v(qapp, mix=broken, log=log)
+    assert ok is False and "가상 채팅을 섞지 못했습니다" in v.blocked_label.text()
+    assert log.calls == [] and v.events == []                          # 노출로 세지 않는다
+    v2, ok2 = make_v(qapp, mix=lambda real, _s: list(real), log=log)  # 가상 줄 0개
+    assert ok2 is False and v2.blocked_label.text() == tv.REASON_NO_SCENARIO and log.calls == []
+    # 시범 프로젝트면 섞기 전에 막는다 (시나리오를 읽지도 않음)
+    n = len(MIX_CALLS)
+    v3, ok3 = make_v(qapp, project_name="pilot-xyz")
+    assert ok3 is False and v3.blocked_label.text() == tv.REASON_PILOT and len(MIX_CALLS) == n
+
+
+def test_no_scenario_is_unchanged(qapp):
+    v, ok = make(qapp)
+    assert ok and v.virtual_line_count() == 0
+    assert "scenario_id" not in v.events[0] and "virtual_lines" not in v.events[0]
+    v.player.at(SEG[1] - 2000)
+    assert v.compare_view.virtual_summary() is None and v.compare_view.virtual_label.isHidden()
+    assert "virtual_shown" not in v.events[-1]
+    assert all(r.category != tcv.CAT_VIRTUAL for r in v.compare_view.rows())
+
+
+def test_virtual_with_real_core_and_log(qapp, tmp_path):
+    """기본 섞기(core.scenario) + 기본 계산 + 실제 TrainingLog(임시 폴더): 기록 파일이 스키마를 통과하고
+    가상 고르기는 line_id·source 로 남고(20 5-3 선택 칸), 가상 채팅 본문·이름·화면 id('v:')는 파일에 남지 않는다."""
+    scn = pytest.importorskip("app.core.scenario")
+    if not hasattr(scn, "merge_for_display") and not hasattr(scn, "mix"):
+        pytest.skip("core.scenario 섞기 함수 없음")
+    trn = pytest.importorskip("app.core.training")
+    ts = pytest.importorskip("app.training_store")
+    src = {"chat_id": cid(99), "t_ms": 99_000, "kind": "text", "nickname_masked": NICK_MARK, "text": V_TEXT + " 원"}
+    recs = [{"kind": "scenario.header", "scenario_id": "SC-20261022-abcd", "range": {"vod_from_ms": SEG[0],
+                                                                                     "vod_to_ms": SEG[1]}},
+            {"kind": "scenario.chat", "line_id": "s0001", "source": "retrieved", "show_vod_ms": 6_500,
+             "from_project_id": "p0", "from_chat_id": cid(99), "from_t_ms": 99_000, "display_mask": "하**"},
+            {"kind": "scenario.chat", "line_id": "s0002", "source": "generated", "show_vod_ms": 8_500,
+             "gen_id": "g0001", "text": V_TEXT + " {:zz_test_01:}", "display_mask": "두*"},
+            {"kind": "scenario.end", "lines": 2, "lines_sha256": "0" * 64}]
+    root = tmp_path / "P-synth"
+    root.mkdir()
+    log = ts.TrainingLog.create(str(root), "TST", check_pilot=False)
+    rs = pytest.importorskip("app.reference_set")
+    v = tv.TrainerView(parts={"player": FakePlayer})
+    refs = [trn.RefReaction(r["chat_id"], None, r["reaction_vod_ms"], "direct") for r in REF]
+    refset = rs.ReferenceSet(source=trn.REF_FINAL_SET, reactions=refs, ranges=[SEG], sha256="a" * 64)
+    ok = v.start(chat=messages(), segment=SEG, reference=refset, media_path=None, log=log,
+                 project_id="00000000-0000-4000-8000-000000000001",
+                 scenario={"records": recs, "resolve": lambda p, c: src if c == cid(99) else None})
+    assert ok and v.virtual_line_count() == 2
+    assert v.events[0]["scenario_id"] == "SC-20261022-abcd"
+    v.seek_vod(7_200)
+    assert v.toggle_pick(cid(6)) == "pick"
+    assert v.toggle_pick("v:s0001") == "pick"
+    v.seek_vod(9_100)
+    assert v.toggle_pick("v:s0002") == "pick"
+    assert v.show_compare() is True
+    res = v.compare_result()
+    assert res.same == 1 and res.mine_only == 0                      # 가상 고르기는 '나만' 에 들어가지 않는다
+    assert v.virtual_result().numbers() == {"virtual_shown": 2, "virtual_picked": 2}
+    v.close_view()
+    recs_out, info = ts.read_valid(log.path)
+    assert info.get("corrupt", 0) == 0
+    assert [r["kind"] for r in recs_out] == ["training.start", "training.pick", "training.pick", "training.pick",
+                                             "training.compare", "training.end"]
+    assert all(ts.check_record(r) == [] for r in recs_out)
+    # 20 5-3 선택 칸: start 의 시나리오, 가상 pick 은 line_id·source, compare·end 는 건수만
+    assert recs_out[0]["body"]["scenario_id"] == "SC-20261022-abcd" and recs_out[0]["body"]["virtual_lines"] == 2
+    assert [r["body"].get("line_id") for r in recs_out[1:4]] == [None, "s0001", "s0002"]
+    assert [r["body"]["source"] for r in recs_out[1:4]] == ["replay", "retrieved", "generated"]
+    assert recs_out[4]["body"]["virtual_shown"] == 2 and recs_out[4]["body"]["virtual_picked"] == 2
+    assert recs_out[4]["body"]["same"] == 1 and recs_out[4]["body"]["mine_only"] == 0
+    assert recs_out[5]["body"]["picks"] == 1 and recs_out[5]["body"]["virtual_picks"] == 2
+    raw = open(log.path, encoding="utf-8").read()
+    for s in (V_TEXT, NICK_MARK, TEXT_MARK, "하**", "두*", "v:"):
+        assert s not in raw
+    assert not (root / "messages.jsonl").exists()                     # 실제 채팅 파일에 쓰지 않는다
+
+
+def test_virtual_compare_fits_1366(qapp):
+    v, _ = make_v(qapp)
+    v.resize(1366, 768)
+    v.show()
+    QApplication.processEvents()
+    v.player.at(10_000 - 2000)
+    v.toggle_pick("v:s0002")
+    v.player.at(SEG[1] - 2000)
+    QApplication.processEvents()
+    cv = v.compare_view
+    assert v.width() <= 1366 and v.height() <= 768
+    g = cv.virtual_label.geometry()
+    assert g.right() <= cv.width() and g.bottom() <= cv.height() and cv.virtual_label.isVisible()
+
+
+def test_virtual_pure_helpers():
+    vs = {"shown": 3, "picked": 1, "by_source": {"retrieved": {"shown": 1, "picked": 0},
+                                                 "generated": {"shown": 2, "picked": 1}},
+          "picks": [{"vid": "v:s0002", "source": "generated", "show_vod_ms": 9_500, "picked_vod_ms": 10_000},
+                    {"vid": "v:s0002"}]}
+    rows = tcv.virtual_rows(vs)
+    assert rows == [tcv.CompareRow(tcv.CAT_VIRTUAL, "v:s0002", 9_500, 10_000, None, None, "generated")]
+    vn = tcv.virtual_numbers(vs)
+    assert vn["shown"] == 3 and vn["picked"] == 1
+    assert tcv.fmt_virtual(vn) == "가상 채팅 3개 가운데 1개 고름 (연습용, 점수 없음) · 가져옴 0/1 · 생성 1/2"
+    assert tcv.virtual_numbers(None) is None and tcv.fmt_virtual(None) == ""
+    # 점수 숫자에는 가상 행이 들어가지 않는다
+    assert tcv.summary_numbers(None, rows) == tcv.summary_numbers(None, [])

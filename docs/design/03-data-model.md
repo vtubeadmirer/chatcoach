@@ -78,6 +78,8 @@
 ├─ relabel\index.json                계획 색인(plan_id·원 세션·라벨러·종류·상태, D-12 2)   [파생 · 다시 만들 수 있음]
 ├─ origin\OT-<yyyymmdd>-<4자>.json   출처 판정 대상 파일(chat_id 목록만, 6-11, D-13 5)   [원본 · 불변]
 ├─ origin\                           ★보호 구역: 가상 채팅 생성 기록·대조 결과 (v1)
+├─ training\<session_id>.jsonl       스트리머 훈련 기록(training-event, 6-16). 라벨 기록과 다른 폴더   [원본 · 추가만]
+├─ scenarios\SC-<yyyymmdd>-<4자>.jsonl  가상 채팅 시나리오(H-1, 형식은 [20](20-plan-virtual-chat.md) 3장·`schemas/scenario.schema.json`). `messages.jsonl`·`labels\` 와 섞지 않는다   [원본 · 불변 · ★보호]
 └─ derived\                          비싼 파생: asr.json · vad.json · ocr.jsonl     [파생 · ★asr·ocr 는 보호]
 ```
 
@@ -89,7 +91,7 @@
 ├─ labelers.json                     라벨러 표시 이름 — 실명은 프로젝트에 넣지 않는다
 ├─ cache\<partial_fp 앞 16자>\       waveform.json · silence.json · thumbs\       [파생 · 버려도 됨]
 ├─ cache\<project_id>\               chat_index.bin(채팅 병렬 배열) · index.sqlite(v1)   [파생 · 버려도 됨]
-├─ ai\<project_id>\                  AI 결과(v1): sealed\<sha256>.bin(봉인 원본) · seal.jsonl(봉인·해제 기록) · runs\<run_id>.json(해제 뒤)   [6-14]
+├─ ai\<project_id>\                  AI 결과(v1): sealed\<sha256>.bin(봉인 원본) · seal.jsonl(봉인·해제 기록) · runs\<run_id>.json · topics\<run_id>.json(해제 뒤, 짝 주제 흐름이 있을 때)   [6-14]
 ├─ reports\<project_id>\<report_id>\ 일치도·AI 비교 보고서: report.json · report.md (AI 비교 때 tables\*.csv · manifest.json 추가 예정)   [6-14]
 └─ disposal_log.jsonl                프로젝트 파기 기록
 ```
@@ -100,7 +102,7 @@
 
 ### 2-3. 보호 구역 기본값
 
-`project.json` 의 `protected_zone` 기본값: `chat/protected/`, `derived/asr*`, `derived/ocr*`, `origin/`.
+`project.json` 의 `protected_zone` 기본값: `chat/protected/`, `derived/asr*`, `derived/ocr*`, `origin/`. H-1 에서 `scenarios/` 를 더한다([20](20-plan-virtual-chat.md) 3장 — 가상 채팅은 내보내기·패키지에 넣지 않는다, D-05).
 
 보호 구역은 라벨러 패키지·정답 세트·일반 백업에서 빠진다. 넣으려면 '보호 포함' 을 켜야 하고, 켜면 경고 후 매니페스트에 기록된다(16장, [05](05-security.md)).
 
@@ -674,7 +676,8 @@ flowchart LR
 |---|---|---|
 | (공통) | `v`, `seq`, `kind`, `at`, `by`(검토자 `role = reviewer` 의 labeler_id), `app_version`, `sha256` | `sha256` = 받은 파일 바이트의 SHA-256. 원본은 `sealed\<sha256>.bin` 으로 둔다. |
 | `ai.sealed` | `size`, `check`(`valid`·`rejected`), `reject_reasons[]` | 받을 때 06 6-2 검사 결과만 남긴다. `run_id`·엔진 이름처럼 내용을 해석한 값은 적지 않는다(06 7-2 '해석 결과도 저장하지 않는다'). |
-| `ai.unsealed` | `run_id`, `locks[]`(`session_id`, 잠금 파일 `sha256`, `locked_at`), `conditions_met`, `reason` | 풀면서 `runs\<run_id>.json` 으로 옮긴다. 06 7-1 조건(계획된 세션 모두 잠김 + 표본 재현 검증 통과) 전에 열면 `conditions_met = false` 와 사유(필수)를 남긴다. 그 뒤 만든 재라벨 세션은 `ai_exposed` 로 표시된다. |
+| `ai.unsealed` | `run_id`, `locks[]`(`session_id`, 잠금 파일 `sha256`, `locked_at`), `conditions_met`, `reason`, (짝 주제 흐름이 있을 때) `topics`(`sha256`·`file_sha256` 또는 null)·`topics_error`(문제 코드 또는 null) | 풀면서 `runs\<run_id>.json` 으로 옮긴다. 06 7-1 조건(계획된 세션 모두 잠김 + 표본 재현 검증 통과) 전에 열면 `conditions_met = false` 와 사유(필수)를 남긴다. 그 뒤 만든 재라벨 세션은 `ai_exposed` 로 표시된다. 짝 주제 흐름은 같은 해제에서 `topics\<run_id>.json` 으로 같이 푼다. 주제 흐름 문제(`topics_unreadable`·`topics_bin_mismatch`·`topics_json`·`topics_format`)는 판정 해제를 막지 않고 코드만 남긴다. |
+| `topics.sealed` | `size`, `source`(`engine_topics`·`file`), `pair`(짝 ai-result 의 `sha256`), `check`, `reject_reasons[]` | 엔진 주제 흐름(topic-flow, [스키마](../../schemas/topic-flow.schema.json))을 ai-result 봉인 하나의 **짝으로** 봉인한다(08 D-17 5, `seal.seal_topics_bytes`). 원본은 같은 `sealed\<sha256>.bin`. 짝 봉인이 없거나 이미 풀렸으면 받지 않는다. 따로 풀지 않는다. '봉인됨 n건' 은 ai-result 만 센다(D-18 3). 18 5-2 16번 몫 |
 
 '사전 봉인'(봉인 시각 < 1차 세션 잠금 시각) 여부는 저장하지 않는다. 이 기록과 잠금 파일의 시각에서 계산한다(D12 와 같은 이유).
 
@@ -717,6 +720,34 @@ flowchart LR
 | 영상 확인 기록 — 처음·다시 확인한 시각 | `video_check`(`check` = `first`/`recheck`, 시각 = `created_at`) |
 | 라벨러·일시·기준서 버전 | `labeler_id`, `created_at`, `guide_version` + `guide_sha12` + `thresholds_sha12` |
 | (7-2) 처음 판단 | `reaction.first_judgment` + 대체된 이전 판 자체 |
+
+### 6-16. 훈련 기록 — `training/<session_id>.jsonl` ([스키마](../../schemas/training-event.schema.json))
+
+스트리머 훈련(F, 08 D-18 6·7·8)의 기록이다. 라벨 기록(`labels/`, label-event)과 **다른 폴더·다른 종류**라 정답지에 섞이지 않는다. label-event 스키마는 그대로다(D-14 7). 쓰기는 `app/training_store.py`(한 줄 = 기록 1건, 8-1 과 같은 덧붙이기, 쓰기 전에 스키마 검사 — 맞지 않으면 쓰지 않음). 어긋나면 스키마가 맞다.
+
+- **세션 ID** `<labeler_id>-TR-<yyyymmdd>-<4자>`. 라벨 세션 종류 코드(P·RS·R2·AD·OR·AN)와 겹치지 않고, label-event 의 세션 정규식에는 넣지 않는다(19 5-1 5번).
+- **labeler_id** 는 묻지 않는다: 세션 라벨러 → '보기 전용으로 다시 열기' 전 라벨링 세션의 라벨러 → 마지막에 고른 라벨러 → `project.json` 의 `created_by` 순(D-16, 19 5-1 11번).
+- **본문·닉네임·전사문 칸이 없다.** chat_id·VOD 시각(ms)·숫자만(D-05, D-17 8). 스키마가 모르는 칸을 거부한다.
+- **먼저 쓰고 보인다**: start 줄을 못 쓰면 훈련이 열리지 않고, compare 줄을 못 쓰면 정답을 보이지 않는다(19 5-1 13번).
+
+| 칸 (공통) | 뜻 |
+|---|---|
+| `v`(1), `id`(UUID v4), `seq`(파일 안 1부터), `kind`, `session_id`, `labeler_id`, `created_at`(벽시계·오프셋), `app_version`, `body` | 모든 줄 |
+
+| kind | `body` 칸 | 뜻 |
+|---|---|---|
+| `training.start` | `mode`(`streamer`), `project_id`, `source`(`replay`), `audio`(`muted`), `range`(`start_ms`·`end_ms`), `reference`(`source` = `final_set`·`manual_csv`, `sha256`, `count`, `file` = 손라벨 파일 이름 또는 null) | 훈련을 연 순간. **이 줄이 곧 노출 기록이다**(아래 노출 규칙 5). 기준은 사람 최종 세트, 없으면 `labels/manual-*.csv` 이름 순 첫 파일(읽기만, 19 5-1 7번) |
+| `training.pick` | `chat_id`, `picked_vod_ms`(누른 순간 재생 위치), `wall_at`, `source`(`replay`) | 채팅을 한 번 눌러 '읽겠다' |
+| `training.unpick` | `chat_id`, `vod_ms`, `wall_at` | 같은 채팅을 다시 눌러 취소 |
+| `training.compare` | `same`, `mine_only`, `orig_only`, `reference_count`(맞힌 비율의 분모), `hit_rate`(같음 / 원래 반응 수, 0 이면 null), `median_diff_ms`(같음 행의 고른 시각 − 원래 반응 시각 중앙값, 음수 = 먼저 고름, 정수 ms), `diff_count`, `reference_sha256`, `range`, `until_ms`(구간 끝 전에 견주면 그 시각, 아니면 null) | '견주기'. 숫자만 |
+| `training.end` | `reason`(`compare`·`segment_end`·`closed`), `picks` | 닫을 때 |
+
+- 19 5-1 4번: 18 6-3 초안보다 늘어난 칸은 start 의 mode·audio·range·reference, compare 의 reference_count·diff_count·until_ms·range, end 의 reason·picks, pick 의 wall_at 이다.
+- 가상 채팅을 섞는 훈련(H-4, [20](20-plan-virtual-chat.md) 5장)은 이 스키마에 **선택 칸만** 더한다. 칸 이름·뜻은 스키마 파일이 정한다. 점수(`training.compare`)는 실제 채팅(`replay`)만으로 낸다.
+- 시범 프로젝트(`pilot-*` 등)는 시범 세션이 모두 잠기기 전에는 새 훈련 세션을 만들지 않는다(D-18 7).
+- 기록 형식이 바뀐 판의 점수는 `reference.source`·`sha256` 로 나눠 본다. 손라벨 기준과 최종 세트 기준을 섞어 평균내지 않는다(19 5-3 3번).
+
+**노출 규칙 5 (훈련을 엶)** — `app/core/exposure.py`, 읽기는 `app/exposure_io.project_trainings`. 훈련 세션의 `training.start` 줄 `created_at` 에 **아직 잠기지 않았던 이 프로젝트의 라벨링 세션(1차·재라벨)과 그 뒤에 만든 라벨링 세션**은 사람 라벨 노출(what = `other_session_labels`, 사유 `training_opened`)로 본다. 단위는 **프로젝트 전체**이고 누가 훈련했는지는 가리지 않는다(D-17 3, 19 5-1 10번 — 18 6-5 3번의 '연 라벨러' 는 이 규칙으로 바뀌었다). start 줄의 시각을 읽지 못하면 맨 처음으로 본다(이미 잠긴 세션도 노출, 블라인드 쪽으로 안전). start 줄이 없는 파일(만들다 실패)은 세지 않는다. 노출 세션은 `view_exposed` 로 대표값에서 빠지고 숫자는 남는다([06](06-evaluation-and-agreement.md) 3-4·7-5). 이 노출은 `view.exposed` 줄을 쓰지 않고 훈련 기록에서 계산한다 — label-event 는 그대로다.
 
 ---
 
@@ -957,14 +988,15 @@ flowchart TD
 | `derived/asr*` | 토글(기록) | 토글 | 토글 | 읽기 | 열지 않음 | 읽기 |
 | 엔진 결과(`derived/link-*`) | 열지 않음 | 열지 않음 | 열지 않음 | 열지 않음 | 열지 않음 | 읽기 ('분석 보기') |
 | `origin/`, 출처 라벨 | 열지 않음 | 열지 않음 | 열지 않음 | 읽기 · **대상 파일만 쓰기**(1차 매니페스트 표본으로, D-13 5. `FileScope.origin` 값은 읽기이고 `ProjectStore.write_origin_targets` 가 조정 세션에만 따로 허용 — D-14 1·2, 15 5-3 2번) | 대상 파일 읽기 · 출처 라벨 쓰기 | 읽기 |
-| `<앱>\data\ai\` | 열지 않음 | 열지 않음 | 열지 않음 | 봉인·봉인 해제 뒤 읽기(6-14) | 열지 않음 | 열지 않음 |
+| `<앱>\data\ai\` | 열지 않음 | 열지 않음 | 열지 않음 | 봉인·봉인 해제 뒤 읽기(6-14) | 열지 않음 | **해제된 것만**: `seal.jsonl`(건수·해제 여부)과 해제 뒤 `runs\`·`topics\` 읽기. `sealed\` 는 열지 않고 봉인·해제는 못 함(`visibility` 의 `UNSEALED_ONLY`, 08 D-15 7, 18 5-2 16번) |
 | `<앱>\data\reports\` | 열지 않음 | 열지 않음 | 열지 않음 | 읽기·쓰기 | 열지 않음 | 읽기 |
 
 '잡기' 는 프로젝트를 열 때 `locks/open.lock` 을 잡고, 못 잡으면 프로젝트 전체를 읽기 전용으로 연다는 뜻이다(13-5). 이미 잠긴 세션(`locks/<session_id>.json` 이 있음)을 다시 열면 쓰지 않으므로 `open.lock` 을 잡지 않고 읽기 전용으로 연다(D-12 1, 13 4-1 4번). '토글' 은 기본 숨김이고, 켜면 `view.exposed` 줄이 남는다. 블라인드 해제를 막지는 않지만, 일치도 계산에서 노출된 세션을 따로 볼 수 있다.
 
 넷째 묶음 구현에서 정한 것 (D-12 1·2):
 
-- **보고서 열기.** '보고 → 일치도 보고서' 는 세션 없이 연 창(보기 전용)과 조정 세션에서만 켜진다(위 표의 `reports` 쓰기). 잠긴 1차를 다시 연 창·분석 창에서는 꺼진다. 같은 프로젝트에 아직 잠기지 않은 계획된 재라벨이 있으면 꺼진다([06](06-evaluation-and-agreement.md) 7-1).
+- **보고서 열기.** '보고 → 일치도 보고서' 는 세션 없이 연 창(보기 전용)과 조정 세션에서만 켜진다(위 표의 `reports` 쓰기). 잠긴 1차를 다시 연 창·분석 창에서는 꺼진다. 같은 프로젝트에 아직 잠기지 않은 계획된 재라벨이 있으면 꺼진다([06](06-evaluation-and-agreement.md) 7-1). 스트리머 훈련 화면이 열려 있는 동안에도 꺼진다(채팅 단위 정답을 보임, 08 D-19 4).
+- **스트리머 훈련** (08 D-18 6·7·8, D-19 3): 라벨링(1차·재라벨)·출처 판정 세션의 작업대 위에는 열지 않는다. 그 세션에서 메뉴를 누르면 세션을 닫고 보기 전용(세션 없음)으로 다시 연 뒤 연다. 다시 열기 전에는 위 표대로 다른 세션 `labels/`·손라벨을 열지 않고 파일 이름만 본다. 기록은 6-16, 노출은 6-16 의 '노출 규칙 5', 화면 규칙은 [06](06-evaluation-and-agreement.md) 7-5.
 - **세션 선택 화면**(세션을 고르기 전)은 `locks/`·`relabel/` 의 이름과 `relabel/index.json` 을 읽어 고를 수 있는 종류를 정한다. 계획 본문은 고른 라벨러 것만 연다(6-14, D-12 2).
 - **조정·출처 판정·④ 는 작업대 모드다**(D-12 3~6). 조정 세션의 모드 줄은 '둘러보기·조정', 출처 판정 세션은 '둘러보기·출처 판정' 이고 세션을 열면 그 화면이 바로 열린다. ④ 놓친 후보는 재라벨 세션에만 있다(D-12 5). 재라벨 계획 취소는 조정 세션에서만 된다(D-12 7).
 - **출처 판정 세션**은 `origin/` 의 대상 파일과 그 대상 채팅(`messages.jsonl`)·자기 세션 출처 라벨만 읽는다. 다른 세션 기록·`samples/`·`relabel/` 은 열지 않는다(시험·gui_smoke 의 열기 감시로 확인).
@@ -1377,6 +1409,9 @@ MVP 에는 4단계(`missed_candidate`) 입력 화면이 없다(v1). 그래서 �
 | [`schemas/update_manifest.schema.json`](../../schemas/update_manifest.schema.json) | 업데이트 매니페스트 `latest.json` ([04](04-update-and-release.md) 5-2) |
 | [`schemas/session-lock.schema.json`](../../schemas/session-lock.schema.json) | `locks/<session_id>.json` (6-14 '잠금', 넷째 묶음) |
 | [`schemas/relabel-plan.schema.json`](../../schemas/relabel-plan.schema.json) | `relabel/<plan_id>.json` (6-14 '재라벨 계획', [06](06-evaluation-and-agreement.md) 3장, 넷째 묶음) |
+| [`schemas/topic-flow.schema.json`](../../schemas/topic-flow.schema.json) | 엔진 주제 흐름 `<이름>.topics.json` (AI 결과와 짝으로 봉인, 6-14 'AI 봉인 기록', 08 D-17 5) |
+| [`schemas/training-event.schema.json`](../../schemas/training-event.schema.json) | `training/<session_id>.jsonl` 한 줄 (6-16, 08 D-18 8) |
+| [`schemas/scenario.schema.json`](../../schemas/scenario.schema.json) | `scenarios/SC-*.jsonl` 가상 채팅 시나리오 (H-1, [20](20-plan-virtual-chat.md) 3장) |
 
 **아직 없는 스키마** — 만들 때 이 묶음에 넣는다. 파일 이름은 가칭이다. (D-12 1: 위 세 스키마는 이미 있어 이 표에서 옮겼다.)
 
