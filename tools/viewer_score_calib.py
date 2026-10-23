@@ -36,7 +36,7 @@ derived\\asr-words.json, 주제 흐름 파일. 아무것도 쓰지 않는다(--o
   **사람이 '반응 미확인' 으로 본 채팅**(result unconfirmed, 같은 eval)은 따로 '확인된 반응 없음'(labelled_none) 묶음으로 낸다.
   zip 에는 평가 제외(exclude_from_eval) 행이 없어 그 채팅은 반응 없음 쪽에 섞일 수 있다(건수만 info 에 '모름' 으로 적는다).
   시범 프로젝트는 이 길로만, **시범 세션이 모두 잠긴 뒤**(reference_set.pilot_sessions_locked = seal.unseal_conditions 와 같은
-  판단)에만 연다. calibrate(allow_no_relabel=True) 는 해제 당일 도구가 --allow-no-relabel(08 D-26) 일 때만 준다 — 그때는
+  판단, 다만 조건을 채운 해제 기록이 있으면 잠김으로 봄 — 08 D-27 3)에만 연다. calibrate(allow_no_relabel=True) 는 해제 당일 도구가 --allow-no-relabel(08 D-26) 일 때만 준다 — 그때는
   seal.unseal_conditions(allow_no_relabel=True)(계획 파일이 없으면 no_relabel_plan 만 막지 않음)로 본다. 명령줄에는 없다.
   맥락(주제 흐름·전사 낱말)은 시범이면 **해제된 run 의 짝**(seal.read_topics · seal.read_words)에서만 읽는다
   (derived\\asr-words.json 같은 평문 자리는 보지 않는다). --run-id 로 고르고, 없으면 전사 낱말 짝이 있는 가장 늦게 푼 run.

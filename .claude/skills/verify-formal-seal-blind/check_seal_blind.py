@@ -19,6 +19,8 @@
   재라벨 없이 해제(D-26): 모든 모델·모든 상태에서 플래그를 준 seal.unseal_conditions 도 플래그 명세
   (oracle_why(allow_no_relabel=True) — 계획 파일이 하나도 없을 때 'no_plan' 규칙 하나만 뺌)와 견주고, 플래그가 빼는 사유가
   no_relabel_plan 하나뿐인지(FLAG_WAIVABLE) 본다.
+  화면의 '시범 잠김' 판단(08 D-27 3): 모든 상태에서 seal.conditions_met_unseal_exists 가 seal.jsonl 만 읽고, 조건을 채운
+  ai.unsealed(conditions_met = true)가 있을 때만 True 인지 본다(앞당겨 연 기록은 세지 않음).
 
 실행 (저장소 루트, 앱 .venv — 표준 라이브러리만 쓴다)
   .venv\\Scripts\\python .claude\\skills\\verify-formal-seal-blind\\check_seal_blind.py
@@ -395,6 +397,7 @@ PLAN_CODES = ("plan_unreadable", "relabel_not_locked")      # G1b 가 명세와 
 #: relabel_not_locked·sample_verify·other)는 플래그가 있어도 그대로 막는다
 FLAG_WAIVABLE = ("no_relabel_plan",)
 PROP_FLAG = "재라벨 없이 해제가 푸는 것은 no_relabel_plan 하나(D-26)"
+PROP_UNSEALED_MET = "조건을 채운 해제 기록만 '잠김'(D-27 3)"
 
 
 def oracle_met(f: Facts, rules=None, *, allow_no_relabel: bool = False) -> tuple[bool, list[str]]:
@@ -938,6 +941,19 @@ def _check_state(T: Facts, world: World, model: Model, oracle_rules) -> None:
     if not unsealed_run and (not isinstance(terr, seal.SealNotUnsealedError)
                              or sp.reads_under(os.path.join(world.ai_dir, seal.TOPICS_DIR))):
         raise Violation("해제 전에는 읽지 않음", "해제 전 read_topics 가 막히지 않았거나 topics\\ 를 열었습니다")
+    # G5b 조건을 채운 해제 기록(seal.conditions_met_unseal_exists, 08 D-27 3 — reference_set.pilot_sessions_locked 가 쓴다):
+    # ai 폴더에서 seal.jsonl 밖(sealed·runs·topics)은 열지 않고, ai.unsealed · conditions_met = true 가 있을 때만 True.
+    # 앞당겨 연 기록(conditions_met = false)을 세면 앞당긴 해제 하나로 화면의 시범 잠김이 풀려 재라벨 전에 훈련이 열린다.
+    with Spy() as sp:
+        has = seal.conditions_met_unseal_exists(root)
+    sj = os.path.normcase(os.path.abspath(os.path.join(world.ai_dir, seal.SEAL_FILE)))
+    peeked = [p for p in sp.reads_under(world.ai_dir) if p != sj]
+    if peeked:
+        raise Violation("해제 전에는 읽지 않음", f"conditions_met_unseal_exists 가 seal.jsonl 밖({peeked[0]})을 열었습니다")
+    met_flags = [r.get("conditions_met") for r in T.recs if r.get("kind") == seal.K_UNSEALED]
+    if has != any(m is True for m in met_flags):
+        raise Violation(PROP_UNSEALED_MET, f"seal.conditions_met_unseal_exists={has} 인데 seal.jsonl 의 ai.unsealed "
+                        f"conditions_met 는 {met_flags or '없음'}")
     # G6 자리 검사: 라벨링·재라벨·출처 판정 세션은 어떤 seal 함수도 부르지 못하고 아무 파일도 열지 않는다
     if model.blind_checks:
         check_blind(world, unsealed_run)
@@ -950,6 +966,7 @@ def blind_calls(root: str):
         ("seal_file", lambda k: seal.seal_file(root, os.path.join(root, "x.json"), by="L01", reader_kind=k)),
         ("seal_status", lambda k: seal.seal_status(root, reader_kind=k)),
         ("unseal_events", lambda k: seal.unseal_events(root, reader_kind=k)),
+        ("conditions_met_unseal_exists", lambda k: seal.conditions_met_unseal_exists(root, reader_kind=k)),
         ("unseal_conditions", lambda k: seal.unseal_conditions(root, reader_kind=k)),
         ("unseal_conditions_flag", lambda k: seal.unseal_conditions(root, reader_kind=k, allow_no_relabel=True)),
         ("unseal", lambda k: seal.unseal(root, SHA["R1"], by="L01", early_reason="x", reader_kind=k)),
@@ -965,12 +982,13 @@ def blind_calls(root: str):
     ]
 
 
-ANALYSIS_ALLOWED = {"seal_status", "unseal_events", "read_run", "read_topics", "read_words", "read_vectors"}
+ANALYSIS_ALLOWED = {"seal_status", "unseal_events", "conditions_met_unseal_exists", "read_run", "read_topics",
+                    "read_words", "read_vectors"}
 
 
 def check_blind(world: World, unsealed_run: bool) -> None:
     # 분석 세션(UNSEALED_ONLY): 건수 보기는 되지만 봉인 원본은 열지 않고, 해제 전에는 runs·topics 도 열지 않는다
-    for fname in ("seal_status", "unseal_events", "read_run", "read_topics"):
+    for fname in ("seal_status", "unseal_events", "conditions_met_unseal_exists", "read_run", "read_topics"):
         call = dict(blind_calls(world.root))[fname]
         with Spy() as sp:
             try:
@@ -1252,6 +1270,11 @@ def _m_flag_bypasses_unlocked():
     return _patch(seal, "unseal_conditions", f)
 
 
+def _m_unseal_exists_counts_early():
+    """conditions_met_unseal_exists 가 앞당겨 연 기록(conditions_met = false)도 '조건을 채운 해제' 로 셈(08 D-27 3)."""
+    return _patch(seal, "conditions_met_unseal_exists", lambda root, **k: bool(seal.unseal_events(root, **k)[0]))
+
+
 MUTANTS = [
     # (이름, 무엇을 깨뜨렸나, 패치, 모델, 'code' 또는 'model')
     ("unlocked_ignored", "unseal_conditions 가 잠기지 않은 라벨링 세션을 보지 않음", _m_unlocked_ignored, "gate_plans", "code"),
@@ -1267,6 +1290,8 @@ MUTANTS = [
      "gate_faults", "code"),
     ("flag_bypasses_unlocked", "allow_no_relabel(D-26)이 잠기지 않은 라벨링 세션(unlocked_sessions)도 넘음",
      _m_flag_bypasses_unlocked, "gate_plans", "code"),
+    ("unseal_exists_counts_early", "conditions_met_unseal_exists(D-27 3)가 앞당겨 연 기록(conditions_met = false)도 셈",
+     _m_unseal_exists_counts_early, "seal", "code"),
     ("oracle_no_unreadable", "틀린 모델: '읽지 못한 계획은 막는다' 규칙을 뺀 명세", None, "gate_faults", "model"),
 ]
 

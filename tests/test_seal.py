@@ -147,6 +147,7 @@ def test_labeling_sessions_cannot_touch_ai_folder(proj, kind, monkeypatch):
     opened = _spy_open(monkeypatch, os.path.normcase(os.sep + "ai" + os.sep))
     for call in (lambda: seal.seal_bytes(proj["root"], data, source="file", by="L01", reader_kind=kind),
                  lambda: seal.seal_status(proj["root"], reader_kind=kind),
+                 lambda: seal.conditions_met_unseal_exists(proj["root"], reader_kind=kind),
                  lambda: seal.unseal_conditions(proj["root"], reader_kind=kind),
                  lambda: seal.unseal(proj["root"], "0" * 64, by="L01", reader_kind=kind),
                  lambda: seal.read_run(proj["root"], SECRET_RUN, reader_kind=kind),
@@ -170,6 +171,7 @@ def test_analysis_session_sees_count_and_unsealed_runs_only(proj, monkeypatch):
             call()
     st = seal.seal_status(root, reader_kind="analysis")
     assert st.sealed_count == 1 and st.unsealed_count == 0
+    assert seal.conditions_met_unseal_exists(root, reader_kind="analysis") is False     # seal.jsonl 만 본다(08 D-27 3)
     with pytest.raises(seal.SealError, match="해제 기록"):          # 해제 전: runs 도 열지 않는다
         seal.read_run(root, SECRET_RUN, reader_kind="analysis")
     assert bins == []
@@ -178,6 +180,7 @@ def test_analysis_session_sees_count_and_unsealed_runs_only(proj, monkeypatch):
     run = seal.read_run(root, SECRET_RUN, reader_kind="analysis")
     assert run["run_id"] == SECRET_RUN
     assert seal.seal_status(root, reader_kind="analysis").unsealed_count == 1
+    assert seal.conditions_met_unseal_exists(root, reader_kind="analysis") is True
 
 
 def test_adjudication_may_seal_and_see_status(proj):

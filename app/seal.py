@@ -64,6 +64,8 @@ tools/ai_seal.py·pilot_unseal_day --go 가 같은 봉인을 함께 풀어도 ai
 
 해제 전 읽기: read_run·read_topics·read_words·read_vectors 는 ai.unsealed 기록이 없으면 파일을 열기 전에
 SealNotUnsealedError(= SealBlindError — 해제 전에는 아무 자리도 열지 않는다)를 낸다.
+conditions_met_unseal_exists(08 D-27 3)는 seal.jsonl 만 읽어 조건을 채운 ai.unsealed(conditions_met = true)가 있는지만
+돌려준다 — 화면의 '시범 세션 모두 잠김' 판단(reference_set.pilot_sessions_locked)이 쓴다.
 
 사전 봉인 (06 7-2): 봉인 시각 < 가장 이른 1차 세션 잠금 시각이면 '사전 봉인'. 저장하지 않고 seal.jsonl 과 잠금 파일의
 시각에서 계산한다(03 6-14). 잠긴 1차가 아직 없으면 사전 봉인이다(앞으로의 잠금보다 앞선다).
@@ -137,7 +139,7 @@ __all__ = [
     "SealError", "SealBlindError", "SealNotUnsealedError", "SealBlockedError", "AlreadyUnsealedError",
     "SealEntry", "SealStatus", "UnsealConditions", "UnsealResult",
     "default_ai_root", "project_ai_dir", "seal_bytes", "seal_file", "seal_status", "unseal_conditions",
-    "unseal", "read_run", "unseal_events", "SOURCE_KINDS", "PAIR_KINDS",
+    "unseal", "read_run", "unseal_events", "conditions_met_unseal_exists", "SOURCE_KINDS", "PAIR_KINDS",
     "seal_topics_bytes", "seal_topics_file", "read_topics", "topics_check", "TOPICS_SOURCE_KINDS",
     "seal_words_bytes", "seal_words_file", "read_words", "words_check", "WORDS_SOURCE_KINDS",
     "seal_vectors_bytes", "seal_vectors_file", "read_vectors", "vectors_check", "VECTORS_SOURCE_KINDS",
@@ -1117,6 +1119,24 @@ def unseal_events(project_root: str, *, ai_root: str | None = None,
             "engine_version": r.get("engine_version") if isinstance(r.get("engine_version"), str) else None}
            for r in recs if r.get("kind") == K_UNSEALED]
     return out, probs
+
+
+def conditions_met_unseal_exists(project_root: str, *, ai_root: str | None = None,
+                                 reader_kind: str | None = None) -> bool:
+    """조건을 채운 해제 기록이 있나 (08 D-27 3 — 화면의 '시범 세션 모두 잠김' 판단, reference_set.pilot_sessions_locked).
+    seal.jsonl 에 kind = ai.unsealed 이고 conditions_met = true 인 줄이 하나라도 있으면 True(플래그 해제 allow_no_relabel
+    포함). 앞당겨 연 기록(conditions_met = false)은 세지 않는다. seal.jsonl 만 읽는다(봉인 파일·runs 는 열지 않고 쓰지 않는다).
+    seal.jsonl 이 없거나 깨졌으면(깨진 줄·끝 줄 잘림), project.json·ai 폴더를 찾지 못하면 False — 부르는 쪽이 전처럼
+    unseal_conditions 로 본다. 자리 규칙은 unseal_events 와 같다(막는 자리는 파일을 열기 전에 SealBlindError)."""
+    _guard(reader_kind, unseal=False, unsealed_view=True)
+    try:
+        proj = _project(project_root)
+        recs, probs = _read_records(project_ai_dir(project_root, proj.project_id, ai_root))
+    except (SealError, OSError):
+        return False
+    if probs:
+        return False
+    return any(r.get("kind") == K_UNSEALED and r.get("conditions_met") is True for r in recs)
 
 
 # ----------------------------------------------------------------------------- 해제 조건

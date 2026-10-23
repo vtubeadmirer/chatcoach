@@ -5,13 +5,16 @@
 import json
 import os
 import shutil
+from datetime import timedelta
 
 import pytest
 
 from app import export, reference_set as rs
 from app import seal
 from app.core import training as tr
+from tests.test_agreement import MID_1, NOW, SID_A, _lock as _lock_session
 from tests.test_final_set import _clear_locks, cid, proj  # noqa: F401  (합성 최종 세트 프로젝트 fixture)
+from tests.test_seal import _primary_only, _ready, _spy_open, data_of, pilot, result_doc  # noqa: F401  (합성 시범 fixture)
 
 PID = "12345678-0000-4000-8000-000000000002"
 
@@ -188,4 +191,68 @@ def test_pilot_lock_check_error_is_blocked(tmp_path, monkeypatch):
     monkeypatch.setattr(seal, "unseal_conditions", boom)
     ok, reasons = rs.pilot_sessions_locked(root)
     assert not ok and reasons == ["잠금 상태를 확인하지 못했습니다 (SealError)"]
+    assert rs.pilot_block_reason(root) == rs.REASON_PILOT_LOCKED
+
+
+# ----------------------------------------------------------------------------- 해제 기록이 있으면 잠김 (08 D-27 3)
+# 합성 시범 프로젝트(tests.test_seal.pilot — 폴더 pilot-777, 1차 A · 두 번째 사람 재라벨 B)와 합성 엔진 결과만 쓴다.
+def _as_conditions(root):
+    c = seal.unseal_conditions(root)
+    return c.met, list(c.reasons)
+
+
+def test_pilot_locked_without_unseal_record_is_unseal_conditions(pilot):  # noqa: F811
+    """(a) 해제 기록이 없으면 전과 같다 — 봉인 기록(ai.sealed)만 있어도 unseal_conditions 판단 그대로."""
+    root = pilot["root"]
+    assert not seal.conditions_met_unseal_exists(root)                  # seal.jsonl 없음
+    ok, reasons = rs.pilot_sessions_locked(root)
+    assert (ok, reasons) == _as_conditions(root) and not ok and reasons
+    seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    assert not seal.conditions_met_unseal_exists(root)                  # ai.sealed 뿐
+    assert rs.pilot_sessions_locked(root) == _as_conditions(root)
+    assert rs.pilot_block_reason(root) == rs.REASON_PILOT_LOCKED
+    _ready(root)                                                        # 06 7-1 조건이 됨(풀지는 않음)
+    assert not seal.conditions_met_unseal_exists(root)
+    assert rs.pilot_sessions_locked(root) == _as_conditions(root) == (True, [])
+    assert rs.pilot_block_reason(root) is None
+
+
+def test_pilot_locked_after_conditions_met_unseal_with_flag(pilot, monkeypatch):  # noqa: F811
+    """(b) 재라벨 계획 없이 플래그로 푼 기록(conditions_met = true · allow_no_relabel = true)이 있으면 (True, []).
+    플래그 없는 unseal_conditions 는 여전히 no_relabel_plan 으로 막지만 화면은 다시 막지 않는다. runs\\ 는 열지 않는다."""
+    root = _primary_only(pilot)
+    _lock_session(root, SID_A, MID_1)
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    assert rs.pilot_sessions_locked(root) == _as_conditions(root) and not rs.pilot_sessions_locked(root)[0]
+    r = seal.unseal(root, e.sha256, by="L01", now=NOW + timedelta(days=1), allow_no_relabel=True)
+    assert r.record["conditions_met"] is True and r.record["allow_no_relabel"] is True and r.record["relabel"] == "none"
+    c = seal.unseal_conditions(root)
+    assert not c.met and c.codes == ["no_relabel_plan"]                 # 플래그 없는 해제 조건은 그대로
+    opened = _spy_open(monkeypatch, os.path.normcase(os.sep + "runs" + os.sep))
+    assert seal.conditions_met_unseal_exists(root)
+    assert rs.pilot_sessions_locked(root) == (True, [])
+    assert rs.pilot_block_reason(root) is None
+    assert opened == []
+    real = seal.unseal_conditions
+    monkeypatch.setattr(seal, "unseal_conditions",
+                        lambda *a, **k: pytest.fail("해제 기록이 있는데 unseal_conditions 를 불렀다"))
+    assert rs.pilot_sessions_locked(root) == (True, [])
+    monkeypatch.setattr(seal, "unseal_conditions", real)
+    # seal.jsonl 이 깨지면 기록을 믿지 않고 전처럼 unseal_conditions 로 본다
+    sj = os.path.join(os.path.dirname(os.path.dirname(r.run_path)), seal.SEAL_FILE)     # <ai>\<project_id>\seal.jsonl
+    with open(sj, "ab") as f:
+        f.write(b"{broken\n")
+    assert not seal.conditions_met_unseal_exists(root)
+    assert rs.pilot_sessions_locked(root) == _as_conditions(root) == (False, c.reasons)
+
+
+def test_pilot_early_unseal_record_does_not_count_as_locked(pilot):  # noqa: F811
+    """(c) 앞당겨 연 기록(conditions_met = false)만 있으면 잠긴 것으로 보지 않는다 — unseal_conditions 판단 그대로."""
+    root = pilot["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    r = seal.unseal(root, e.sha256, by="L01", early_reason="합성 시험 사유")
+    assert r.record["conditions_met"] is False
+    assert not seal.conditions_met_unseal_exists(root)
+    ok, reasons = rs.pilot_sessions_locked(root)
+    assert (ok, reasons) == _as_conditions(root) and not ok and reasons
     assert rs.pilot_block_reason(root) == rs.REASON_PILOT_LOCKED

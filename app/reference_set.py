@@ -14,14 +14,16 @@
     setup.json 의 items[])에 그 프로젝트(project_id 또는 폴더)가 적혀 있으면 시범이다.
   - 시범 세션 모두 잠김(pilot_sessions_locked): 06 7-1 봉인 해제 조건(app.seal.unseal_conditions)과 같은 판단 —
     1차·재라벨 세션이 모두 잠김, 1차가 있음, 1차마다 재라벨 계획, 계획마다 잠긴 재라벨 세션, 표본 재현 검증.
-    잠금·계획·표본 매니페스트만 열고 **라벨 파일은 열지 않는다**. 판단이 안 되면(오류) 잠기지 않은 것으로 본다.
+    다만 조건을 채운 해제 기록(seal.jsonl 의 ai.unsealed · conditions_met = true, allow_no_relabel 해제 포함)이 있으면 잠긴
+    것으로 본다(08 D-27 3 — 앞당겨 연 기록 conditions_met = false 는 아님).
+    seal.jsonl·잠금·계획·표본 매니페스트만 열고 **라벨 파일은 열지 않는다**. 판단이 안 되면(오류) 잠기지 않은 것으로 본다.
   - 시범인데 모두 잠기지 않았으면 훈련 메뉴를 끈다. 이때는 최종 세트도 손라벨도 **열지 않는다**.
 
 자리(reader_kind, 24 5-2 의 9)
   - 공개 함수는 reader_kind(부르는 세션 종류, app.core.visibility)를 받는다. 기본 None = 세션 밖(지금까지와 같다).
   - 라벨링(1차·재라벨)·출처 판정 세션, 모르는 종류(= 봉인 AI 결과 ai_sealed 를 열 수 없는 자리, 03 12-1)는 **아무것도 열기
-    전에** 막는다: 최종 세트를 만들면 다른 세션 라벨과 seal.jsonl(노출 계산의 해제 기록)을 읽게 되고, 시범 판단도 잠금·계획을
-    읽기 때문이다. 이때 training_availability·load_reference 는 꺼짐(REASON_SEAT), pilot_block_reason 은 REASON_SEAT,
+    전에** 막는다: 최종 세트를 만들면 다른 세션 라벨과 seal.jsonl(노출 계산의 해제 기록)을 읽게 되고, 시범 판단도 seal.jsonl
+    (해제 기록)·잠금·계획을 읽기 때문이다. 이때 training_availability·load_reference 는 꺼짐(REASON_SEAT), pilot_block_reason 은 REASON_SEAT,
     pilot_sessions_locked 는 (False, [REASON_SEAT]), load_final_set_reference 는 (None, 'seat_blind').
     is_pilot_project 는 이름·시범 기록(freeze.json·setup.json)만 보므로 막지 않는다.
   - 조정·분석 세션은 막지 않는다(지금까지와 같은 길로 읽는다).
@@ -170,13 +172,17 @@ def is_pilot_project(project_dir: str, *, pilot_dir: str | None = None) -> bool:
 
 
 def pilot_sessions_locked(project_dir: str, *, reader_kind: str | None = None) -> tuple[bool, list[str]]:
-    """시범 세션이 모두 잠겼나 — (잠김, 아닌 까닭 목록). seal.unseal_conditions(06 7-1)와 같은 판단.
-    잠금·계획·표본 매니페스트만 연다. 오류면 (False, [까닭]). 막는 자리(seat_blind)면 열기 전에 (False, [REASON_SEAT])."""
+    """시범 세션이 모두 잠겼나 — (잠김, 아닌 까닭 목록). 조건을 채운 해제 기록(seal.conditions_met_unseal_exists — ai.unsealed
+    · conditions_met = true, 플래그 해제 allow_no_relabel 포함)이 있으면 (True, []) (08 D-27 3), 없으면 seal.unseal_conditions
+    (06 7-1)와 같은 판단. seal.jsonl·잠금·계획·표본 매니페스트만 연다. 오류면 (False, [까닭]). 막는 자리(seat_blind)면 열기
+    전에 (False, [REASON_SEAT])."""
     if seat_blind(reader_kind):
         return False, [REASON_SEAT]
     from . import seal
     root = _root(project_dir)
     try:
+        if seal.conditions_met_unseal_exists(root):
+            return True, []
         cond = seal.unseal_conditions(root)
     except Exception as e:  # noqa: BLE001 — 판단이 안 되면 잠기지 않은 것으로 (블라인드 쪽으로 안전하게)
         return False, [f"잠금 상태를 확인하지 못했습니다 ({type(e).__name__})"]
