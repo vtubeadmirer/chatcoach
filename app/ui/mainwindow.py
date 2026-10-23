@@ -42,13 +42,23 @@
 - 훈련 중에는 분석 메뉴·AI 비교 보고서·일치도 보고서를 끈다(D-18 6·8, D-19 4).
 - 가상 채팅 섞기(H-4, 20 5장, D-19 2): 보기 전용에서 이 구간의 가장 새 시나리오(scenarios\\, app.scenario_mix)가 있으면
   [훈련 → 가상 채팅 섞기] 가 기본으로 켜져 '스트리머 훈련' 한 번에 섞인다(끄기 1클릭). 없으면 그 자리의
-  [훈련 → 가상 채팅 만들기] 한 번이 엔진 도구(tools/make_scenario.py, retrieved 만, AI 없음)를 따로 프로세스로 워커에서
-  돌린다. 라벨링·출처 판정 세션에서는 scenarios\\ 를 열지 않고 두 항목을 숨긴다(20 1장 4번).
+  [훈련 → 가상 채팅 만들기] 한 번이 엔진 도구(tools/make_scenario.py)를 따로 프로세스로 워커에서 돌린다. 숨은 설정
+  settings.ini [lmstudio] model 이 있으면 같은 한 번 안에서 LM Studio 확인(engine generate --check-server) → 생성
+  (engine generate --out … --llm-check) → 섞기(make_scenario --generated)까지 한다(D-24 3, app.scenario_mix.run_virtual_make).
+  서버가 꺼져 있으면 retrieved 만 섞고 상태 줄에 'lmstudio_off' 한 줄. 주소는 [lmstudio] url(기본 http://127.0.0.1:1234,
+  이 PC 만), [lmstudio] llm_check(기본 켬). 모델 설정이 없으면 LM Studio 에 접속하지 않고 retrieved 만(지금까지와 같음).
+  앱은 LM Studio 에 직접 접속하지 않는다(엔진 도구만, D-06). 라벨링·출처 판정 세션에서는 scenarios\\ 를 열지 않고
+  두 항목을 숨긴다(20 1장 4번).
 - [훈련 → 시청자 훈련] 한 번(G, 08 D-20 2·5, 21 6-1)으로 app/ui/viewer_train_view 를 작업대 위에 쌓아 연다: 소리 켠
   다시보기, 쓰기 칸 하나, 세 축 3단계. 구간·맥락(주제 흐름·VOD 로 보정한 전사 낱말)은 app.viewer_flow 가 고르고 읽는다.
   전사 낱말 파일(derived\\asr-words.json)이 없거나 오래됐으면 열 때 엔진 도구를 워커로 돌려 만든다. 기록은
   app.viewer_store(viewer\\, 보호 구역). 정답을 보이지 않아 노출로 세지 않는다. 시범 프로젝트는 잠기기 전 끈다.
   라벨링·출처 판정 세션에서는 F 와 같이 '보기 전용으로 다시 열고' 연다.
+- [훈련 → 가상 채팅 가려내기] 한 번(H-5, 20 7장, 25 6-2, D-24 7 가)으로 app/ui/discern_view 를 작업대 위에 쌓아 연다:
+  가장 새 시나리오의 구간을 소리 켜고 틀고, 가상 표시를 숨기고, 맨 위에 '이 화면에는 생성 채팅이 섞여 있습니다' 한 줄,
+  채팅마다 '진짜'·'가짜'·'모름' 단추(채팅마다 1클릭). 구간 끝에 정답·숫자 줄. 기록은 app.discern_store(discern\\, 보호
+  구역, ID·판정·숫자만). 노출로 세지 않는다. 시범(잠기기 전)·라벨링 세션(1차·재라벨·조정·출처 판정)이면 메뉴를 끄고
+  scenarios\\ 를 열지 않는다(discern_block_reason). 시나리오가 없으면 '가상 채팅 만들기' 를 먼저 하라고 메뉴 안에 한 줄.
 
 운영 메뉴 (07 M4):
 - [도움말 → 이전 버전으로 되돌리기…] (04 6-10): updater.rollback_status 로 켜고 끈다. 이번 실행이 _backup 을 지울 차례
@@ -105,8 +115,18 @@ TRAINING_REOPEN_WAIT_S = 120
 TRAINING_REOPEN_TIP = ("이 세션을 닫고(저장 안 한 변경은 묻습니다) 보기 전용으로 다시 연 뒤 훈련을 엽니다. "
                        "훈련을 열면 이 프로젝트의 잠기지 않은 라벨링 세션은 대표값에서 빠집니다")
 VIEWER_TIP = "소리 켠 다시보기를 보며 채팅을 써 보고, 주제 적합성·대화 확장성·반복 여부를 축마다 봅니다"
+# 가상 채팅 생성(D-24 3): 숨은 설정 settings.ini [lmstudio]. model 이 비면 생성하지 않는다(LM Studio 에 접속도 안 함)
+LMSTUDIO_URL_KEY = "lmstudio/url"            # 기본 http://127.0.0.1:1234 — 이 PC(127.0.0.1·localhost·[::1])만
+LMSTUDIO_MODEL_KEY = "lmstudio/model"        # LM Studio 에 올린 모델 id 하나(20 4-3 '설정 파일에 적은 model_id')
+LMSTUDIO_CHECK_KEY = "lmstudio/llm_check"    # LLM 예/아니오 확인 llm-check-v1 (기본 켬)
+MAKE_TIP_RETRIEVED = "같은 방송의 훈련 구간 밖 채팅을 골라 채팅이 드문 곳에 섞을 시나리오를 만듭니다 (AI 없음)"
+MAKE_TIP_GENERATE = ("같은 방송의 훈련 구간 밖 채팅을 고르고, 이 PC 의 LM Studio({0})로 생성 채팅도 만들어 채팅이 드문 곳에 "
+                     "섞습니다. 밖으로 나가는 것은 없습니다. 서버가 꺼져 있으면 가져온 채팅만 섞습니다")
 VIEWER_REOPEN_TIP = ("이 세션을 닫고(저장 안 한 변경은 묻습니다) 보기 전용으로 다시 연 뒤 시청자 훈련을 엽니다. "
                      "시청자 훈련은 정답을 보이지 않아 라벨링 세션의 대표값에는 영향이 없습니다")
+# 가상 채팅 가려내기(H-5, 20 7장, 25 6-2, D-24 7 가)
+DISCERN_TIP = ("소리 켠 다시보기에서 채팅마다 '진짜' · '가짜' · '모름' 을 한 번씩 누릅니다. 가상 채팅 표시는 숨기고, 구간 끝에 "
+               "정답과 숫자(가짜 탐지율·κ)를 보입니다")
 
 
 def topics_sibling(path: str | None) -> str | None:
@@ -696,11 +716,25 @@ class MainWindow(QMainWindow):
         self.a_viewer_reason.setEnabled(False)
         self.a_viewer_reason.setVisible(False)
         self.m_training.addAction(self.a_viewer_reason)
+        # 가상 채팅 가려내기(H-5, 20 7-1, 25 6-2): 한 번 누르면 바로 열린다(소리 켬 · 가상 표시 숨김 · 맨 위 한 줄).
+        # 시범(잠기기 전)·라벨링 세션(1차·재라벨·조정·출처 판정)이면 끄고 scenarios\ 를 열지 않는다(20 1장 4번)
+        self.m_training.addSeparator()
+        self.a_discern = QAction(tr("가상 채팅 가려내기(&D)"), self)
+        self.a_discern.setToolTip(tr(DISCERN_TIP))
+        self.a_discern.triggered.connect(self._on_discern)
+        self.m_training.addAction(self.a_discern)
+        self.a_discern_reason = QAction("", self)
+        self.a_discern_reason.setEnabled(False)
+        self.a_discern_reason.setVisible(False)
+        self.m_training.addAction(self.a_discern_reason)
         self.m_training.aboutToShow.connect(self.update_training_actions)
         self.training_view = None
         self.training_log = None
         self.viewer_view = None
         self.viewer_log = None
+        self.discern_view = None
+        self.discern_log = None
+        self._discern_scn_cache = None    # (프로젝트 폴더, 가려낼 시나리오가 있나) — 보기 전용·분석 세션에서만 계산
         self._pending_kind = "streamer"   # 다시 연 뒤 열 훈련: 'streamer'(F) · 'viewer'(G)
         self.words_runner = None          # 시험: 전사 낱말 만들기 run_words 대신 부를 함수 (cmd, cancelled) -> dict
         self._training_cache = None       # (프로젝트 폴더, reference_set.Availability)
@@ -743,6 +777,7 @@ class MainWindow(QMainWindow):
 
     def invalidate_scenario_cache(self) -> None:
         self._scenario_cache = None
+        self._discern_scn_cache = None
 
     def training_scenario(self, root: str, av):
         """이 프로젝트·훈련 구간의 가장 새 시나리오(없으면 None). 보기 전용에서만 부른다 — 라벨링·출처 판정 세션은
@@ -789,17 +824,40 @@ class MainWindow(QMainWindow):
         if make:
             ok_tool = scenario_mix.tool_available() or self.scenario_runner is not None
             self.a_make_virtual.setEnabled(ok_tool)
-            self.a_make_virtual.setToolTip(
-                tr("같은 방송의 훈련 구간 밖 채팅을 골라 채팅이 드문 곳에 섞을 시나리오를 만듭니다 (AI 없음)")
-                if ok_tool else tr(scenario_mix.REASON_NO_TOOL))
+            llm, _prob = self.lmstudio_settings()
+            if not ok_tool:
+                tip = tr(scenario_mix.REASON_NO_TOOL)
+            elif llm.enabled:
+                tip = tr(MAKE_TIP_GENERATE).format(llm.model)
+            else:
+                tip = tr(MAKE_TIP_RETRIEVED)
+            self.a_make_virtual.setToolTip(tip)
 
     def mix_virtual_wanted(self, root: str) -> bool:
         return root not in self._mix_off_roots
 
+    def lmstudio_settings(self):
+        """(scenario_mix.LMSettings, 문제 코드 또는 None) — 숨은 설정 settings.ini [lmstudio] url·model·llm_check.
+        모델이 비면 생성하지 않는다. 주소가 이 PC 밖이면 'not_local'(생성은 건너뛰고 retrieved 만). 접속하지 않는다."""
+        from .. import scenario_mix
+        s = getattr(self, "settings", None)
+
+        def get(key, default):
+            try:
+                v = s.value(key, default) if s is not None else default
+            except Exception:  # noqa: BLE001 — 설정을 못 읽으면 기본값(생성 꺼짐)
+                v = default
+            return v if isinstance(v, (str, bool)) else default
+        return scenario_mix.lm_settings_from(get(LMSTUDIO_URL_KEY, ""), get(LMSTUDIO_MODEL_KEY, ""),
+                                             get(LMSTUDIO_CHECK_KEY, "1"))
+
     def make_virtual_chat(self, *, extra_args=None):
-        """'훈련 → 가상 채팅 만들기' 한 번(20 11-9): 엔진 도구(tools/make_scenario.py, retrieved 만)를 따로 프로세스로,
-        UI 스레드 밖(JobWorker)에서 돌린다. 끝나면 상태 줄에 숫자 한 줄, 다음 '스트리머 훈련' 에 섞인다(기본 켬).
-        훈련을 열지는 않는다(노출이 생기지 않게). 결과 dict(도구 출력, 숫자·코드만) 또는 None(막힘)."""
+        """'훈련 → 가상 채팅 만들기' 한 번(20 11-9, D-24 3): 엔진 도구를 따로 프로세스로, UI 스레드 밖(JobWorker)에서
+        돌린다. [lmstudio] model 설정이 있으면 같은 한 번 안에서 LM Studio 확인 → 생성 → 섞기(app.scenario_mix.
+        run_virtual_make), 없거나 서버가 꺼져 있으면 retrieved 만(꺼짐이면 상태 줄에 'lmstudio_off' 한 줄). 사람 클릭은
+        메뉴 '훈련' + '가상 채팅 만들기' = 2 그대로(고르는 창·입력 칸 없음, D-16). 끝나면 상태 줄에 숫자 한 줄, 다음
+        '스트리머 훈련' 에 섞인다(기본 켬). 훈련을 열지는 않는다(노출이 생기지 않게).
+        결과 dict(도구 출력 + llm 칸, 숫자·코드만) 또는 None(막힘)."""
         from .. import scenario_mix
         from ..workers import JobWorker
         why, av = self.training_block_reason(compute=True)
@@ -818,13 +876,18 @@ class MainWindow(QMainWindow):
         if cmd is None and runner is None:
             self.statusBar().showMessage(tr(scenario_mix.REASON_NO_TOOL), 6000)
             return None
+        llm, prob = self.lmstudio_settings()
+        if prob:
+            LOG.warning("가상 채팅 만들기: LM Studio 설정 문제 %s", prob)
         box: dict = {}
 
         def job(ctx):
-            fn = runner or (lambda c, cancelled: scenario_mix.run_make(c, cancelled=cancelled))
-            box["res"] = fn(cmd, ctx.cancelled)
+            box["res"] = scenario_mix.run_virtual_make(root, rng, extra_args=args, llm=llm, runner=runner,
+                                                       cancelled=ctx.cancelled)
         w = JobWorker.single("make_scenario", job, name="가상 채팅 만들기", parent=self)
-        self.run_job_modal(w, title=tr("가상 채팅 만들기"), label=tr("같은 방송의 다른 구간에서 채팅을 고르는 중…"))
+        label = (tr("이 PC 의 LM Studio 를 확인하고 생성 채팅을 만들어 섞는 중… (밖으로 나가는 것 없음)") if llm.enabled
+                 else tr("같은 방송의 다른 구간에서 채팅을 고르는 중…"))
+        self.run_job_modal(w, title=tr("가상 채팅 만들기"), label=label)
         w.deleteLater()
         res = box.get("res") if w.outcome == "done" else {"error": w.outcome or "failed"}
         self.invalidate_scenario_cache()
@@ -837,9 +900,12 @@ class MainWindow(QMainWindow):
         ok, msg = scenario_mix.describe(res or {}, quiet_max_real=qmr)
         if ok:
             self._mix_off_roots.discard(root)          # 만들었으면 섞기를 켠다(기본)
-        LOG.info("가상 채팅 만들기: rc=%s 결과=%s 줄=%s %sms", (res or {}).get("rc"),
+        li = (res or {}).get("llm") if isinstance((res or {}).get("llm"), dict) else {}
+        LOG.info("가상 채팅 만들기: rc=%s 결과=%s 가져옴=%s 생성=%s 생성시도=%s 생성코드=%s %sms", (res or {}).get("rc"),
                  "ok" if ok else (res or {}).get("error") or (res or {}).get("reason") or "-",
-                 ((res or {}).get("counts") or {}).get("retrieved", 0), (res or {}).get("elapsed_ms", 0))
+                 ((res or {}).get("counts") or {}).get("retrieved", 0),
+                 ((res or {}).get("counts") or {}).get("generated", 0), bool(li.get("tried")), li.get("code") or "-",
+                 (res or {}).get("elapsed_ms", 0))
         self.statusBar().showMessage(tr(msg), 10000)
         return res
 
@@ -883,7 +949,8 @@ class MainWindow(QMainWindow):
         proj = getattr(wb, "project", None) if wb is not None else None
         if proj is None or proj.data is None:
             return tr("프로젝트를 먼저 여세요"), None
-        if self.training_view is not None or getattr(self, "viewer_view", None) is not None:
+        if self.training_view is not None or getattr(self, "viewer_view", None) is not None \
+                or getattr(self, "discern_view", None) is not None:
             return tr("훈련이 이미 열려 있습니다"), None
         if self.jobs_busy():
             return tr("작업이 도는 중입니다 — 끝난 뒤에 쓸 수 있습니다"), None
@@ -936,16 +1003,20 @@ class MainWindow(QMainWindow):
         return None
 
     def training_needs_reopen(self) -> bool:
-        """지금 작업대가 라벨링(1차·재라벨)·출처 판정 세션인가 — 그러면 훈련은 '보기 전용으로 다시 열고 훈련'(D-19 3)."""
+        """지금 작업대가 라벨링(1차·재라벨)·조정·출처 판정 세션인가 — 그러면 훈련은 '보기 전용으로 다시 열고 훈련'(D-19 3).
+        조정도 넣는다: 20 1장 4번 '라벨링 세션(1차·재라벨·조정·출처 판정)은 scenarios\\ 를 열지 않는다' 와 가려내기
+        메뉴(discern_view.LABELING_KINDS)가 같은 세션 판단을 쓰게(가상 채팅 섞기·만들기·시청자 훈련도 이 함수를 본다)."""
         from ..core import visibility as vis
         wb = self.workbench
         if wb is None or wb.session is None:
             return False
-        return wb.session_kind in vis.LABELING_SESSIONS or wb.session_kind == vis.ORIGIN_REVIEW
+        return (wb.session_kind in vis.LABELING_SESSIONS
+                or wb.session_kind in (vis.ADJUDICATION, vis.ORIGIN_REVIEW))
 
     def update_training_actions(self, *_a) -> None:
         """훈련 메뉴를 펼 때: 켜고 끄고, 꺼졌으면 메뉴 안에 까닭 한 줄. 라벨링 세션이면 풍선에 다시 열기를 알린다."""
         self.update_viewer_action()
+        self.update_discern_action()
         why, _av = self.training_block_reason(compute=True)
         self.a_streamer_training.setEnabled(why is None)
         self._update_virtual_actions(why, _av)
@@ -1183,7 +1254,8 @@ class MainWindow(QMainWindow):
         proj = getattr(wb, "project", None) if wb is not None else None
         if proj is None or proj.data is None:
             return tr("프로젝트를 먼저 여세요"), False
-        if self.training_view is not None or self.viewer_view is not None:
+        if self.training_view is not None or self.viewer_view is not None \
+                or getattr(self, "discern_view", None) is not None:
             return tr("훈련이 이미 열려 있습니다"), False
         if self.jobs_busy():
             return tr("작업이 도는 중입니다 — 끝난 뒤에 쓸 수 있습니다"), False
@@ -1366,6 +1438,161 @@ class MainWindow(QMainWindow):
         self._apply_analysis_reasons(self.analysis_block_reasons(read_seal=False))
         self.update_session_actions()
 
+    # ---- 가상 채팅 가려내기 (H-5, 20 7장, 25 6-2, 08 D-24 7 가)
+    def _on_discern(self, *_a) -> None:
+        self.discern_training()
+
+    def _discern_has_scenario(self, root: str) -> bool:
+        """가려낼 시나리오(가상 줄 1개 이상)가 있나 — 프로젝트마다 한 번 읽어 둔다(만들기·닫기 뒤 다시). 시범·라벨링 판단을
+        먼저 지난 뒤에만 부른다(scenarios\\ 를 여는 곳은 여기와 prepare_discern 뿐)."""
+        c = self._discern_scn_cache
+        if c is not None and c[0] == root:
+            return c[1]
+        from .. import scenario_mix
+        try:
+            scn, _counts = scenario_mix.find_scenario(root, None)
+            ok = scn is not None and scenario_mix.virtual_count(scn) > 0
+        except Exception as e:  # noqa: BLE001 — 못 읽으면 끈다(까닭은 로그에 이름만)
+            LOG.warning("가려내기 시나리오 확인 실패: %s", type(e).__name__)
+            ok = False
+        self._discern_scn_cache = (root, ok)
+        return ok
+
+    def discern_block_reason(self) -> tuple[str | None, bool]:
+        """(막힌 까닭 한 줄 또는 None, 시범인데 다 잠겨 열 수 있음). 순서는 discern_view.discern_menu_state 와 같다:
+        시범(잠기기 전) → 라벨링 세션(1차·재라벨·조정·출처 판정) → 영상 → 시나리오. 앞 둘에 걸리면 scenarios\\ 를 열지
+        않는다(20 1장 4번). 라벨링 세션이면 시범 잠김 판정(계획·매니페스트 열기)도 하지 않는다(06 7-3)."""
+        from .. import viewer_flow as vf
+        from . import discern_view as dv
+        wb = self.workbench
+        proj = getattr(wb, "project", None) if wb is not None else None
+        if proj is None or proj.data is None:
+            return tr("프로젝트를 먼저 여세요"), False
+        if self.training_view is not None or self.viewer_view is not None or self.discern_view is not None:
+            return tr("훈련이 이미 열려 있습니다"), False
+        if self.jobs_busy():
+            return tr("작업이 도는 중입니다 — 끝난 뒤에 쓸 수 있습니다"), False
+        root = proj.root
+        kind = wb.session_kind if wb.session is not None else None
+        labeling = kind in dv.LABELING_KINDS
+        why, pilot_ok = vf.block_reason(root, labeling=labeling)
+        if why:
+            # 시청자 훈련 문구 대신 가려내기 문구(시범 잠기기 전)
+            return (tr(dv.REASON_PILOT) if labeling else tr(why)), False
+        ok, why = dv.discern_menu_state(os.path.basename(root), session_kind=kind,
+                                        has_media=bool(getattr(wb, "media_path", None)), has_scenario=True,
+                                        pilot_locked=pilot_ok)
+        if not ok:
+            return why, False
+        if not self._discern_has_scenario(root):
+            return tr("가려낼 가상 채팅이 없습니다 — 먼저 '가상 채팅 만들기' 로 만드세요"), False
+        if "chat" in (getattr(wb, "_jobs", None) or {}) or not getattr(wb.chat_data, "count", 0):
+            return tr("채팅을 읽는 중입니다"), False
+        if self._training_labeler() is None:
+            return tr("라벨러를 한 번 고른 뒤에 열 수 있습니다 (세션 화면)"), False
+        return None, pilot_ok
+
+    def update_discern_action(self) -> None:
+        """'가상 채팅 가려내기' 를 켜고 끈다. 꺼졌으면 메뉴 안에 까닭 한 줄."""
+        why, _ok = self.discern_block_reason()
+        self.a_discern.setEnabled(why is None)
+        self.a_discern.setToolTip(why or tr(DISCERN_TIP))
+        self.a_discern_reason.setText(tr("가려내기: {0}").format(why) if why else "")
+        self.a_discern_reason.setVisible(bool(why))
+
+    def discern_training(self, *, show: bool = True):
+        """'훈련 → 가상 채팅 가려내기' (H-5, 20 7-1, 25 6-2). 한 번 누르면 바로: 가장 새 시나리오의 구간을 소리 켜고 튼다 ·
+        가상 표시('가'·'생'·'가져옴·생성')를 숨긴다 · 맨 위에 '이 화면에는 생성 채팅이 섞여 있습니다' 한 줄 · 채팅마다
+        '진짜'·'가짜'·'모름' 단추. 구간 끝에 정답과 숫자 줄(app.core.discern.evaluate → origin.compare_origins). 고르는 창·
+        입력 칸 없음. 기록은 discern\\<id>.jsonl(app.discern_store, 보호 구역 — ID·판정·숫자만). 노출로 세지 않는다
+        (training\\ 에 쓰지 않음, 원래 반응·사람 라벨·엔진 판정을 보이지 않음). DiscernView 또는 None."""
+        title = tr("가상 채팅 가려내기")
+        why, pilot_ok = self.discern_block_reason()
+        if why:
+            self.statusBar().showMessage(why, 6000)
+            return None
+        from .. import discern_store as ds
+        from .discern_view import DiscernView, prepare_discern
+        wb = self.workbench
+        proj = wb.project
+        root, pid = proj.root, proj.project_id
+        kind = wb.session_kind if wb.session is not None else None
+        labeler = self._training_labeler()
+        prep = prepare_discern(root, pid, labeler_id=labeler, session_kind=kind,
+                               has_media=bool(getattr(wb, "media_path", None)), pilot_locked=pilot_ok)
+        if not prep.ok:
+            self._discern_scn_cache = None
+            self.statusBar().showMessage(prep.reason, 6000)
+            return None
+        try:
+            log = ds.DiscernLog.create(root, labeler, app_version=__version__)
+        except ds.DiscernBlockedError as e:
+            self.statusBar().showMessage(str(e), 6000)
+            return None
+        except (ds.DiscernStoreError, OSError) as e:
+            self.warn(title, tr("가려내기 기록을 만들지 못했습니다: {0}").format(
+                str(e) if isinstance(e, ds.DiscernStoreError) else type(e).__name__))
+            return None
+        try:
+            wb.player.pause()                       # 작업대 영상은 멈춰 둔다(소리가 겹치지 않게)
+        except Exception:  # noqa: BLE001
+            pass
+        self._close_analysis_windows()
+        view = DiscernView(self)                    # 처음부터 이 창의 자식으로(mpv 창 핸들, 10 5-3 의 8)
+        self.stack.addWidget(view)
+        if show:
+            self.stack.setCurrentWidget(view)
+        dur = int(getattr(wb, "_vod_duration", 0) or 0)
+        ok = view.start(**prep.kwargs, media_path=wb.media_path, timemap=wb.timemap,
+                        viewer_no=dict(wb.chat_data.viewer_no or {}), duration_ms=dur or None, log=log)
+        if not ok:
+            reason = view.blocked_label.text()
+            self._drop_empty_training_log(log)      # start 줄을 못 쓴 빈 discern\<id>.jsonl 은 남기지 않는다
+            view.close_view()
+            self.stack.removeWidget(view)
+            view.deleteLater()
+            self.stack.setCurrentWidget(wb)
+            self.statusBar().showMessage(reason, 6000)
+            return None
+        view.closeRequested.connect(self.close_discern)
+        view.messageShown.connect(self._on_training_message)
+        self.discern_view, self.discern_log = view, log
+        self._apply_analysis_reasons(self.analysis_block_reasons(read_seal=False))
+        self.update_session_actions()
+        if hasattr(wb, "detach_status_bar"):
+            wb.detach_status_bar()
+        if show:
+            view.setFocus()
+        seg = prep.kwargs.get("segment") or (0, 0)
+        tg = view.targets()
+        LOG.info("가려내기 열기: 구간 %d ms · 대상 %d (실제 %d · 가져옴 %d · 생성 %d) · 본 적 있음 %s · 다시 봄 %s",
+                 int(seg[1]) - int(seg[0]), len(tg), sum(1 for t in tg.values() if t.source == "replay"),
+                 sum(1 for t in tg.values() if t.source == "retrieved"),
+                 sum(1 for t in tg.values() if t.source == "generated"), prep.kwargs.get("seen_before"),
+                 prep.kwargs.get("repeat"))
+        return view
+
+    def close_discern(self, *_a) -> None:
+        """가려내기 화면을 닫는다(정답 전이면 discern.end closed). 작업대로 돌아간다. 여러 번 불러도 된다."""
+        view = getattr(self, "discern_view", None)
+        if view is None:
+            return
+        self.discern_view, self.discern_log = None, None
+        try:
+            view.close_view()
+        except Exception:  # noqa: BLE001 — 닫는 길은 막지 않는다
+            LOG.exception("가려내기 화면 닫기 실패")
+        self.stack.removeWidget(view)
+        view.deleteLater()
+        wb = self.workbench
+        if wb is not None:
+            if hasattr(wb, "attach_status_bar"):
+                wb.attach_status_bar(self.statusBar())
+            self.stack.setCurrentWidget(wb)
+            wb.setFocus()
+        self._apply_analysis_reasons(self.analysis_block_reasons(read_seal=False))
+        self.update_session_actions()
+
     def _close_analysis_windows(self) -> None:
         """'엔진과 나란히 보기'·'방송 요약' 창을 닫는다(훈련을 열 때). 여러 번 불러도 된다."""
         for attr in ("side_view_dialog", "summary_dialog"):
@@ -1402,10 +1629,11 @@ class MainWindow(QMainWindow):
         if self.jobs_busy():
             why = tr("작업이 도는 중입니다 — 끝난 뒤에 쓸 수 있습니다")
             return {k: why for k in keys}
-        if getattr(self, "training_view", None) is not None or getattr(self, "viewer_view", None) is not None:
+        if getattr(self, "training_view", None) is not None or getattr(self, "viewer_view", None) is not None \
+                or getattr(self, "discern_view", None) is not None:
             # 훈련 중에는 원래 반응·엔진 판정·사람 최종 세트를 보이지 않는다(훈련 점수 블라인드, D-18 6·8).
             # 시청자 훈련(G)도 같이 끈다 — 첫 판은 정답을 보이지 않아 노출로 세지 않는데(D-20 5), 그 전제를 지키려고
-            # 훈련을 열 때 나란히 보기·방송 요약 창도 닫는다(_close_analysis_windows)
+            # 훈련을 열 때 나란히 보기·방송 요약 창도 닫는다(_close_analysis_windows). 가려내기(H-5)도 같다(노출 아님)
             why = tr("훈련 중에는 쓰지 않습니다 — 훈련을 닫은 뒤에 쓸 수 있습니다")
             return {k: why for k in keys}
         menu = af.menu_block_reason(kind)
@@ -1785,7 +2013,8 @@ class MainWindow(QMainWindow):
         wb = self.workbench
         if wb is None or getattr(wb, "project", None) is None:
             return tr("프로젝트를 먼저 여세요")
-        if getattr(self, "training_view", None) is not None or getattr(self, "viewer_view", None) is not None:
+        if getattr(self, "training_view", None) is not None or getattr(self, "viewer_view", None) is not None \
+                or getattr(self, "discern_view", None) is not None:
             # 보고서는 채팅 단위로 사람 라벨(정답)을 보인다 — 훈련 중에는 끈다(D-19 4, 19 5-2 의 4번). 사람 클릭 0.
             # 시청자 훈련 중에도 끈다(정답을 보이지 않는다는 D-20 5 의 전제)
             return tr("훈련 중에는 쓰지 않습니다 — 훈련을 닫은 뒤에 쓸 수 있습니다")
@@ -2176,7 +2405,9 @@ class MainWindow(QMainWindow):
         """작업대를 닫는다. 저장하지 않은 구간 변경이 있으면 저장·버리기를 묻고(취소 없음), store 는 reason 으로 닫는다."""
         self.close_training()                 # 훈련 화면은 이 작업대(채팅·보정)에 묶여 있다 — 먼저 닫는다(training.end)
         self.close_viewer_training()          # 시청자 훈련도 같다(viewer.end closed)
+        self.close_discern()                  # 가려내기도 같다(정답 전이면 discern.end closed)
         self.invalidate_training_cache()
+        self._discern_scn_cache = None
         wb = self.workbench
         if wb is None:
             return

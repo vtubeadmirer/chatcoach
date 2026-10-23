@@ -1,6 +1,6 @@
 # 20. 계획 — H 가상 채팅 (F 스트리머 훈련과 같이)
 
-상태: **계획만 (D-18 9).** 코드는 아직 없다. 이 문서대로 다음 묶음에서 만든다.
+상태 (2026-10-23, 08 **D-24**): H-1·H-2·H-4 **됨**(F 둘째, [21](21-progress-2026-10-22-f2.md)). H-3 은 **가짜 LLM 으로 끝낼 수 있는 부분까지 됨**([25](25-progress-2026-10-23-h3-prep.md)) — 실제 생성 측정은 시범 뒤. H-5 가려내기 **화면은 마지막 '시범 전' 묶음에서 합성 판정으로 만든다**(D-24 7 가) — 실제 판정은 시범 뒤. 단계별 현황은 10장 표 아래. 처음 판(D-18 9)은 계획만이었다.
 기준: [08](08-decisions-2026-10-20.md) **D-05**(가상 채팅은 앱 안에서만)·**D-06**(외부 AI 최소 노출)·D-14 7·8(라벨 형식 고정, H 는 F 와 같이)·D-16(클릭 한 번)·D-17 6(로컬 모델 먼저)·**D-18 7·8·9**(시범 프로젝트 훈련 금지, training-event, H 는 계획만).
 앞 계획: [18](18-progress-2026-10-22-e2.md) 6-4 의 H-1~H-6 을 이 문서가 자세히 쓴다. 출처 판정 계산은 [06](06-evaluation-and-agreement.md) 4-7 을 그대로 쓴다.
 
@@ -80,11 +80,11 @@
 | `project_id` | 이 시나리오가 붙는 프로젝트 |
 | `range` | `vod_from_ms`·`vod_to_ms` (훈련 구간) |
 | `created_at`, `created_by` | 시각, 도구 이름·판(`engine retrieve 0.2.0` — 0.2.0 부터 줄마다 다른 가림 이름, D-20 7) |
-| `inputs` | `messages_sha256`, `asr_sha256`(있으면), `topic_flow_sha256`(있으면), 다른 프로젝트에서 가져왔으면 그 `project_id`·`messages_sha256` 목록 |
+| `inputs` | `messages_sha256`, `asr_sha256`(있으면), `topic_flow_sha256`(있으면), 다른 프로젝트에서 가져왔으면 그 `project_id`·`messages_sha256` 목록, (선택, D-24 1) `generated_sha256` — `make_scenario --generated` 가 읽은 생성 후보 파일의 sha256 |
 | `fill` | 채우기 규칙 시작값: `quiet_window_ms`(60000), `quiet_max_real`(2), `target_per_min`(6), `max_virtual_ratio`(0.5) |
 | `retrieval` | `method`(`topic_words`·`topic_words+e5`), 점수 하한, 같은 원 시청자 최대 횟수 |
-| `generator` | `backend`(`none`·`lmstudio`·`external`), `model_id`, `model_sha256`(알 수 있으면), `prompt_template_id`·`prompt_sha256`, `temperature`, `seed`, `context_ms`(앞 몇 초를 넣었나) |
-| `filters` | 거르기 판(`nickname-v1`·`copy-v1`·`block-v1`·`llm-check-v1`)과 걸러 낸 수, 금칙어 파일을 읽었으면 그 파일의 `blocklist_sha256`(낱말은 적지 않음, D-20 6) |
+| `generator` | `backend`(`none`·`lmstudio`·`external`), `model_id`, `model_sha256`(알 수 있으면), `prompt_template_id`·`prompt_sha256`, `temperature`, `seed`, `context_ms`(앞 몇 초를 넣었나), (선택, D-24 1) `response_sha256`(LLM 응답 해시) |
+| `filters` | 거르기 판(`nickname-v1`·`copy-v1`·`block-v1`·`llm-check-v1`, D-24 1 로 `length-v1`·`idform-v1`·`dup-v1`·`gscore-v1` 을 더함)과 걸러 낸 수, 금칙어 파일을 읽었으면 그 파일의 `blocklist_sha256`(낱말은 적지 않음, D-20 6) |
 | `external` | `enabled`(기본 false). true 면 `log_ref`(보낸 기록 파일) |
 | `counts` | 출처별 줄 수 |
 
@@ -126,8 +126,11 @@
 | 순서 | 방법 | 필요한 것 | 잘하는 것 | 모자란 것 | 못 쓸 때 |
 |---|---|---|---|---|---|
 | ① | **retrieved** — 실제 채팅에서 고르기 | 그 프로젝트(또는 같은 채널 프로젝트)의 `messages.jsonl`, 주제 흐름 낱말(있으면), e5-small(있으면) | 말투가 진짜다. AI 가 필요 없다. 빠르다 | 그 순간 말에 딱 맞는 채팅이 드물다. 같은 시청자 말버릇이 반복될 수 있다 | 가져올 채팅이 모자라면 있는 만큼만 넣고 `counts` 에 적는다 |
-| ② | **generated (로컬 LLM)** — LM Studio | LM Studio **서버가 켜져 있어야** 한다(`http://localhost:1234`), 이미 있는 LLM 2개 가운데 하나 | 그 순간 스트리머 말에 맞춘 채팅을 만든다 | 말투가 어색할 수 있다. 한국어 채팅 말투·밈을 모를 수 있다. 느리다 | 서버가 꺼져 있으면 **생성 0건으로 멈추고** `lmstudio_off` 를 낸다. 외부로 넘어가지 않는다. retrieved 만으로 시나리오를 만들지는 `--generate off` 를 적을 때만 |
+| ② | **generated (로컬 LLM)** — LM Studio | LM Studio **서버가 켜져 있어야** 한다(`http://127.0.0.1:1234` — `localhost` 로 적어도 127.0.0.1 로 부른다), 이미 있는 LLM 2개 가운데 하나 | 그 순간 스트리머 말에 맞춘 채팅을 만든다 | 말투가 어색할 수 있다. 한국어 채팅 말투·밈을 모를 수 있다. 느리다 | 서버가 꺼져 있으면 **생성 0건으로 멈추고** `lmstudio_off` 를 낸다. 외부로 넘어가지 않는다. retrieved 만으로 시나리오를 만들지는 `--generate off` 를 적을 때만 |
 | ③ | **generated (외부 AI)** | 사용자가 켬, D-06 6규칙, 05 11-3 확인(처리위탁·국외 이전) | 말투 품질이 나을 수 있다 | 개인정보·비용·약관 | **기본 꺼짐.** 이번 H 범위에서는 만들지 않는다(8장 위험, 11장 5번) |
+
+**①과 ②를 섞는 법 (구현, [25](25-progress-2026-10-23-h3-prep.md) 4-3 1번·5-1 13·14번).** 위 차례(① 먼저, 남은 자리에 ②)대로 두면 큰 방송에서는 retrieved 가 창 목표를 먼저 다 채워 생성 줄이 **늘 0줄**이었다. 그래서 `tools/make_scenario.py --generated` 의 기본을 **`--generated-mode replace`** 로 했다: 생성 몫(`--max-generated-ratio`, 기본 0.25)을 먼저 잡고 같은 수의 retrieved 를 그 창에서 점수 낮은 것부터 뺀다. 창 목표·가상 비율 상한(`max_virtual_ratio`)은 그대로다. 옛 차례는 `--generated-mode room`. 생성 몫을 0.5 까지 올릴지는 H-5 결과로 정한다.
+실제 길은 `python -m engine generate --out <생성 후보>` → `make_scenario --generated <생성 후보>`(G 채점기 `app.core.gen_filter` 로 한 번 더 거름 — 주제 weak·반복 weak 는 빼고, 확장성은 수만 셈. 다만 반복 축의 **말버릇(`repeat.habit`)은 생성 줄에서 기록만 하고 빼지 않는다** — 가짜 응답이 같은 틀의 반복이라 지금은 비율을 잴 수 없어서다. 시범 뒤 실제 비율을 보고 다시 정한다, D-24 4). 앱 메뉴 '훈련 → 가상 채팅 만들기' 는 LM Studio 확인 → 이 둘을 한 번에 부르게 한다(D-24 3 — 마지막 '시범 전' 묶음에서 연결, 11장 9번).
 
 ### 4-2. ① retrieved 고르는 법
 
@@ -154,6 +157,20 @@
 | 다시 재현 | `seed`·`temperature` 고정. 그래도 LLM 이 같은 답을 낸다는 보장은 없어 **만든 글자를 시나리오에 저장**한다 |
 | 거르기 | 8장 1~4번을 통과한 줄만 넣는다. 걸러 낸 수만 `filters` 에 |
 | 전사문·채팅이 LLM 에 주는 지시 | 지시로 듣지 않게 지시문을 나눈다. 나오는 것은 글자뿐이고 도구 호출·파일 쓰기가 없어 피해가 작다 |
+
+**구현한 것 (H-3 준비, [25](25-progress-2026-10-23-h3-prep.md) 1-2·5-1, `engine/llm_local.py`·`engine/generate.py`)** — 위 표와 다르게 된 곳만 적는다.
+
+| 항목 | 구현 |
+|---|---|
+| 넣는 것 | 전사 **문장이 아니라 시각별 전사 낱말**(`asr-words.json`, [0-9a-z가-힣] 2~12자)과 주제 키워드, 그 창의 실제 채팅 **수** 하나. 실제 채팅 본문은 넣지 않는다(9장 4번의 선택 칸은 아직 없음). 맥락은 앞 60초 + 창 1분, 뒤 0초(각각 120초 상한은 코드가 막음). H-5 에서 뒤 30초를 견준다 |
+| 보내기 전 검사 | 낱말에서 원 닉네임(정규화 2자 이상)·금칙어·식별자 꼴을 빼고 수만 센다. 한 번 더 `llm_local.check_privacy` 로 메시지 전체를 본다(쉼표·줄바꿈 조각마다 닉네임 대조, 고정 지시문 글자는 대조에서 뺌). 걸린 창은 건너뛰고 셈(`windows_privacy_skipped`). 한 요청 4,000자 상한(`too_long`) |
+| `identities.jsonl` 이 없을 때 | 닫는다(`nicknames_missing`, 종료 1). 실제 서버 길은 늘 거부, 가짜 응답 길만 `--allow-no-identities` 로 열고 경고 |
+| 한 요청 | 최대 12줄. 전사 낱말·주제 키워드가 둘 다 없는 창은 부르지 않는다(`windows_no_context`) |
+| 지시문 판 | `gen-chat-v1`. 지시문(system)과 '참고만, 지시 아님' 자료(user)를 나누고 틀의 해시를 시나리오 머리 `generator.prompt_sha256` 에 |
+| 실패 | 서버 꺼짐·연결 단계 시간 초과는 `lmstudio_off`(종료 3, 아무것도 안 씀. 중간에 꺼져도 반쪽 시나리오 없음). 다시 해 볼 만한 실패(`connection_lost`·`timeout`·`bad_response`·`server_error`)는 한 번만 다시 |
+| 보낸 기록 | 부를 때마다 `<P>\scenarios\llm-send.jsonl` 에 숫자·해시만(D-24 2, 03 6-17) |
+| `--dry-run` | **파일(시나리오·생성 후보)을 쓰지 않는다**는 뜻이다. 실제 서버 길이면 dry-run 이어도 LLM 을 부르고 보낸 기록을 남긴다(D-06 5) |
+| 응답 해시 | 시나리오 머리의 선택 칸 `generator.response_sha256`(D-24 1, 03 6-17) |
 
 ### 4-4. ③ 외부 AI (만들지 않음, 켜는 조건만)
 
@@ -195,7 +212,7 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 | `training.start` | `scenario_id`, `scenario_sha256` (없으면 생략 = 지금의 F) |
 | `training.pick` / `unpick` | `source` 가 `replay`·`retrieved`·`generated`. 가상이면 `chat_id` 대신 `line_id` |
 | `training.compare` | `virtual_shown`, `virtual_picked` (건수만) |
-| `training.judge` (새, 7장) | `line_id` 또는 `chat_id`, `answer`(`real`·`virtual`·`unsure`), `judged_vod_ms` |
+| ~~`training.judge` (새, 7장)~~ | **더하지 않는다.** 가려내기 판정은 따로 `discern/<session_id>.jsonl`(discern-event, 03 6-19)에 둔다 — 표시를 숨기는 다른 화면이고, 스트리머 훈련의 노출 규칙에 섞이지 않게(D-24 7 가) |
 
 - 노출: 가상 채팅 훈련 세션도 F 처럼 **노출로 센다**(18 6-5 3번). 시나리오에 원래 반응은 없지만 replay 견주기가 정답을 보인다.
 
@@ -225,6 +242,8 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 | 채팅 옆 단추 '진짜' · '가짜' · '모르겠음' | 그 채팅의 판정. 다시 누르면 바꿈 | 채팅마다 1 |
 | 구간 끝 | 판정한 채팅마다 정답 표시가 붙고 숫자 줄이 나온다 | 0 |
 
+- 기록은 `discern/<session_id>.jsonl`(discern-event, 03 6-19). 줄마다 `chat_id` 또는 `scenario_id`·`line_id` 와 판정·누른 시각만 — 본문·닉네임·가림 이름 없음. 화면의 끝 숫자와 보고에도 본문 없이 숫자만(8장 11번).
+- 시범 프로젝트는 잠기기 전 메뉴가 꺼진다(1장 8번). 라벨링 세션은 이 화면을 열지 않는다.
 - 대상은 사람이 고르지 않는다: 구간에 보인 채팅 **전부**(실제 + 시나리오 줄).
 - 판정하지 않은 채팅은 '안 봄' 으로 세고 혼동표에 넣지 않는다.
 - 같은 사람이 같은 시나리오를 두 번 가려내면 두 번째는 '다시 봄' 으로 표시하고 대표값에서 뺀다.
@@ -234,7 +253,7 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 | 항목 | 값 |
 |---|---|
 | A 쪽(정답) | 시나리오에서 만든다: `replay`·`retrieved` → `real`, `generated` → `virtual`. method = `generation_log_match` |
-| B 쪽(사람) | `training.judge`: 진짜 → `real`, 가짜 → `virtual`, 모르겠음 → `undeterminable`. method = `manual` |
+| B 쪽(사람) | 유효한 `discern.judge`(대상마다 마지막 줄. 같은 단추를 다시 눌러 지운 `none` 은 '안 봄'): 진짜 → `real`, 가짜 → `virtual`, 모르겠음 → `undeterminable`. method = `manual` |
 | 짝 키 | replay 는 `chat_id`, 시나리오 줄은 `scenario_id:line_id` |
 | 계산 | `app.core.origin.compare_origins(a, b, strict=False)` 하나. 3×3 혼동표·명목 κ |
 | 주의 | A 쪽이 모두 '자동' 이라 결과의 `human` 묶음은 비고 `all` 만 뜻이 있다. 보고에 1줄 적는다 |
@@ -250,6 +269,8 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 
 - 가려내는 사람이 그 방송을 최근에 봤으면 실제 채팅을 기억해 탐지율이 올라간다. 보고 머리에 '이 구간을 본 적 있음' 여부(세션 기록으로 계산)를 적는다.
 - 평가용 구간은 `<P>`(`p15767532`) 사본이나 합성 프로젝트. 시범 프로젝트는 잠기기 전 쓰지 않는다.
+- **판정이 한쪽에 몰린 판은 판단하지 않는다(시작값):** '모르겠음' 비율이 **0.5 초과**이거나 사람이 한 값만 눌렀으면(혼동표 열 가운데 0 이 아닌 것이 하나) 관문을 '판단 불가' 로 둔다. 전부 '모르겠음'·전부 '진짜' 는 탐지율 0·κ 0 이라 글자 그대로면 '통과' 지만 가려내려 하지 않은 판이다(`app.core.discern.one_sided`).
+- **방송 2편은 세션을 합쳐 잰다.** 화면은 세션 하나라 늘 방송 1편('표본 적음')이다. 관문은 `tools/discern_report.py` 가 프로젝트(= 방송)마다의 `discern\*.jsonl` 을 다시 읽어(판정 줄의 키 → 그 세션이 가리킨 시나리오 파일의 source 로 정답을 다시 만듦) `evaluate_sessions` 로 낸다.
 
 ---
 
@@ -260,11 +281,11 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 | 1 | **실제 시청자 닉네임**이 생성 본문·이름에 나온다 | 엔진이 그 프로젝트(와 가져온 프로젝트)의 원 닉네임·가림 닉네임 목록으로 대조. 한 글자라도 닉네임 전체가 들어 있으면 그 줄 버림. 목록은 엔진 메모리에서만, 결과는 건수만 | 합성 닉네임을 일부러 넣은 LLM 가짜 응답으로 0줄 남는지 |
 | 2 | **사칭** — 가상 채팅이 실제 사람·스트리머·운영자인 척한다 | 이름은 시나리오의 가림 이름만(`하**` 모양, 실제 가림 닉네임과 겹치면 다시 뽑음). 후원·구독·운영자 표시·배지를 만들지 않는다(`kind` 는 일반 채팅만). 지시문에 '실제 사람 이름을 부르지 말 것' | 스키마가 다른 kind·배지 칸을 막는지 |
 | 3 | 옮겨 온 실제 채팅이 다른 맥락에서 실제 시청자 이름과 붙는다 | `retrieved` 도 가림 이름을 새로 붙이고, 다른 시청자 닉네임이 든 채팅은 뺀다. 훈련 화면은 가상 채팅을 섞을 때 실제 채팅을 **훈련 구간 안만** 싣는다(같은 방송 구간 밖의 원 채팅이 같은 표에 원 가림 닉네임으로 보이면 본문 대조로 가명이 이어진다). 남은 실제 줄과 본문이 같은 가상 줄은 한 번 더 뺀다(`trainer_view._clip_mixed`, 2026-10-22 검토 수정). core 쪽도 막는다: `core.training.split_mixed` 는 섞기 결과(`merge_for_display` 의 MergeResult·DisplayRow)를 받으면 실제 줄이 0개여도 실제 채팅을 다시 붙이지 않는다(21 4-2 18번). 가명은 줄마다 달라(D-20 7) 이름으로 줄을 묶을 수도 없다 | 합성 데이터 시험 · '가상 줄 본문과 같은 실제 줄 0개'(`test_trainer_view`·`test_training_menu`) · 섞기 결과에 실제 줄을 다시 붙이지 않음·같은 시청자 줄도 이름이 다름(`test_training`·`test_retrieve`) |
-| 4 | **혐오·괴롭힘·성적 표현** | (1) 로컬 금칙어 목록으로 1차 거름 (2) 같은 LM Studio 로 '예/아니오' 확인 한 번 더 (3) 걸린 줄은 버리고 건수만. `retrieved` 도 (1) 을 거친다. 목록 파일은 저장소 밖(11장 6번)에 있고 2026-10-22 에 Claude 가 짧게 만들었다(D-20 6). 파일이 없으면 경고만 내고 거르기 0낱말로 만들고, 있는데 읽지 못하면 만들지 않는다(`bad_blocklist`) | 합성 금칙어로 버려지는지, 기본 경로를 읽고 해시만 적는지, 없을 때 경고·깨졌을 때 거부(`test_retrieve`) |
+| 4 | **혐오·괴롭힘·성적 표현** | (1) 로컬 금칙어 목록으로 1차 거름 (2) 같은 LM Studio 로 '예/아니오' 확인 한 번 더(`llm-check-v1` — 마지막 '시범 전' 묶음에서 **가짜 LLM 으로** 만든다, D-24 5. 실제 측정은 시범 뒤) (3) 걸린 줄은 버리고 건수만. `retrieved` 도 (1) 을 거친다. 목록 파일은 저장소 밖(11장 6번)에 있고 2026-10-22 에 Claude 가 짧게 만들었다(D-20 6). 파일이 없으면 경고만 내고 거르기 0낱말로 만들고, 있는데 읽지 못하면 만들지 않는다(`bad_blocklist`) | 합성 금칙어로 버려지는지, 기본 경로를 읽고 해시만 적는지, 없을 때 경고·깨졌을 때 거부(`test_retrieve`) |
 | 5 | 생성 글이 실제 채팅을 거의 그대로 베낀다(실제 시청자 말이 '가짜' 로 둔갑) | 같은 프로젝트 실제 채팅과 정규화 뒤 같거나 글자 5-gram 겹침 0.8 이상이면 버림(`copy_max`) | 합성 |
 | 6 | 가상 채팅이 정답지에 섞인다 | `scenarios\` 는 라벨링 세션이 열지 않는다(열기 감시 시험). 라벨 형식 고정 시험 통과. 내보내기는 `scenarios\` 를 읽지 않는다 | test_blind 류 + frozen + pilot_freeze |
 | 7 | 시범 프로젝트 오염 | 엔진 `pilot_locked` 거부, 앱 메뉴 꺼짐, retrieved 후보에서 `pilot-*` 뺌 | 폴더 이름 시험 |
-| 8 | 외부로 새어 나감 | 외부 호출 코드를 이번 H 에 두지 않는다. LM Studio 주소는 `localhost`·`127.0.0.1` 만 받는다(다른 주소면 거부) | 주소 검사 시험 |
+| 8 | 외부로 새어 나감 | 외부 호출 코드를 이번 H 에 두지 않는다. LM Studio 주소는 `localhost`·`127.0.0.1`·`::1` 만 받는다(다른 주소면 거부 `not_local`). **더 막은 것**(25 5-1 6번): `localhost` 는 이름 풀이 없이 127.0.0.1 로 부름(hosts 파일이 다른 곳을 가리켜도 밖으로 안 나감) · 프록시 환경 변수 무시 · 넘겨주기(3xx)를 따르지 않음(`redirect_refused`) · 10진/16진 IP·IPv4 매핑 IPv6·`127.0.0.2`·끝점 붙은 이름·사용자 정보가 든 주소 거부. 엔진의 다른 LM Studio 길(`engine/semantic.py` 의 임베딩)도 같은 규칙을 쓰게 한다(25 5-2 의 5번, 마지막 '시범 전' 묶음) | 주소 검사 시험(받는 주소 8개·거부 35개), 소켓 감시로 루프백 밖 연결 0 |
 | 9 | 생성 채팅 품질이 나빠 나쁜 버릇을 들인다 | 7장 관문을 넘기 전에는 메뉴 이름에 '(시험)' 을 붙인다. F 점수에 가상 채팅을 넣지 않는다 | — |
 | 10 | 전사문·채팅에 든 말이 LLM 에 지시처럼 먹힌다 | 지시문과 입력을 나눈다. 출력은 글자뿐, 거르기를 거친다 | 합성 |
 | 11 | 로그·보고에 본문이 남는다 | 엔진·앱 로그는 건수·ID·해시만. 생성 본문은 시나리오 파일(보호 구역)에만 | 로그 검사 시험 |
@@ -297,6 +318,9 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 | **합계** | | | **5~7.5** (D-03 의 H 5~8 안) |
 
 - 진행(2026-10-22, 21 1-4): H-1·H-2·H-4 됨. 다만 H-1 의 '라벨링 세션 4종이 `scenarios\` 를 0번 연다' 는 **일부** — 메인 창 라벨링 세션 시험 1개와 시범 막기 시험만 있다. 4종(`primary`·`relabel_same`·`relabel_second`·`adjudication`, 출처 판정도) 각각에 `os.listdir`·`open` 감시를 붙이는 것이 남았다(21 4-2 6번, 02 11-1).
+- **H-3 현황 (2026-10-23, [25](25-progress-2026-10-23-h3-prep.md) 1-3, D-24).** 끝났다의 기준 넷 가운데 셋 **됨**: 서버 꺼짐 → 생성 0건·`lmstudio_off`·외부 호출 0 (127.0.0.1 닫힌 포트로 시험) · localhost 밖 주소 거부(받는 주소 8개·거부 35개) · 가짜 LLM 응답(합성)으로 거르기 1~5 가 모두 1건 이상 걸러 냄. 가짜 LLM 끝에서 끝까지(`tools/gen_e2e.py`, `<P>` 사본) 15/15 — 다섯 파일에 실제 닉네임·식별자·본문 0건. **남음**: 서버를 켠 `<P>` 사본에서 20줄 이상·한 줄 평균 시간·걸러 낸 수 — **시범 뒤**(D-22 3), 사용자가 LM Studio 서버를 켠다(클릭 2, 11장 2번). 가짜 응답이라 지금 숫자는 품질이 아니다.
+  마지막 '시범 전' 묶음(D-24 7 나)에서 더 하는 것: 앱 메뉴 '가상 채팅 만들기' 에 생성 연결(LM Studio 확인 → 생성 → 섞기 한 번, 꺼져 있으면 `lmstudio_off` 한 줄과 함께 retrieved 만, D-24 3) · `llm-check-v1` 예/아니오 확인을 가짜 LLM 으로(D-24 5) · 시나리오 머리 선택 칸 3개(D-24 1) · `semantic.py` 프록시·3xx 막기 · retrieve 정규식 NFKC.
+- **H-5 현황 (D-24 7 가).** 마지막 '시범 전' 묶음에서 **화면을 합성 판정으로 만들었다(됨, 2026-10-23 통합)** — 메인 창 메뉴 연결(`MainWindow.discern_training`, 시범·라벨링 세션이면 꺼지고 `scenarios\` 를 열지 않음), `tools/gui_smoke.py --discern-flow`(가짜 LM Studio 로 생성까지 만든 시나리오에서 합성 판정 10건 → 숫자 줄 손 계산 대조 → 기록 바이트 검사), `discern/` 보호 구역 기본값. 처음 정한 것: 메뉴 '훈련 → 가상 채팅 가려내기' 1클릭, 채팅마다 '진짜·가짜·모르겠음' 1클릭, 판정 중 표시 숨김·끝나면 보임, 기록 `discern/`(03 6-19), 계산은 `compare_origins` 를 고치지 않고 부르기만. 끝났다의 기준 가운데 '합성 판정으로 혼동표·κ·탐지율이 손 계산과 같다'·'판정 중 숨김, 끝난 뒤 보임'·'라벨링 세션이 `scenarios\` 0번 엶' 은 이 묶음에서, **'사용자가 `<P>` 사본 1구간을 가려내 첫 숫자를 남김' 은 시범 뒤**(생성 40줄 이상 시나리오가 먼저 필요 — 25 6-1 5단계). 이것이 끝나면 남은 H 일은 모두 사용자 손(LM Studio 켜기·판정)이나 시범 잠김이 필요해 **'시범 대기'** 다(D-24 7).
 - 전체 시험은 앱 `.venv` + `QT_QPA_PLATFORM=offscreen`, 엔진 시험은 엔진 venv. LM Studio 가 필요한 시험은 `local_only` 로 표시하고 꺼져 있으면 건너뛴다.
 - 실제 데이터 시험은 `<P>` 의 **사본**에서만 하고 사본은 `shutil.rmtree` 로 지운다(휴지통 금지).
 
@@ -307,14 +331,14 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 | # | 무엇 | 제안 |
 |---|---|---|
 | 1 | D-05 '화면에서도 생성 채팅에 표시' 와 가려내기(표시 숨김)가 부딪힌다 | 가려내기 화면만 표시를 숨기고, 맨 위에 '생성 채팅이 섞여 있음' 한 줄을 늘 보인다. 끝나면 줄마다 표시. D-05 의 뜻(사람을 속이지 않음)은 지킨다 |
-| 2 | LM Studio 서버를 누가 켜나 | 첫 판은 사용자가 LM Studio 에서 서버를 켠다(2번 누름: 개발자 탭 → 서버 시작). `lms` 명령이 있으면 엔진 도구가 `lms server start` 를 부를 수 있는지 H-3 처음에 확인하고, 되면 0번 |
+| 2 | LM Studio 서버를 누가 켜나 | 첫 판은 사용자가 LM Studio 에서 서버를 켠다(2번 누름: 개발자 탭 → 서버 시작). `lms` 명령이 있으면 엔진 도구가 `lms server start` 를 부를 수 있는지 H-3 처음에 확인하고, 되면 0번. **D-24 6**: 이 PC 에 `lms.exe` 가 있다(파일만 확인, 실행 안 함). 사용자 PC 의 다른 프로그램을 켜는 일이라 Claude 가 `lms server start` 로 켜는 것은 **시범 뒤 사용자 확인을 받고** 시험한다. 지금은 실행하지 않는다 |
 | 3 | 실제 채팅이 하나도 없는 영상(예: 혼자 녹화한 연습 영상) | 첫 판은 하지 않는다. replay 가 없으면 견줄 것이 없다. 수요가 있으면 H 뒤 '전부 가상' 모드를 따로 정한다 |
 | 4 | 기준(최종 세트·손라벨 CSV)이 없는 구간에서 가상 채팅 연습 | 첫 판은 F 처럼 끈다(D-18 7 과 같은 관문). 작은 방송 연습이 필요하면 '점수 없이 고른 수만' 을 다음 판에서 연다 |
 | 5 | 외부 AI 를 H 에 넣나 | 넣지 않는다. 7-3 관문을 두 번 실패하고 05 11-3 확인이 끝난 뒤 사용자에게 묻는다 |
 | 6 | 금칙어 목록을 어디 두나 | 저장소 밖 `chatcoach-data\config\blocklist-ko.txt`, 엔진이 해시를 시나리오 `filters` 에 적는다. 시험은 합성 낱말 목록으로 한다. **됨**(D-20 6): 파일은 Claude 가 짧게 만들었고(내용은 저장소·보고에 옮기지 않음), 도구 기본 경로가 이 파일이다 |
 | 7 | LLM 입력에 실제 채팅 본문을 넣나(9장 4번) | 기본 끔. 7-3 관문을 못 넘으면 켜서 견준다(로컬, 닉네임 빼고) |
 | 8 | 어느 LLM 을 쓰나 | 이미 있는 2개 가운데 한국어가 나은 쪽 하나를 H-3 처음에 합성 문장 10개로 보고 설정에 고정. 새로 받지 않는다(18 6-5 6번) |
-| 9 | 시나리오를 앱 단추로 만들게 하나 | 첫 판은 엔진 도구만(Claude 가 돌림, 사용자 0번). 사용자가 직접 만들고 싶어 하면 '훈련 → 가상 채팅 만들기' 메뉴 1번이 엔진 도구를 부르게 한다(H 뒤). **F 둘째 묶음에서 메뉴를 앞당겨 넣었다**(21 4-1 14번, 클릭 2). 개발용 `<P>`(`p15767532`)에는 시험 문턱으로 Claude 가 미리 1개 만들어 두었다(D-20 8, 사용자 0클릭) |
+| 9 | 시나리오를 앱 단추로 만들게 하나 | 첫 판은 엔진 도구만(Claude 가 돌림, 사용자 0번). 사용자가 직접 만들고 싶어 하면 '훈련 → 가상 채팅 만들기' 메뉴 1번이 엔진 도구를 부르게 한다(H 뒤). **F 둘째 묶음에서 메뉴를 앞당겨 넣었다**(21 4-1 14번, 클릭 2 — retrieved 만). **D-24 3**: 이 메뉴가 LM Studio 확인 → `engine generate --out` → `make_scenario --generated` 를 한 번에 부르게 한다(사람 클릭 그대로). 서버가 꺼져 있으면 `lmstudio_off` 한 줄과 함께 retrieved 만 만든다. 개발용 `<P>`(`p15767532`)에는 시험 문턱으로 Claude 가 미리 1개 만들어 두었다(D-20 8, 사용자 0클릭) |
 | 10 | `retrieved` 도 가림 이름을 새로 붙이나 | 붙인다(8장 3번). 원 가림 닉네임을 쓰면 가려내기에서 바로 드러나고, 다른 맥락에 실제 이름을 붙이게 된다. **줄마다 다른 이름**으로 붙인다(D-20 7, 4-2 8번) |
 | 11 | training-event 스키마에 선택 칸을 더하는 때 | F 첫 묶음이 스키마를 만든 뒤 H-4 에서 선택 칸만 더한다. F 의 옛 기록은 그대로 읽힌다 |
 
@@ -345,7 +369,7 @@ F 담당이 만드는 `schemas/training-event.schema.json` 에 **선택 칸만**
 | H-1 | ✚ `schemas/scenario.schema.json`, ✚ `app/core/scenario.py`(읽기·검사), `app/store.py`(읽기 범위), `schemas/project.schema.json`(protected_zone 기본값 설명) |
 | H-2·H-3 | ✚ `engine/scenario.py`, `engine/__main__.py`(하위 명령), ✚ `engine/lmstudio.py`(localhost 만). **실제(H-2)**: ✚ `engine/retrieve.py`(고르기) + ✚ `tools/make_scenario.py`(들어오는 곳, 앱 메뉴도 이것을 따로 프로세스로 부름). `python -m engine scenario …` 는 `engine/__main__.py` 의 `_PASSTHROUGH` 가 `tools/make_scenario.main` 에 같은 인자를 넘긴다(21 4-2 23번). 따로 `engine/scenario.py` 는 두지 않았다 |
 | H-4 | F 의 훈련 화면·`schemas/training-event.schema.json`(선택 칸) |
-| H-5 | ✚ 가려내기 화면, `app/core/origin.py` 는 **고치지 않고 부르기만** |
+| H-5 | ✚ 가려내기 화면, ✚ `schemas/discern-event.schema.json`·`app/discern_store.py`·`app/core/discern.py`(기록 `discern/`, 03 6-19), `app/core/origin.py` 는 **고치지 않고 부르기만** |
 | H-6 | `docs/design/03`·`05`·`06`, `README-tools` |
 
 label-event 스키마는 어느 단계에서도 바꾸지 않는다.

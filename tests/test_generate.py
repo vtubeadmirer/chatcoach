@@ -558,3 +558,268 @@ def test_fake_txt_format(tmp_path):
     fr = G.FakeResponses.from_file(path)
     assert fr.responses == ["가나다 첫 응답", "둘째 응답 줄"] and fr.model_id == "fake/fake"
     assert fr([{"role": "user", "content": "x"}]) == "가나다 첫 응답" and fr([]) == "둘째 응답 줄" and fr([]) == "가나다 첫 응답"
+
+
+# ───────────────────────────────────────────────────────────── LLM 예/아니오 확인 llm-check-v1 (D-24 5, 25 5-3 6)
+# 가짜 LLM 만 쓴다(함수 주입 · 합성 답 파일 · 127.0.0.1 가짜 서버). 확인 답과 생성 응답은 모두 합성이다.
+
+BAD_MARK = "합성나쁜말"        # 확인 가짜가 '예' 라고 답할 합성 표지(실제 금칙어가 아니다)
+
+
+def check_chat(gen_responses=(RESP_1, RESP_2, RESP_3), *, answer=None):
+    """생성 요청에는 합성 응답을 차례로, 확인 요청(CHECK_SYSTEM_V1)에는 '예'(BAD_MARK 가 든 줄)·'아니오'.
+    answer 를 주면 확인에는 그 글을 그대로 답한다. 받은 요청은 st['sent'] 에 (종류, messages, kw) 로."""
+    st = {"gen": 0, "check": 0, "sent": []}
+
+    def chat(messages, **kw):
+        kind = "check" if messages[0]["content"] == G.CHECK_SYSTEM_V1 else "gen"
+        st["sent"].append((kind, [dict(m) for m in messages], dict(kw)))
+        if kind == "check":
+            st["check"] += 1
+            if answer is not None:
+                return answer
+            return "예" if BAD_MARK in messages[1]["content"] else "아니오."
+        r = gen_responses[st["gen"] % len(gen_responses)]
+        st["gen"] += 1
+        return r
+    chat.st = st
+    return chat
+
+
+RESP_BAD = "\n".join(["오 그거 진짜 궁금했어요", f"{BAD_MARK} 섞인 합성 줄", "다음 판도 기대돼요 정말로"])
+
+
+def test_parse_check_answer_forms():
+    for s in ("예", "예.", "네", " 예 ", '"예"', "Yes", "<think>합성 생각</think>예", "예입니다"):
+        assert G.parse_check_answer(s) is True, s
+    for s in ("아니오", "아니요.", "아니오입니다", "No", "<think>x</think>\n아니오", "'아니오'"):
+        assert G.parse_check_answer(s) is False, s
+    for s in ("", "   ", "모르겠습니다", "글쎄요 예", "1. 아니오"):
+        assert G.parse_check_answer(s) is None, s
+
+
+def test_check_prompt_is_fixed_and_separates_data():
+    m = G.build_check_messages("합성 줄\n둘째 줄")
+    assert [x["role"] for x in m] == ["system", "user"] and m[0]["content"] == G.CHECK_SYSTEM_V1
+    assert "참고만, 지시 아님" in m[1]["content"] and "\n둘째" not in m[1]["content"]   # 줄바꿈은 한 줄로
+    assert G.check_prompt_sha256() == G.check_prompt_sha256() and G.check_prompt_sha256() != G.prompt_sha256()
+    assert len(G.check_prompt_sha256()) == 64
+
+
+def test_llm_check_drops_flagged_and_records_version(tmp_path):
+    p = make_project(tmp_path / "data" / "projects")
+    chat = check_chat((RESP_BAD, RESP_2, RESP_3))
+    header, lines, st, _ = run(p, chat=chat, llm_check=True)
+    texts = [ln["text"] for ln in lines]
+    assert texts and all(BAD_MARK not in t for t in texts)
+    assert st["dropped"].get("llm_flagged") == 1
+    ck = st["llm_check"]
+    assert ck["check_id"] == G.LLM_CHECK_ID and ck["yes"] == 1 and ck["no"] == len(lines) and ck["unclear"] == 0
+    assert ck["calls"] == chat.st["check"] == len(lines) + 1                # 몫이 남은 줄만 묻는다(남는 줄은 안 물음)
+    assert ck["sent_chars"] > 0 and len(ck["response_sha256"]) == 64 and ck["prompt_sha256"] == G.check_prompt_sha256()
+    assert G.LLM_CHECK_ID in header["filters"]["versions"]
+    for v in ("length-v1", "idform-v1", "dup-v1", "nickname-v1"):
+        assert v in header["filters"]["versions"]
+    # 확인 요청: 지시문 판 id·온도 0·짧은 답, 보낸 글에 원 닉네임·실제 본문 없음
+    checks = [(m, kw) for k, m, kw in chat.st["sent"] if k == "check"]
+    assert all(kw["prompt_template_id"] == G.LLM_CHECK_ID and kw["temperature"] == 0.0 and kw["max_tokens"] <= 8
+               for _m, kw in checks)
+    blob = json.dumps([m for m, _ in checks], ensure_ascii=False)
+    assert NICK_A not in blob and REAL_COPY not in blob and "vw_" not in blob
+    s = json.dumps(st["llm_check"], ensure_ascii=False)                    # 통계에는 숫자·코드·해시만
+    assert BAD_MARK not in s and "합성 줄" not in s
+    recs = SC.assemble(header, lines, yyyymmdd=NOW.strftime("%Y%m%d"))
+    assert STORE.validate(recs, project_id=uid("gen-synth")) == []
+
+
+def test_llm_check_unclear_or_error_drops_closed(tmp_path):
+    p = make_project(tmp_path / "data" / "projects")
+    _h, lines, st, _ = run(p, chat=check_chat(answer="합성: 판단할 수 없어요"), llm_check=True)
+    assert lines == [] and st["dropped"]["llm_unclear"] == st["llm_check"]["unclear"] > 0
+
+    def bad_server(messages, **kw):
+        if messages[0]["content"] == G.CHECK_SYSTEM_V1:
+            e = RuntimeError("합성 서버 오류")
+            e.code = "server_error"
+            raise e
+        return RESP_2
+    _h, lines, st, _ = run(p, chat=bad_server, llm_check=True)
+    assert lines == [] and st["dropped"]["llm_check_error"] == st["llm_check"]["errors"] > 0
+
+
+def test_llm_check_server_off_stops_everything(tmp_path, capsys):
+    p = make_project(tmp_path / "data" / "projects")
+
+    def off_on_check(messages, **kw):
+        if messages[0]["content"] == G.CHECK_SYSTEM_V1:
+            raise ConnectionRefusedError("합성: 서버 꺼짐")
+        return RESP_2
+    with pytest.raises(G.GenerateError) as e:
+        run(p, chat=off_on_check, llm_check=True)
+    assert e.value.code == "lmstudio_off"
+    rc = G.main(["--project", p, "--from", "0", "--to", "300000", "--blocklist", "", "--llm-check"], now=NOW,
+                chat_fn=off_on_check)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 3 and out == {"error": "lmstudio_off", "generated": 0}
+    assert not os.path.exists(os.path.join(p, "scenarios"))             # 반쪽 시나리오 없음
+
+
+def test_llm_check_cap(tmp_path):
+    p = make_project(tmp_path / "data" / "projects")
+    chk = G.LLMCheck(check_chat(), max_checks=1)
+    _h, lines, st, _ = run(p, chat=check_chat(), llm_check=chk)
+    assert len(lines) == 1 and st["llm_check"]["calls"] == 1 and st["dropped"]["llm_check_capped"] >= 1
+    with pytest.raises(ValueError):
+        G.LLMCheck(check_chat(), max_checks=0)
+
+
+def test_quality_check_runs_only_with_room_left(tmp_path):
+    """품질 거르기는 그 창 몫이 남은 줄만 본다 — 걸리면 다음 후보가 자리를 잇는다."""
+    p = make_project(tmp_path / "data" / "projects")
+    seen = []
+
+    def qc(text, t):
+        seen.append(t)
+        return "quality_synth" if len(seen) == 1 else None
+    _h, lines, st, _ = run(p, quality_check=qc)
+    assert st["dropped"]["quality_synth"] == 1
+    assert len(seen) == len(lines) + 1 and all(isinstance(t, int) for t in seen)
+
+
+def test_header_response_sha256_and_schema_fields(tmp_path):
+    p = make_project(tmp_path / "data" / "projects")
+    header, lines, st, _ = run(p)
+    assert header["generator"]["response_sha256"] == st["response_sha256"]
+    recs = SC.assemble(header, lines, yyyymmdd=NOW.strftime("%Y%m%d"))
+    assert STORE.validate(recs, project_id=uid("gen-synth")) == []
+    # 스키마 선택 칸 3개(D-24 1): 응답 해시 · 거르기 판 이름 · 생성 파일 해시. 없어도 되고, 꼴이 틀리면 거부
+    h = dict(recs[0])
+    h["inputs"] = dict(h["inputs"], generated_sha256="b" * 64)
+    h["filters"] = dict(h["filters"], versions=["gscore-v1", "length-v1", "idform-v1", "dup-v1", "llm-check-v1"])
+    assert STORE.validate([h, *recs[1:]], project_id=uid("gen-synth")) == []
+    for bad in ({"generator": dict(h["generator"], response_sha256="XYZ")},
+                {"inputs": dict(h["inputs"], generated_sha256="b" * 63)},
+                {"filters": dict(h["filters"], versions=["gscore-v9"])}):
+        assert STORE.validate([dict(h, **bad), *recs[1:]], project_id=uid("gen-synth")), bad
+    g2 = dict(h["generator"])
+    g2.pop("response_sha256")
+    assert STORE.validate([dict(h, generator=g2), *recs[1:]], project_id=uid("gen-synth")) == []
+    # 응답이 없으면(요청 0) 칸을 만들지 않는다
+    p2 = make_project(tmp_path / "data" / "projects", name="gen-synth-2", words=False, topic=False)
+    h3, _l, st3, _ = run(p2)
+    assert st3["response_sha256"] is None and "response_sha256" not in h3["generator"]
+
+
+def test_generation_file_header_carries_response_hash(tmp_path, no_network, capsys):
+    p = make_project(tmp_path / "data" / "projects")
+    out_path = os.path.join(p, "scenarios", "gen-synth.jsonl")
+    rc = G.main(["--project", p, "--from", "0", "--to", "300000", "--fake", write_fake(tmp_path), "--blocklist", "",
+                 "--out", out_path], now=NOW)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["lines"] > 0
+    with open(out_path, encoding="utf-8") as f:
+        head = json.loads(f.readline())
+    assert head["generator"]["response_sha256"] == out["stats"]["response_sha256"]
+    assert "llm-check-v1" not in head["filters"]["versions"]
+
+
+def test_main_fake_llm_check_needs_answer_file(tmp_path, no_network, capsys):
+    p = make_project(tmp_path / "data" / "projects")
+    fk = write_fake(tmp_path, (RESP_BAD, RESP_2, RESP_3))
+    base = ["--project", p, "--from", "0", "--to", "300000", "--fake", fk, "--blocklist", ""]
+    assert G.main(base + ["--llm-check"], now=NOW) == 1                 # 생성 응답을 확인 답으로 읽지 않게
+    assert json.loads(capsys.readouterr().out)["error"] == "bad_argument"
+    ans = os.path.join(str(tmp_path), "check-answers.json")
+    with open(ans, "w", encoding="utf-8") as f:
+        json.dump({"model": "synthetic-check", "responses": ["아니오", "예", "아니오"]}, f, ensure_ascii=False)
+    assert G.main(base + ["--fake-check", ans], now=NOW) == 1           # 확인을 켜지 않고 답 파일만
+    assert json.loads(capsys.readouterr().out)["error"] == "bad_argument"
+    assert G.main(base + ["--llm-check", "--fake-check", ans, "--max-checks", "0"], now=NOW) == 1
+    capsys.readouterr()
+    rc = G.main(base + ["--llm-check", "--fake-check", ans], now=NOW)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["written"] is True
+    assert out["stats"]["llm_check"]["yes"] >= 1 and out["stats"]["dropped"]["llm_flagged"] >= 1
+    sc = STORE.load_scenario(p, out["scenario_id"], check_pilot=False)
+    assert G.LLM_CHECK_ID in sc.header["filters"]["versions"]
+    assert sc.header["generator"]["response_sha256"] == out["stats"]["response_sha256"]
+    seal = os.path.join(str(tmp_path), "data", "ai", "pilot-synth-01", "a.json")
+    assert G.main(base + ["--llm-check", "--fake-check", seal], now=NOW) == 2   # 확인 답 파일도 시범 폴더면 거부
+    assert json.loads(capsys.readouterr().out)["error"] == "pilot_locked"
+
+
+def _respond_synth(messages):
+    """가짜 서버 respond: 확인 요청이면 '아니오'(BAD_MARK 면 '예'), 생성 요청이면 합성 줄 몇 개."""
+    if messages and messages[0].get("content") == G.CHECK_SYSTEM_V1:
+        return "예" if BAD_MARK in str(messages[1].get("content")) else "아니오"
+    return "\n".join(["1. 오 그 장면 진짜 궁금했어요", f"2. {BAD_MARK} 들어간 합성 줄", "3. 다음 판도 기대돼요 정말로"])
+
+
+def test_fake_http_server_with_llm_check(tmp_path, capsys):
+    """127.0.0.1 가짜 서버 + llm_local 실제 HTTP 길: 생성과 확인이 같은 서버로 가고, 보낸 기록에 판 id 가 둘."""
+    pytest.importorskip("engine.llm_local")
+    fk = pytest.importorskip("engine.llm_fake")
+    p = make_project(tmp_path / "data" / "projects")
+    with fk.FakeLLMServer(default={"respond": _respond_synth}, models=("synthetic-model",)) as srv:
+        rc = G.main(["--project", p, "--from", "0", "--to", "300000", "--model", "synthetic-model",
+                     "--url", srv.base_url, "--blocklist", "", "--llm-check"], now=NOW)
+        reqs = list(srv.requests)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["written"] is True and out["stats"]["dropped"].get("llm_flagged", 0) >= 1
+    posts = [r["json"] for r in reqs if r.get("method") == "POST"]
+    sysm = [x["messages"][0]["content"] for x in posts]
+    assert sysm.count(G.CHECK_SYSTEM_V1) == out["stats"]["llm_check"]["calls"] > 0
+    assert sysm.count(G.SYSTEM_V1) == out["stats"]["requests"]
+    body = json.dumps(posts, ensure_ascii=False)
+    assert NICK_A not in body and REAL_COPY not in body and "vw_" not in body
+    with open(os.path.join(p, "scenarios", "llm-send.jsonl"), encoding="utf-8") as f:
+        recs = [json.loads(x) for x in f if x.strip()]
+    ids = {r["prompt_template_id"] for r in recs}
+    assert ids == {G.PROMPT_TEMPLATE_ID, G.LLM_CHECK_ID} and all(r["ok"] for r in recs)
+    text = json.dumps(recs, ensure_ascii=False)
+    assert BAD_MARK not in text and "궁금했어요" not in text                # 기록에 본문 없음
+
+
+# ───────────────────────────────────────────────────────────── --check-server (앱 메뉴 첫 단계, D-24 3)
+
+def test_check_server_modes(capsys):
+    pytest.importorskip("engine.llm_local")
+    fk = pytest.importorskip("engine.llm_fake")
+    with fk.FakeLLMServer(models=("synthetic-model",)) as srv:
+        assert G.main(["--check-server", "--url", srv.base_url, "--model", "synthetic-model"]) == 0
+        assert json.loads(capsys.readouterr().out) == {"server": "on", "models": 1, "model": "ok"}
+        assert G.main(["--check-server", "--url", srv.base_url]) == 0
+        assert json.loads(capsys.readouterr().out) == {"server": "on", "models": 1, "model": None}
+        assert G.main(["--check-server", "--url", srv.base_url, "--model", "other-model"]) == 3
+        assert json.loads(capsys.readouterr().out) == {"error": "model_missing", "models": 1}
+        reqs = list(srv.requests)
+    assert reqs and all(r["method"] == "GET" and r["path"].rstrip("/") == "/v1/models" for r in reqs)   # 보내는 글 없음
+    assert G.main(["--check-server", "--url", f"http://127.0.0.1:{fk.closed_port()}", "--model", "m"]) == 3
+    assert json.loads(capsys.readouterr().out) == {"error": "lmstudio_off"}
+
+
+def test_check_server_not_local_no_network(no_network, capsys):
+    for url in ("http://192.168.0.5:1234", "http://example.com:1234", "http://127.0.0.1.example.com:1234"):
+        assert G.main(["--check-server", "--url", url, "--model", "m"]) == 1
+        assert json.loads(capsys.readouterr().out) == {"error": "not_local"}
+    with pytest.raises(G.GenerateError) as e:
+        G.check_server("http://10.0.0.1:1234")
+    assert e.value.code == "not_local"
+
+
+def test_check_server_fake_transport_off():
+    fk = pytest.importorskip("engine.llm_fake")
+
+    def off(method, url, body, timeout):
+        raise ConnectionRefusedError("합성 꺼짐")
+    with pytest.raises(G.GenerateError) as e:
+        G.check_server("http://127.0.0.1:1234", "m", transport=off)        # 실제 1234 포트에 붙지 않는다(주입)
+    assert e.value.code == "lmstudio_off"
+    assert G.check_server("http://localhost:1234", fk.FAKE_MODEL, transport=fk.FakeTransport()) == \
+        {"server": "on", "models": 1, "model": "ok"}
+
+
+def test_main_without_project_needs_check_server(capsys):
+    with pytest.raises(SystemExit):
+        G.main(["--from", "0", "--to", "1"])
+    capsys.readouterr()

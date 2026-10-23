@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/chatcoach/blob/main/schemas/discern-event.schema.json",
+  "title": "가상 채팅 가려내기 기록 한 줄 (discern/<session_id>.jsonl)",
+  "description": "H-5 가려내기(20 7장, 25 6-2, 03 6-19, 08 D-24 7 가) 세션 기록 파일의 한 줄. 라벨 기록(label-event)·스트리머 훈련(training-event)·시청자 훈련(viewer-event)과 다른 폴더·다른 종류다. 파일은 추가만 하는 JSON Lines(UTF-8, BOM 없음, LF), 한 줄 = 기록 1건. 채팅 본문·닉네임·가림 이름·생성 글은 칸이 없다 — chat_id·scenario_id·line_id·판정·VOD 시각(ms)·숫자만(20 1장 10번, D-17 8). 같은 규칙을 app/discern_store.py 가 이 스키마로 검사한다(store.LabelSchema 해석기).",
+  "type": "object",
+  "required": ["v", "id", "seq", "kind", "session_id", "labeler_id", "created_at", "app_version", "body"],
+  "additionalProperties": false,
+  "properties": {
+    "v": {"const": 1, "description": "가려내기 기록 형식 버전."},
+    "id": {"$ref": "#/$defs/uuid"},
+    "seq": {"type": "integer", "minimum": 1, "description": "파일 안 순번. 1부터 1씩 늘어난다. 같은 채팅의 판정은 seq 가 큰 줄이 유효하다."},
+    "kind": {"enum": ["discern.start", "discern.judge", "discern.end"]},
+    "session_id": {"$ref": "#/$defs/discernSessionId"},
+    "labeler_id": {"$ref": "#/$defs/labelerId"},
+    "created_at": {"$ref": "#/$defs/datetime", "description": "기록한 벽시계 시각(OS 시간대 오프셋 포함)."},
+    "app_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?$"},
+    "body": {"type": "object"}
+  },
+  "allOf": [
+    {"if": {"properties": {"kind": {"const": "discern.start"}}}, "then": {"properties": {"body": {"$ref": "#/$defs/startBody"}}}},
+    {"if": {"properties": {"kind": {"const": "discern.judge"}}}, "then": {"properties": {"body": {"$ref": "#/$defs/judgeBody"}}}},
+    {"if": {"properties": {"kind": {"const": "discern.end"}}}, "then": {"properties": {"body": {"$ref": "#/$defs/endBody"}}}}
+  ],
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "labelerId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}$", "description": "라벨러(사용자) 코드. 표시 이름은 넣지 않는다."},
+    "discernSessionId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}-DS-[0-9]{8}-[a-z0-9]{4}$", "description": "'<labeler_id>-DS-<yyyymmdd>-<4자>'. 라벨 세션 종류 코드(P·RS·R2·AD·OR·AN)·스트리머 훈련(TR)·시청자 훈련(VW)과 겹치지 않는다."},
+    "datetime": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?([+-][0-9]{2}:[0-9]{2}|Z)$"},
+    "chatId": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$"},
+    "scenarioId": {"type": "string", "pattern": "^SC-[0-9]{8}-[0-9a-f]{4}$"},
+    "lineId": {"type": "string", "pattern": "^s[0-9]{4,6}$", "description": "시나리오 줄 번호(scenarios\\<scenario_id>.jsonl 의 line_id)."},
+    "ms": {"type": "integer", "minimum": 0},
+    "count": {"type": "integer", "minimum": 0},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "range": {
+      "type": "object",
+      "required": ["start_ms", "end_ms"],
+      "additionalProperties": false,
+      "properties": {"start_ms": {"$ref": "#/$defs/ms"}, "end_ms": {"$ref": "#/$defs/ms"}}
+    },
+    "shown": {
+      "type": "object",
+      "required": ["replay", "retrieved", "generated"],
+      "additionalProperties": false,
+      "description": "출처별 대상(구간에 보일 채팅) 수. 숫자만.",
+      "properties": {"replay": {"$ref": "#/$defs/count"}, "retrieved": {"$ref": "#/$defs/count"}, "generated": {"$ref": "#/$defs/count"}}
+    },
+    "answer": {"enum": ["real", "virtual", "unsure", "none"], "description": "진짜 · 가짜 · 모르겠음. none = 같은 단추를 다시 눌러 판정을 지움('안 봄')."},
+    "startBody": {
+      "type": "object",
+      "required": ["mode", "project_id", "scenario_id", "scenario_sha256", "range", "audio", "marks_hidden", "shown", "seen_before", "repeat"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"const": "discern"},
+        "project_id": {"$ref": "#/$defs/uuid"},
+        "scenario_id": {"$ref": "#/$defs/scenarioId"},
+        "scenario_sha256": {"$ref": "#/$defs/sha256", "description": "그 시나리오 파일 바이트의 sha256."},
+        "range": {"$ref": "#/$defs/range"},
+        "audio": {"enum": ["on"], "description": "가려내기는 소리를 켜고 본다(25 6-2)."},
+        "marks_hidden": {"const": true, "description": "판정 중 '가'·'생'·'가져옴·생성' 표시를 숨겼다(20 9장 3)."},
+        "shown": {"$ref": "#/$defs/shown"},
+        "seen_before": {"type": ["boolean", "null"], "description": "이 구간을 연 다른 세션 기록이 있나(계산값, 20 7-3). 모르면 null."},
+        "repeat": {"type": "boolean", "description": "같은 사람이 같은 시나리오를 이미 가려냈나(다시 봄 — 대표값에서 뺀다, 20 7-1)."}
+      }
+    },
+    "judgeBody": {"oneOf": [{"$ref": "#/$defs/judgeReal"}, {"$ref": "#/$defs/judgeLine"}]},
+    "judgeReal": {
+      "type": "object",
+      "required": ["chat_id", "answer", "judged_vod_ms", "wall_at"],
+      "additionalProperties": false,
+      "description": "실제 채팅(replay) 판정.",
+      "properties": {
+        "chat_id": {"$ref": "#/$defs/chatId"},
+        "answer": {"$ref": "#/$defs/answer"},
+        "judged_vod_ms": {"$ref": "#/$defs/ms", "description": "누른 순간의 재생 위치(VOD 시각)."},
+        "wall_at": {"$ref": "#/$defs/datetime"}
+      }
+    },
+    "judgeLine": {
+      "type": "object",
+      "required": ["scenario_id", "line_id", "answer", "judged_vod_ms", "wall_at"],
+      "additionalProperties": false,
+      "description": "시나리오 줄(retrieved·generated) 판정. 출처(정답)는 적지 않는다 — 시나리오 파일에서 계산한다.",
+      "properties": {
+        "scenario_id": {"$ref": "#/$defs/scenarioId"},
+        "line_id": {"$ref": "#/$defs/lineId"},
+        "answer": {"$ref": "#/$defs/answer"},
+        "judged_vod_ms": {"$ref": "#/$defs/ms"},
+        "wall_at": {"$ref": "#/$defs/datetime"}
+      }
+    },
+    "rateBlock": {
+      "type": "object",
+      "required": ["hit", "n", "rate"],
+      "additionalProperties": false,
+      "properties": {
+        "hit": {"$ref": "#/$defs/count"},
+        "n": {"$ref": "#/$defs/count"},
+        "rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "hit / n. n 이 0 이면 null."}
+      }
+    },
+    "confusionRow": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/count"}},
+    "result": {
+      "type": "object",
+      "required": ["targets", "judged", "unseen", "confusion", "kappa", "detection", "false_alarm", "retrieved", "unsure", "sample", "gate", "low_n"],
+      "additionalProperties": false,
+      "description": "app.core.discern.DiscernResult.numbers() — 숫자만.",
+      "properties": {
+        "targets": {"$ref": "#/$defs/count"},
+        "judged": {"$ref": "#/$defs/count"},
+        "unseen": {"$ref": "#/$defs/count"},
+        "confusion": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/confusionRow"}, "description": "3×3 혼동표, 행 = 정답(real·virtual·undeterminable), 열 = 사람(같은 차례)."},
+        "kappa": {"type": ["number", "null"], "minimum": -1, "maximum": 1, "description": "명목 Cohen κ (compare_origins 의 all 묶음). 계산할 수 없으면 null."},
+        "detection": {"$ref": "#/$defs/rateBlock", "description": "가짜 탐지율: 생성 줄을 가짜라고 한 수 / 생성 줄 판정 수."},
+        "false_alarm": {"$ref": "#/$defs/rateBlock", "description": "진짜 오인율: 실제 줄(replay + retrieved)을 가짜라고 한 수 / 실제 줄 판정 수."},
+        "retrieved": {"$ref": "#/$defs/rateBlock", "description": "retrieved 만의 오인율(20 7-2 '따로 한 줄')."},
+        "unsure": {"$ref": "#/$defs/rateBlock", "description": "모르겠음 수 / 판정 수."},
+        "sample": {
+          "type": "object",
+          "required": ["generated", "real", "broadcasts", "ok"],
+          "additionalProperties": false,
+          "properties": {
+            "generated": {"$ref": "#/$defs/count"},
+            "real": {"$ref": "#/$defs/count"},
+            "broadcasts": {"$ref": "#/$defs/count"},
+            "ok": {"type": "boolean", "description": "20 7-3 표본 시작값을 채웠나."}
+          }
+        },
+        "gate": {"enum": ["pass", "fail", "low_n", "unknown"]},
+        "low_n": {"type": "boolean"}
+      }
+    },
+    "endBody": {
+      "type": "object",
+      "required": ["reason", "judged", "unseen"],
+      "additionalProperties": false,
+      "properties": {
+        "reason": {"enum": ["segment_end", "finish", "closed"], "description": "segment_end = 구간 끝, finish = [끝내고 정답 보기], closed = 정답을 보기 전에 닫음."},
+        "judged": {"$ref": "#/$defs/count"},
+        "unseen": {"$ref": "#/$defs/count", "description": "판정하지 않은 대상 수('안 봄')."},
+        "result": {"$ref": "#/$defs/result", "description": "(정답을 보였을 때만) 숫자 줄."}
+      }
+    }
+  }
+}

@@ -169,7 +169,11 @@ TOPIC_ID_RE = re.compile(r"^t[0-9]{1,4}$")
 PROMPT_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,60}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MS_MAX = 172_800_000
-FILTER_VERSIONS_OK = ("nickname-v1", "copy-v1", "block-v1", "llm-check-v1")   # scenario.schema filters.versions
+# scenario.schema filters.versions (D-24 1 에 length-v1·idform-v1·dup-v1·gscore-v1 를 더함 — engine generate 의
+# FILTER_VERSIONS 를 그대로 옮기고, 여기서 G 채점기 거르기를 돌렸으면 gscore-v1 을 더한다)
+FILTER_VERSIONS_OK = ("nickname-v1", "copy-v1", "block-v1", "llm-check-v1", "length-v1", "idform-v1", "dup-v1",
+                      "gscore-v1")
+GSCORE_VERSION = "gscore-v1"
 DEFAULT_MAX_GENERATED_RATIO = 0.25
 CTX_MARGIN_MS = 120_000                 # 맥락 chats: 구간 앞 이만큼의 실제 채팅도(베끼기 창 최대 60초보다 넉넉히)
 
@@ -230,7 +234,7 @@ def clean_generator(g) -> dict:
     v = g.get("model_id")
     if isinstance(v, str) and 0 < len(v) <= 120 and "\n" not in v and "\r" not in v:
         out["model_id"] = v
-    for k in ("model_sha256", "prompt_sha256"):
+    for k in ("model_sha256", "prompt_sha256", "response_sha256"):     # response_sha256: D-24 1 (선택 칸)
         if isinstance(g.get(k), str) and SHA_RE.match(g[k]):
             out[k] = g[k]
     if isinstance(g.get("prompt_template_id"), str) and PROMPT_ID_RE.match(g["prompt_template_id"]):
@@ -511,10 +515,14 @@ def merge_generated(project: str, from_ms: int, to_ms: int, header: dict, chats:
     for v in (gfil.get("versions") or []) if isinstance(gfil.get("versions"), list) else ():
         if v in FILTER_VERSIONS_OK and v not in vers:
             vers.append(v)
+    if kept and GSCORE_VERSION not in vers:
+        vers.append(GSCORE_VERSION)                     # 남긴 생성 줄은 G 채점기 거르기(gen_filter)를 지났다
     if vers:
         filt["versions"] = vers
     if kept:
         h["generator"] = generator
+        # 생성 후보 파일의 바이트 해시(D-24 1, 선택 칸) — 생성 줄을 넣었을 때만(출처 대조용, 본문 없음)
+        h.setdefault("inputs", {})["generated_sha256"] = file_sha
         cb = f"{h.get('created_by', 'make_scenario')} + gen_filter {GF.VERSION}"
         h["created_by"] = cb[:80]
     if displaced:

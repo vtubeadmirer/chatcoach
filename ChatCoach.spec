@@ -24,6 +24,7 @@ a = Analysis(
         ('schemas\\scenario.schema.json', 'schemas'),
         ('schemas\\training-event.schema.json', 'schemas'),
         ('schemas\\viewer-event.schema.json', 'schemas'),
+        ('schemas\\discern-event.schema.json', 'schemas'),   # 가상 채팅 가려내기 기록(app/discern_store.py, H-5)
         # 번들하지 않는 것 (D-22 '시범 해제 준비' 묶음에서 다시 확인, 2026-10-23):
         # - topic-flow·transcript-words·topic-vectors·guide-config 스키마 — 앱은 파일을 읽지 않고 같은 규칙을 손으로 본다
         #   (app/core/topics.py·words_doc.py·viewer_score.vectors_from_doc·seal.vectors_check, assets 의 guide-config 는 위 'assets').

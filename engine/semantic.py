@@ -6,6 +6,8 @@
     만 쓴다(새 의존성 없음). 받기는 사람이 한 번(허깅페이스, 고정 revision) 하고, 이 모듈은 받지 않는다.
   - 선택: LM Studio 의 로컬 서버(localhost 만)에 임베딩 모델이 올라가 있으면 /v1/embeddings 를 쓸 수 있다.
     서버가 꺼져 있거나 임베딩 모델이 없으면 쓰지 않는다. 결과가 켜짐 여부에 따라 달라지지 않도록 '명시할 때만' 쓴다.
+    부르기는 engine/netguard(engine/llm_local 과 같은 함수): localhost → 127.0.0.1, 프록시 환경 변수 무시, 3xx 안 따름
+    (25 보고 5-2 의 5번).
   - 모델이 없거나(또는 해시가 다르거나 실행기를 못 읽으면) None 을 돌려주고, 엔진은 v0.2 로 물러나며 그렇게 기록한다.
 
 증거 매핑(app/core/rules 의 증거 키 7종은 바꾸지 않는다). 엔진 내부 점수 → 기존 키:
@@ -36,6 +38,7 @@ from dataclasses import asdict, dataclass
 from typing import Iterable, Mapping, Protocol, Sequence
 
 from . import features as F
+from . import netguard as NG
 
 SEMANTIC_VERSION = "semantic-v0.3"
 
@@ -238,12 +241,41 @@ class OnnxE5Embedder:
         return res   # type: ignore[return-value]
 
 
+class LmStudioCallError(OSError):
+    """LM Studio 임베딩을 받지 못했다(꺼짐·3xx·4xx/5xx·형식 오류). code 는 짧은 코드, 메시지에 본문 없음.
+    OSError 의 하위라 부르는 쪽(engine/link 의 `except (OSError, ValueError, KeyError)`)이 그대로 잡는다."""
+
+    def __init__(self, code: str, status: int | None = None):
+        super().__init__(f"LM Studio 임베딩 실패: {code}" + (f" (HTTP {status})" if status else ""))
+        self.code = code
+        self.status = status
+
+
+def _lmstudio_get_json(url: str, body: bytes | None, timeout: float, max_bytes: int):
+    """engine/netguard.local_request 로 한 번 부르고 2xx JSON 을 돌려준다(프록시 무시·3xx 안 따름·localhost 만).
+    3xx → LmStudioCallError('redirect_refused'), 그 밖 2xx 아님 → 'http_error', JSON 아님 → 'bad_response'.
+    연결 실패·시간 초과는 OSError(ConnectionRefusedError·TimeoutError…)로, 주소 거부는 NotLocalError(ValueError)로 나온다."""
+    status, data = NG.local_request("POST" if body is not None else "GET", url, body, timeout, max_bytes=max_bytes)
+    if 300 <= status < 400:
+        raise LmStudioCallError("redirect_refused", status)
+    if not 200 <= status < 300:
+        raise LmStudioCallError("http_error", status)
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise LmStudioCallError("bad_response", status) from None
+
+
 class LmStudioEmbedder:
-    """LM Studio 로컬 서버의 /v1/embeddings (localhost 만). 서버가 꺼져 있으면 만들지 않는다(probe 가 None)."""
+    """LM Studio 로컬 서버의 /v1/embeddings (localhost 만). 서버가 꺼져 있으면 만들지 않는다(probe 가 None).
+
+    부르기는 engine/netguard(engine/llm_local 과 같은 규칙): 주소 검사, localhost → 127.0.0.1, 프록시 환경 변수 무시,
+    3xx 안 따름. 밖 주소는 만들 때 NotLocalError(ValueError)."""
+
+    MAX_RESPONSE_BYTES = 64 << 20      # 64줄 × 큰 임베딩(4096차원)도 들어가는 상한
 
     def __init__(self, base_url: str, model: str, *, timeout: float = 30.0):
-        _require_local(base_url)
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _require_local(base_url)
         self.model = model
         self.timeout = timeout
 
@@ -252,39 +284,42 @@ class LmStudioEmbedder:
                 "model_sha256": None, "url": self.base_url}
 
     def encode(self, texts: Sequence[str]) -> list[Vector]:
-        import urllib.request
         out: list[Vector] = []
         for i in range(0, len(texts), 64):
-            body = json.dumps({"model": self.model, "input": list(texts[i:i + 64])}).encode("utf-8")
-            req = urllib.request.Request(self.base_url + "/v1/embeddings", data=body,
-                                         headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:   # localhost 만(_require_local)
-                d = json.loads(r.read().decode("utf-8"))
-            rows = sorted(d["data"], key=lambda x: x["index"])
-            out.extend(_unit(x["embedding"]) for x in rows)
+            chunk = list(texts[i:i + 64])
+            body = json.dumps({"model": self.model, "input": chunk}).encode("utf-8")
+            d = _lmstudio_get_json(self.base_url + "/v1/embeddings", body, self.timeout, self.MAX_RESPONSE_BYTES)
+            try:
+                rows = sorted(d["data"], key=lambda x: x["index"])
+                vecs = [_unit(x["embedding"]) for x in rows]
+            except (KeyError, TypeError, AttributeError):
+                raise LmStudioCallError("bad_response") from None
+            if len(vecs) != len(chunk):
+                raise LmStudioCallError("bad_response")
+            out.extend(vecs)
         return out
 
 
-def _require_local(url: str) -> None:
-    from urllib.parse import urlparse
-    host = urlparse(url).hostname or ""
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        raise ValueError("LM Studio 주소는 이 PC(localhost)만 받습니다(D-06·D-17 6)")
+def _require_local(url: str) -> str:
+    """LM Studio 기본 주소(127.0.0.1 로 바꾼 꼴, 끝 '/'·'/v1' 뗌). 밖이면 NotLocalError(ValueError)."""
+    try:
+        return NG.require_local_url(url)
+    except NG.NotLocalError:
+        raise NG.NotLocalError("LM Studio 주소는 이 PC(localhost·127.0.0.1·::1)만 받습니다(D-06·D-17 6)") from None
 
 
 def probe_lmstudio(base_url: str = LMSTUDIO_DEFAULT_URL, *, timeout: float = 0.5) -> dict:
-    """LM Studio 서버가 켜져 있는지, 임베딩 모델이 올라가 있는지. 네트워크는 localhost 만 본다.
+    """LM Studio 서버가 켜져 있는지, 임베딩 모델이 올라가 있는지. 네트워크는 이 PC 만 본다(engine/netguard).
 
-    돌려주는 값: {'running': bool, 'embedding_models': [id...]}. 모델 id 는 이름에 'embed' 가 든 것만."""
-    _require_local(base_url)
-    import urllib.error
-    import urllib.request
+    돌려주는 값: {'running': bool, 'embedding_models': [id...]}. 모델 id 는 이름에 'embed' 가 든 것만.
+    3xx(넘겨주기)는 따라가지 않고 꺼짐으로 본다. 밖 주소는 NotLocalError(ValueError)."""
+    base = _require_local(base_url)
     try:
-        with urllib.request.urlopen(base_url.rstrip("/") + "/v1/models", timeout=timeout) as r:
-            d = json.loads(r.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError):
+        d = _lmstudio_get_json(base + "/v1/models", None, timeout, 4 << 20)
+        ids = [m.get("id", "") for m in d.get("data", []) if isinstance(m, dict)]
+        ids = [i for i in ids if isinstance(i, str)]
+    except (OSError, NG.BadHTTPError, AttributeError, TypeError):
         return {"running": False, "embedding_models": []}
-    ids = [m.get("id", "") for m in d.get("data", []) if isinstance(m, dict)]
     return {"running": True, "embedding_models": [i for i in ids if "embed" in i.lower()]}
 
 
@@ -490,5 +525,5 @@ def describe(status: Mapping | None) -> str:
 
 
 __all__ = ["SEMANTIC_VERSION", "E5_SMALL", "SemanticConfig", "Embedder", "FakeEmbedder", "OnnxE5Embedder",
-           "LmStudioEmbedder", "probe_lmstudio", "load_default", "status_doc", "SemanticIndex", "CandSemantic",
+           "LmStudioEmbedder", "LmStudioCallError", "probe_lmstudio", "load_default", "status_doc", "SemanticIndex", "CandSemantic",
            "SemanticScorer", "make_scorer", "describe", "cosine"]

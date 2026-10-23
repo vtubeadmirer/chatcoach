@@ -32,6 +32,7 @@ import os
 import random
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Iterable, Sequence
@@ -299,6 +300,11 @@ visible_len = TN.visible_len   # 이모티콘 코드와 공백을 뺀 글자 수
 tokens = TN.tokens             # 점수용 낱말(2자 이상). 조사를 뗀 꼴과 원래 꼴을 둘 다 넣는다
 
 
+def _nfkc(s: str) -> str:
+    """꼴 검사(멘션·링크·전화·후원·공지)용 NFKC. 대소문자는 그대로 둔다(정규식이 알아서 본다)."""
+    return unicodedata.normalize("NFKC", s or "")
+
+
 def reject_reason(chat: Chat, *, nicknames: Iterable[str] | None, blocklist: Sequence[str], cfg: RetrieveConfig) -> str | None:
     """후보에서 뺄 까닭(코드) 또는 None. 앞 조건부터 하나만 낸다(통계 칸 이름과 같다)."""
     if chat.t_ms is None:
@@ -317,15 +323,18 @@ def reject_reason(chat: Chat, *, nicknames: Iterable[str] | None, blocklist: Seq
         return "too_short"
     if n > cfg.max_len:
         return "too_long"
-    if _SYSTEM_TEXT.search(t):
+    # 꼴 검사는 NFKC 정규화한 글에(전각 '＠'·'ｗｗｗ．'·전각 숫자·'（공지）' 도 잡는다). engine/generate 의 거르기 4 와 같은
+    # 방식 — 정규식만 정규화한 글에 돌리고, 길이·옮길 본문은 원문 그대로(25 보고 5-2 의 9번).
+    nt = _nfkc(t)
+    if _SYSTEM_TEXT.search(nt):
         return "system_text"
-    if _MENTION.search(t):
+    if _MENTION.search(nt):
         return "mention"
-    if _LINK.search(t):
+    if _LINK.search(nt):
         return "link"
-    if _PHONE.search(t):
+    if _PHONE.search(nt):
         return "phone"
-    if _DONATION.search(t):
+    if _DONATION.search(nt):
         return "donation"
     sq = _squash(t)
     if nicknames:

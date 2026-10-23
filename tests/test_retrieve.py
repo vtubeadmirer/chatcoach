@@ -148,6 +148,32 @@ def test_reject_reason(chat, why):
     assert R.reject_reason(c, nicknames={"합성닉"}, blocklist=("합성금칙",), cfg=R.RetrieveConfig()) == why
 
 
+# 25 보고 5-2 의 9번: 꼴 검사는 NFKC 정규화한 글에(engine/generate 거르기 4 와 같은 방식). 모두 합성 예문.
+@pytest.mark.parametrize("text,why", [
+    ("＠누군가 안녕하세요 반가워요", "mention"),                 # 전각 '＠'
+    ("﹫누군가 안녕하세요 반가워요", "mention"),                 # 작은 꼴 '﹫'
+    ("주소 ｗｗｗ．ｓｙｎｔｈ－ｓｉｔｅ．ｃｏｍ 들어가 봐", "link"),   # 전각 영문·마침표
+    ("여기 ｈｔｔｐｓ：／／ｅｘａｍｐｌｅ．ｉｎｖａｌｉｄ 보세요", "link"),
+    ("연락 ０１０－１２３４－５６７８ 주세요", "phone"),            # 전각 숫자·하이픈
+    ("［공지］ 오늘은 합성 공지입니다", "system_text"),            # 전각 대괄호
+    ("（알림） 합성 알림 문장입니다", "system_text"),
+    ("ＡＢＣ 합성 채팅 문장 괜찮아요", None),                     # 전각 영문만 — 거짓 양성 없음
+])
+def test_reject_reason_nfkc(text, why):
+    c = R.Chat("c0", 1000, "text", "NORMAL", "vw_x", "viewer", "합*", text)
+    assert R.reject_reason(c, nicknames={"합성닉"}, blocklist=("합성금칙",), cfg=R.RetrieveConfig()) == why
+    assert c.text == text                                       # 원문은 그대로(정규식만 정규화한 글에)
+
+
+def test_reject_reason_nfkc_same_as_generate_filter():
+    """retrieve 와 generate 가 같은 글을 같은 코드로 거른다(전각 멘션·링크·전화)."""
+    import unicodedata
+    for text in ("＠누군가 안녕", "ｗｗｗ．ｓｙｎｔｈ．ｃｏｍ 가 봐", "０１０－１２３４－５６７８ 연락"):
+        nt = unicodedata.normalize("NFKC", text)
+        assert any(rx.search(nt) for rx in (R._MENTION, R._LINK, R._PHONE))
+        assert not any(rx.search(text) for rx in (R._MENTION, R._LINK, R._PHONE))   # 원문으로는 지나갔던 글
+
+
 def test_blocklist_file(tmp_path):
     p = tmp_path / "bl.txt"
     p.write_text("# 합성 금칙어 목록\n합성 금칙\n\n합성금칙\n", encoding="utf-8")

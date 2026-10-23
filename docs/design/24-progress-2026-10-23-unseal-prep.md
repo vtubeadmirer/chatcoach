@@ -232,11 +232,11 @@ D-21 1(잠기면 첫 실제 비교 먼저)·D-17 4(해제는 모두 잠긴 뒤)�
 
 | # | 무엇 | 제안 |
 |---|---|---|
-| 1 | **실제 시범에 짝 봉인이 있는지 모른다.** 벡터 짝 함수는 이번 묶음에 생겼고, 그 전에는 `engine_to_ai --vectors --seal` 이 거부(종료 1)했다. 그래서 실제 시범에는 **벡터 짝이 없을 가능성이 크다**. 전사 낱말 짝도 확인하지 않았다 | 잠긴 뒤 dry-run 이 0 이면 `ai_seal status` 로 `pairs` 를 본다(6장 3단계). 없으면 해제 **전에** 엔진으로 만들어 **이미 있는 판정 봉인**(`pair_sha256`)에 붙인다(판정의 사전 봉인 여부는 그대로). 이것을 한 줄로 하는 CLI(예: `ai_seal seal-pair`)가 없으므로 다음 묶음 0번에 만든다 |
+| 1 | **실제 시범에 짝 봉인이 있는지 모른다.** 벡터 짝 함수는 이번 묶음에 생겼고, 그 전에는 `engine_to_ai --vectors --seal` 이 거부(종료 1)했다. 그래서 실제 시범에는 **벡터 짝이 없을 가능성이 크다**. 전사 낱말 짝도 확인하지 않았다 | 잠긴 뒤 dry-run 이 0 이면 `ai_seal status` 로 `pairs` 를 본다(6장 3단계). 없으면 해제 **전에** 엔진으로 만들어 **이미 있는 판정 봉인**(`pair_sha256`)에 붙인다(판정의 사전 봉인 여부는 그대로). 이것을 한 줄로 하는 CLI(예: `ai_seal seal-pair`)가 없으므로 다음 묶음 0번에 만든다. **→ 됨(25): `ai_seal attach-pairs`**, 명령은 6장 3단계 |
 | 2 | 실제 시범은 해제할 수 없다: 라벨링 세션 1(잠김 0), 2편은 1차 세션 없음, 1편은 재라벨 계획 없음·안 잠김 | 기다린다. 세션이 모두 잠기면 6장 순서대로. 해제는 되돌릴 수 없으므로 사용자의 '시작' 확인 뒤에 |
 | 3 | 실제 창 스모크가 또 밖에서 멈춤(65초, Suspended 17/19, CPU 0, 스택 0/3) | **사용자 몫**: Acronis 신뢰 목록에 `.venv`·`.venv-engine` 의 python.exe 2개. **Claude 몫**: 그 뒤 실제 창 3번(사용자 0클릭) |
 | 4 | 합성 리허설의 사람 일치도 기준이 '불확실'(건수 부족). 실제 시범에서도 `low_n` 이면 E1 엄격이 '기준 미확인' 으로 남을 수 있다 | 그대로. 해제 당일 요약의 '사람 일치도 기준' 줄을 Fable 종합 세션이 해석 |
-| 5 | `SealError` 가 예외 이름으로만 남아 원인(같은 run_id 이미 해제·봉인 파일 불일치·채팅 파일 없음)을 모름 | 메시지 앞머리를 코드(`dup_run_id`·`sealed_mismatch`·`messages_missing`)로 바꿔 `unseal:<코드>` 로. 다음 묶음 0번 |
+| 5 | `SealError` 가 예외 이름으로만 남아 원인(같은 run_id 이미 해제·봉인 파일 불일치·채팅 파일 없음)을 모름 | 메시지 앞머리를 코드(`dup_run_id`·`sealed_mismatch`·`messages_missing`)로 바꿔 `unseal:<코드>` 로. 다음 묶음 0번. **→ 됨(25)**: 앞머리 대신 `.code` 속성(`SEAL_ERROR_CODES` 32개), 6장 7단계 |
 | 6 | 벡터 검사 규칙이 엔진과 앱 두 곳에 있음 | 다음 엔진 판에서 `app/core/vectors_doc.py` 로 옮겨 함께 씀(`words_doc` 과 같은 방식). 그때까지 `test_vectors_doc_matches_engine_rules` 가 어긋남을 잡음 |
 | 7 | 보정 도구는 시범에서 벡터를 안 씀. 시청자 훈련 화면은 씀 | 시범 숫자가 나온 뒤 벡터 효과를 다시 잴지 정함 |
 | 8 | 보정 도구는 주제 흐름·전사 낱말을 한 run 에서 함께 고르고, 앱은 따로 '짝이 있는 첫 run' 으로 고름. 지금은 결과가 같다 | 짝이 빠진 run 이 생기면 `viewer_flow.topic_blocks`·`pilot_words` 를 그대로 불러 한 규칙으로 |
@@ -275,11 +275,11 @@ D-21 1(잠기면 첫 실제 비교 먼저)·D-17 4(해제는 모두 잠긴 뒤)�
 | 0 | (명령 없음) 사용자가 채팅으로 '시범 세션 모두 잠금' 을 알린다 | 그 전에는 실제 시범 폴더·봉인 폴더를 **열지 않는다**(`--real` 도 안 씀) |
 | 1 | `.venv\Scripts\python tools\pilot_freeze.py --check` | 종료 0, 다른 곳 0개 |
 | 2 | `.venv\Scripts\python tools\pilot_unseal_day.py --real` | 종료 **0**. 시범 3편 · 라벨링 세션 모두 잠김 · 사유 코드 없음 · 감시 위반 0 · 쓰기 0. **종료 3 이면** 사유 코드만 사용자에게 알리고 멈춘다 |
-| 3 | 편마다 `.venv\Scripts\python tools\ai_seal.py status --project <pilot 폴더>` | 유효 봉인 수(v0.2·v0.3 로 2 기대), `pairs` 의 topics·words·vectors 가 모두 true, `engine_version` 있음. **false 가 있으면** 5-3 의 3번으로 짝을 붙이고 이 단계를 다시 |
+| 3 | 편마다 `.venv\Scripts\python tools\ai_seal.py status --project <pilot 폴더>` | 유효 봉인 수(v0.2·v0.3 로 2 기대), `pairs` 의 topics·words·vectors 가 모두 true, `engine_version` 있음. **false 가 있으면** 5-3 의 3번으로 짝을 붙이고 이 단계를 다시. 짝 보충 명령(D-23 3, 25 5-2 의 12번 — **엔진 venv**, 판정을 만들 때와 같은 asr·범위·보정은 Claude 가 맞춘다): `.venv-engine\Scripts\python tools\ai_seal.py attach-pairs --project <pilot 폴더> --all --by L01 --from-engine --asr <sealed-work\…asr.json> [--start-ms N --end-ms N]`. 이미 있는 짝은 'present' 로 건너뛰고, 하나라도 거부되면 그 판정에는 아무것도 붙이지 않는다(규칙은 [03](03-data-model.md) 6-14 '짝 보충') |
 | 4 | (명령 없음) 2·3 의 숫자를 사용자에게 보이고 '시작' 확인을 받는다 | 해제는 되돌릴 수 없다는 것을 한 줄로 알림 |
 | 5 | `.venv\Scripts\python tools\pilot_unseal_day.py --real --go` | 첫 줄 '되돌릴 수 없는 해제를 시작합니다(--go)'. 종료 **0**. 편마다 '해제 n · 실패 0 · 대조 ok n건 · 보고서 n · 판끼리 1 · 보정 됨 · 오류 0'. 감시 위반 0, 시범 폴더 쓰기 0 |
 | 6 | 요약 `chatcoach-data\reports\pilot-unseal-<YYYYMMDD>\summary.md` 를 읽는다 | 사람 일치도 기준 줄(`low_n` 인지), 사전 봉인 여부, 엔진 판 열, 대조 열, 보정 표와 맥락 run. **숫자만** 보고에 옮긴다 |
-| 7 | (종료 1 일 때만) 같은 요약의 '오류 (코드)' 절을 읽는다 | 코드: `unseal:SealError`·`seal_jsonl:problems`·`verify:unsealed_files`·`calib:*`. 이미 푼 것은 되돌릴 수 없다. 원인을 고친 뒤 5단계를 다시 돌리면 푼 것은 건너뛰고 새 폴더 `-2` 에 요약 |
+| 7 | (종료 1 일 때만) 같은 요약의 '오류 (코드)' 절을 읽는다 | 코드(25 0번 운영 마감 뒤): `unseal:<원인 코드>` — 원인 코드는 `app.seal.SEAL_ERROR_CODES` 32개(예 `unseal:dup_run_id`·`unseal:sealed_mismatch`·`unseal:messages_missing`·`unseal:seal_jsonl_corrupt`, SealError 가 아니면 예외 이름 `unseal:OSError` 꼴. 목록은 [03](03-data-model.md) 6-14 '해제·봉인 오류 원인 코드') · `seal_jsonl:problems` · `verify:unsealed_files` · `report:*`·`pair:*`·`compare:*`·`calib:*`·`pool:*`(예외 이름). 이 문서를 처음 쓸 때는 `unseal:SealError` 처럼 예외 이름만 남았다(5-2 의 5번). 이미 푼 것은 되돌릴 수 없다. 원인을 고친 뒤 5단계를 다시 돌리면 푼 것은 건너뛰고 새 폴더 `-2` 에 요약 |
 | 8 | 선택: 실제 창으로 결과 보기 | 나란히 보기 기본이 v0.3 run 인지, 방송 요약·시청자 훈련 상태 줄이 '봉인됨' 이 아닌지. 사용자가 보고 싶을 때만(클릭 2·2·4) |
 | 9 | (명령 없음) Fable 종합 세션이 첫 실제 비교를 해석하고 문턱(D-22 1)을 다시 정한다 | 결정은 08 D-23 으로 |
 

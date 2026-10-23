@@ -240,7 +240,7 @@ def test_step_list_matches_c5_49_with_renames():
     pref = set(re.findall(r'self\.check\(f"\{p\}_([a-z_0-9]+)"', src))
     names |= {f"{p}_{s}" for s in pref for p in ("agree", "adj", "an")}
     names -= {"labeling_flow", "agreement_flow", "adjudication_flow", "analysis_flow",
-              "training_flow", "viewer_flow"}                       # 건너뜀·예외 때만 찍는 묶음 이름
+              "training_flow", "viewer_flow", "discern_flow"}       # 건너뜀·예외 때만 찍는 묶음 이름
     names -= {"agree_b_missed", "agree_tools", "agree_cancel_plan", "agree_origin", "agree_adjudicate",
               "adj_analysis"}                                       # 도우미가 흐름마다 다르게 찍는 것
     # 흐름 머리글자 f"{p}_…" 는 흐름마다 자기 단계만 찍는다: agree·adj 는 E 분석 단계를, an 은 agree·adj 전용 단계를 찍지 않는다
@@ -255,11 +255,14 @@ def test_step_list_matches_c5_49_with_renames():
     assert len(want_all) == len(want_an) + len(gs.STEPS_TRAINING) and want_all[-1] == "cache_drop"
     want_vw = gs.expected_steps(analysis=True, training=True, viewer=True)   # G 시청자 훈련(--viewer-flow)도 그 뒤
     assert len(want_vw) == len(want_all) + len(gs.STEPS_VIEWER) and want_vw[-1] == "cache_drop"
-    assert names <= set(want_vw), sorted(names - set(want_vw))
+    want_ds = gs.expected_steps(analysis=True, training=True, viewer=True, discern=True)   # H-5 가려내기도 그 뒤
+    assert len(want_ds) == len(want_vw) + len(gs.STEPS_DISCERN) and want_ds[-1] == "cache_drop"
+    assert names <= set(want_ds), sorted(names - set(want_ds))
     assert set(gs.STEPS_ANALYSIS) <= names                          # 분석 흐름 단계가 모두 gui_smoke 안에 있다
     assert set(gs.STEPS_TRAINING) <= names                          # 훈련 흐름 단계도
     assert set(gs.STEPS_VIEWER) <= names                            # 시청자 훈련 흐름 단계도
-    assert gs.compare_steps(want + ["analysis_flow", "training_flow", "viewer_flow"]) == ([], [])   # 건너뜀 표시는 대조 안 함
+    assert set(gs.STEPS_DISCERN) <= names                           # 가려내기 흐름 단계도
+    assert gs.compare_steps(want + ["analysis_flow", "training_flow", "viewer_flow", "discern_flow"]) == ([], [])
 
 
 # ---------------------------------------------------------------------------- 12. 잠그기 직전 구간표가 바뀌면 다시 계산

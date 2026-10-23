@@ -8,7 +8,8 @@
      다른 이름·사용자 정보가 든 주소·`127.0.0.2`·10진/16진 IP·끝점 붙은 이름·쿼리)은 `LLMAddressError(not_local)`.
      `localhost` 는 이름 풀이를 하지 않고 **127.0.0.1 로 바꿔서** 부른다(hosts 파일이 다른 곳을 가리켜도 밖으로 안 나감).
      표준 urllib 만 쓰고(requests 없음), **프록시 환경 변수를 무시**하고(ProxyHandler({})), **넘겨주기(3xx)를 따라가지 않는다**
-     (`redirect_refused`) — 둘 다 이 PC 밖으로 나가는 뒷길이라서.
+     (`redirect_refused`) — 둘 다 이 PC 밖으로 나가는 뒷길이라서. 이 규칙의 몸통은 engine/netguard.py 한 곳이다
+     (engine/semantic.py 의 LM Studio 임베딩 길도 같은 함수를 쓴다).
   2. **보낼 글 검사** — 보내기 **전에** 모든 메시지 본문을 `check_privacy` 로 본다. 'vw_'(가린 시청자 ID), sha 꼴 16진 덩어리
      (chat_id·해시·userIdHash), UUID, 부르는 쪽이 준 원 닉네임 목록(정규화 2자 이상)이 있으면 `LLMPrivacyError(privacy)` 로
      **보내지 않는다**(D-06 2). 오류·기록에는 걸린 종류와 건수만 넣는다(걸린 글·닉네임 없음).
@@ -26,7 +27,8 @@
 
 시험은 실제 LM Studio 를 부르지 않는다: engine/llm_fake.py 의 가짜 서버(127.0.0.1, 합성 응답) 또는 `transport=` 함수 주입.
 
-표준 라이브러리와 app.core.textnorm(정규화)·app.jsonl(기록 덧붙이기)만 쓴다(tests/test_layers.py 의 엔진 허용 목록).
+표준 라이브러리와 engine.netguard(주소·부르기 막이), app.core.textnorm(정규화)·app.jsonl(기록 덧붙이기)만 쓴다
+(tests/test_layers.py 의 엔진 허용 목록).
 """
 from __future__ import annotations
 
@@ -41,12 +43,14 @@ from typing import Callable, Iterable, Mapping, Sequence
 
 from app.core import textnorm as TN
 
+from . import netguard as NG
+
 CLIENT_NAME = "engine llm_local"
 CLIENT_VERSION = "0.1.0"
 RECORD_SCHEMA = "chatcoach-llm-send-v1"
 SERVICE = "lmstudio-local"                      # 기록의 '어느 서비스'
 DEFAULT_BASE_URL = "http://127.0.0.1:1234"      # LM Studio 기본 서버 주소(engine/semantic.py 와 같음)
-LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+LOCAL_HOSTS = NG.LOCAL_HOSTS
 CHAT_PATH = "/v1/chat/completions"
 MODELS_PATH = "/v1/models"
 MAX_RESPONSE_BYTES = 4 << 20                    # 응답을 이보다 많이 읽지 않는다(형식 오류로 본다)
@@ -93,51 +97,17 @@ class LLMPrivacyError(LLMError):
 
 # ───────────────────────────────────────────────────────────── 주소 검사
 
-_HOST_OK_RE = re.compile(r"\A[A-Za-z0-9.:\-\[\]]+\Z")
-
-
-def _split_local(url: str):
-    """(scheme, host, port, path) 또는 None. is_local_url 과 _normalize_base 가 같이 쓴다."""
-    from urllib.parse import urlsplit
-    if not isinstance(url, str) or not url or url != url.strip():
-        return None
-    if any(ord(c) < 0x21 or ord(c) > 0x7E for c in url):      # 공백·제어 문자·비 ASCII(이름 흉내) 거부
-        return None
-    try:
-        sp = urlsplit(url)
-        port = sp.port                                         # 범위 밖이면 ValueError
-    except ValueError:
-        return None
-    if sp.scheme.lower() not in ("http", "https"):
-        return None
-    if sp.username is not None or sp.password is not None or "@" in sp.netloc:
-        return None                                            # 'http://127.0.0.1@밖' 류 혼동 막기
-    if sp.query or sp.fragment or "#" in url or "?" in url:
-        return None
-    host = (sp.hostname or "").lower()
-    if not host or not _HOST_OK_RE.match(sp.netloc) or host not in LOCAL_HOSTS:
-        return None
-    return sp.scheme.lower(), host, port, sp.path
-
-
-def is_local_url(url) -> bool:
-    """`http(s)://localhost | 127.0.0.1 | [::1]` (포트·경로 허용, 사용자 정보·쿼리·조각 없음) 이면 True. 그 밖은 모두 False."""
-    return _split_local(url) is not None
+# 규칙은 engine/netguard.py 한 곳(engine/semantic.py 의 임베딩 길과 같이 쓴다, 25 5-2 의 5번).
+is_local_url = NG.is_local_url
 
 
 def require_local_url(url) -> str:
-    """주소를 검사하고 실제로 부를 기본 주소(끝 '/' 없음)를 돌려준다. localhost 는 127.0.0.1 로 바꾼다(이름 풀이 안 함)."""
-    sp = _split_local(url)
-    if sp is None:
-        raise LLMAddressError()
-    scheme, host, port, path = sp
-    netloc = "127.0.0.1" if host == "localhost" else ("[::1]" if host == "::1" else host)
-    if port is not None:
-        netloc += f":{port}"
-    path = path.rstrip("/")
-    if path.endswith("/v1"):
-        path = path[:-3]                                       # 'http://127.0.0.1:1234/v1' 도 같은 서버로
-    return f"{scheme}://{netloc}{path}"
+    """주소를 검사하고 실제로 부를 기본 주소(끝 '/' 없음)를 돌려준다. localhost 는 127.0.0.1 로 바꾼다(이름 풀이 안 함).
+    밖이면 LLMAddressError(netguard.NotLocalError 를 이 모듈의 오류로 바꿈)."""
+    try:
+        return NG.require_local_url(url)
+    except NG.NotLocalError:
+        raise LLMAddressError() from None
 
 
 # ───────────────────────────────────────────────────────────── 보낼 글 검사 (D-06 2)
@@ -251,71 +221,22 @@ def check_privacy(texts: Iterable[str], nicknames: Iterable[str] | frozenset[str
 
 # ───────────────────────────────────────────────────────────── 기본 transport (urllib 만)
 
-def _build_opener():
-    import urllib.request
-
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        """3xx 를 따라가지 않는다 — 서버가 다른 주소(밖)로 넘겨도 가지 않고 3xx 상태를 그대로 돌려준다."""
-
-        def redirect_request(self, req, fp, code, msg, headers, newurl):   # noqa: D401
-            return None
-
-    # ProxyHandler({}) — HTTP_PROXY·HTTPS_PROXY 환경 변수를 무시한다(프록시가 밖에 있으면 글이 그리로 간다).
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+# 프록시 무시(ProxyHandler({}))·3xx 안 따름·localhost → 127.0.0.1·응답 크기 상한은 engine/netguard.local_request 가 한다
+# (engine/semantic.py 의 LM Studio 임베딩 길과 같은 함수). 여기서는 오류 이름만 이 모듈 것으로 맞춘다.
+_BadHTTP = NG.BadHTTPError      # HTTP 응답 자체가 깨졌다(상태 줄·길이·크기). bad_response 로 센다
 
 
 def urllib_transport(method: str, url: str, body: bytes | None, timeout: float) -> tuple[int, bytes]:
-    """표준 urllib 로 한 번 부른다. HTTP 오류 상태도 (상태, 바이트) 로 돌려주고, 연결 실패·시간 초과만 예외로 낸다.
+    """표준 urllib 로 한 번 부른다(engine/netguard.local_request). HTTP 오류 상태도 (상태, 바이트) 로 돌려주고, 연결 실패·
+    시간 초과만 예외로 낸다. 연결 실패의 '그 밖' 은 ConnectionError(부르는 쪽이 '꺼짐' 으로 센다).
 
     주소는 부르는 쪽(LocalLLMClient)이 이미 검사했지만 여기서도 한 번 더 본다(이 함수를 바로 부르는 경우)."""
-    import http.client
-    import socket
-    import urllib.error
-    import urllib.request
     if not is_local_url(url):
         raise LLMAddressError()
-    headers = {"Accept": "application/json"}
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
-        with _build_opener().open(req, timeout=timeout) as r:
-            return int(r.status), _read_capped(r)
-    except urllib.error.HTTPError as e:
-        try:
-            data = _read_capped(e)
-        except Exception:                      # noqa: BLE001 — 오류 본문은 못 읽어도 상태는 쓴다
-            data = b""
-        return int(e.code), data
-    except urllib.error.URLError as e:
-        reason = e.reason
-        if isinstance(reason, (TimeoutError, socket.timeout)):
-            # 연결·보내기 단계의 시간 초과(urllib 가 URLError 로 감싼다). 루프백에서 이것은 '듣는 서버 없음' 이다 —
-            # 윈도는 닫힌 루프백 포트에 SYN 을 몇 번 다시 보내 거부가 1~2초 늦게 오므로 짧은 timeout 이면 여기로 온다.
-            # 응답을 기다리다 난 시간 초과(아래 raw TimeoutError)와 나눈다.
-            raise ConnectionRefusedError("connect timeout") from None
-        if isinstance(reason, ConnectionRefusedError):
-            raise ConnectionRefusedError("refused") from None
-        if isinstance(reason, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
-            raise ConnectionResetError("lost") from None
-        raise ConnectionError("connect") from None           # 그 밖의 연결 실패는 '꺼짐' 으로 센다
-    except (TimeoutError, socket.timeout):
-        raise TimeoutError("timeout") from None
-    except http.client.RemoteDisconnected:
-        raise ConnectionResetError("lost") from None
-    except http.client.HTTPException:
-        raise _BadHTTP() from None
-
-
-class _BadHTTP(Exception):
-    """HTTP 응답 자체가 깨졌다(상태 줄·길이). bad_response 로 센다."""
-
-
-def _read_capped(r) -> bytes:
-    data = r.read(MAX_RESPONSE_BYTES + 1)
-    if len(data) > MAX_RESPONSE_BYTES:
-        raise _BadHTTP()
-    return data
+        return NG.local_request(method, url, body, timeout, max_bytes=MAX_RESPONSE_BYTES)
+    except NG.NotLocalError:
+        raise LLMAddressError() from None
 
 
 # ───────────────────────────────────────────────────────────── 결과

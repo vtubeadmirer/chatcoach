@@ -79,6 +79,18 @@
   가림 닉네임·viewer_id·원 닉네임·user_id_hash·원 본문이 0건인지 바이트 검사(원 닉네임은 원본의 보호 구역 파일을 읽기만,
   사본에 복사하지 않음). 스크린샷 _tr_virtual.
 
+--discern-flow (H-5 가려내기, 20 7장, 25 6-2, 08 D-24 3·7): 훈련 흐름 사본 + 원 닉네임 목록·전사 낱말·주제 흐름(보호 구역,
+  흐름 끝에 사본째 rmtree)을 보기 전용으로 열고 영상 연결 → 메뉴 '훈련 → 가상 채팅 만들기' 한 번을 가짜 LM Studio
+  (engine.llm_fake, 127.0.0.1 빈 포트, 합성 답 smoke_llm_respond)로: 확인 → 생성(--llm-check) → 섞기, 생성 줄 > 0 ·
+  새 파일은 scenarios\\ 의 시나리오·생성 후보·보낸 기록 셋뿐 · 보낸 글(채운 값)에 원 닉네임 0 · 시나리오 머리에 응답 해시·
+  생성 파일 해시·gscore-v1 (설정 [lmstudio] 은 이 단계 동안만 가짜 서버 주소, 끝에 지움) → 메뉴 '훈련 → 가상 채팅 가려내기'
+  한 번(소리 켬 · 표시 숨김 · '시청자 번호' 칸 숨김 · 맨 위 한 줄 · start 줄) → Space → 합성 판정 10건(DISCERN_PLAN: 생성 4 ·
+  가져옴 2 · 실제 4, 한 번은 다른 단추를 먼저 눌렀다가 바꿈)을 '종류' 칸 단추에 진짜 마우스로 → 구간 끝에 저절로 정답:
+  혼동표·κ·p_o·p_e·탐지율·오인율·모르겠음을 손 계산(discern_hand_calc)과, 숫자 줄 글자를 손 계산 글자와 대조, 가상 줄에
+  표시가 다시 붙고 줄마다 ✓·✗·?·· → [닫기] → 기록 줄(start · judge ×11 · end segment_end, end 의 숫자 = 손 계산) ·
+  기록·신호·앱 로그에 본문·가림 이름·viewer_id·출처 칸 0 → 보호 구역·백업 제외·노출 0·보낸 기록에 생성 본문·닉네임 0·
+  messages.jsonl 그대로. 정답 화면은 찍지 않는다(본문이 보임). 단계 이름 앞에 ds_.
+
 외부 정지 감시: 감시 스레드가 3초 넘게 멈췄고 그동안 프로세스 CPU 가 거의 늘지 않았으면 그 단계 뒤에 external_suspend=초 를
   붙이고 끝에 합계를 찍는다(보안 프로그램이 프로세스를 통째로 일시 정지한 것 — 코드 멈춤과 구별, 18 보고 4-2).
 
@@ -140,6 +152,9 @@ def parse_args(argv=None):
     ap.add_argument("--viewer-flow", action="store_true",
                     help="사본(+ scenarios·derived\\asr.json)에서 메뉴로 시청자 훈련 열기(전사 낱말을 워커로 만듦)→합성 채팅 3개 "
                          "쓰기(Enter)→축 단계→구간 끝 요약→닫기→기록 줄·보호 구역·노출 0 확인")
+    ap.add_argument("--discern-flow", action="store_true",
+                    help="사본(+ 원 닉네임 목록·전사 낱말)에서 '가상 채팅 만들기' 를 가짜 LM Studio(127.0.0.1)로 생성까지 → 메뉴로 "
+                         "가려내기 열기(표시 숨김)→합성 판정 10건(진짜 마우스)→구간 끝 정답·숫자 줄 손 계산 대조→기록 바이트 검사")
     ap.add_argument("--window-size", help="--labeling-flow 동안 메인 창 크기 (예: 1366x768, 테두리 포함)")
     ap.add_argument("--data-dir", help="임시 데이터 폴더 (기본 %%LOCALAPPDATA%%\\ChatCoachSmoke\\data)")
     ap.add_argument("--timeout", type=float, default=60.0, help="단계 하나의 대기 상한(초)")
@@ -317,20 +332,34 @@ SMOKE_SCENARIO_ARGS = ("--quiet-max-real", "45", "--target-per-min", "60")
 # --viewer-flow (G 시청자 훈련 첫 묶음, 08 D-20 2·4·5, 21 6-1·6-4 5번) 의 단계. 켜면 훈련 단계 뒤(cache_drop 앞)에 붙는다.
 STEPS_VIEWER = ("vw_copy", "vw_open", "vw_menu", "vw_write", "vw_summary", "vw_close", "vw_log", "vw_privacy",
                 "vw_cleanup")
-SKIP_MARKS = ("analysis_flow", "training_flow", "viewer_flow")
+# --discern-flow (H-5 가려내기, 20 7장, 25 6-2, 08 D-24 3·7) 의 단계. 켜면 시청자 훈련 단계 뒤(cache_drop 앞)에 붙는다.
+# 가짜 LM Studio(127.0.0.1 빈 포트)로 '가상 채팅 만들기' 가 생성까지 가는 단계(ds_make)를 같이 본다.
+STEPS_DISCERN = ("ds_copy", "ds_open", "ds_make", "ds_menu", "ds_judge", "ds_result", "ds_log", "ds_privacy",
+                 "ds_cleanup")
+SKIP_MARKS = ("analysis_flow", "training_flow", "viewer_flow", "discern_flow")
+# --discern-flow 의 가짜 LM Studio 가 돌려줄 합성 채팅 틀({w} = 요청에 온 전사 낱말 하나). 실제 채팅·닉네임 없음
+SMOKE_GEN_MODEL = "smoke-synthetic-model"
+SMOKE_GEN_TEMPLATES = ("오 {w} 얘기 나오니까 궁금해지네요", "저도 {w} 진짜 좋아해요 요즘", "{w} 다음엔 뭐 하실 거예요?",
+                       "와 {w} 이건 처음 들어봐요", "{w} 하는 거 보니까 재밌어요 ㅋㅋ", "혹시 {w} 언제부터 하셨어요?")
+# 합성 판정 10건의 틀: 출처마다 고를 줄 수와 차례대로 누를 판정(손 계산 대조용). 생성 4 · 가져옴 2 · 실제 4
+DISCERN_PLAN = (("generated", ("virtual", "virtual", "real", "unsure")),
+                ("retrieved", ("virtual", "real")),
+                ("replay", ("real", "real", "virtual", "unsure")))
 
 
-def expected_steps(analysis: bool = False, training: bool = False, viewer: bool = False) -> list[str]:
+def expected_steps(analysis: bool = False, training: bool = False, viewer: bool = False,
+                   discern: bool = False) -> list[str]:
     """지금 판에서 네 흐름을 다 켰을 때 찍혀야 하는 단계 이름(c5 목록을 STEPS_RENAMED 로 바꾸고 STEPS_ADDED 를 더함).
     analysis=True(--analysis-flow 도 켬)면 cache_drop 앞에 STEPS_ANALYSIS 를, training=True 면 그 뒤에 STEPS_TRAINING 을,
-    viewer=True 면 그 뒤에 STEPS_VIEWER 를."""
+    viewer=True 면 그 뒤에 STEPS_VIEWER 를, discern=True 면 그 뒤에 STEPS_DISCERN 을."""
     out: list[str] = []
     for s in STEPS_C5:
         s = STEPS_RENAMED.get(s, s)
         if s not in out:
             out.append(s)
     out += [s for s in STEPS_ADDED if s not in out]
-    for on, extra in ((analysis, STEPS_ANALYSIS), (training, STEPS_TRAINING), (viewer, STEPS_VIEWER)):
+    for on, extra in ((analysis, STEPS_ANALYSIS), (training, STEPS_TRAINING), (viewer, STEPS_VIEWER),
+                      (discern, STEPS_DISCERN)):
         if on:
             i = out.index("cache_drop") if "cache_drop" in out else len(out)
             out[i:i] = [s for s in extra if s not in out]
@@ -338,12 +367,81 @@ def expected_steps(analysis: bool = False, training: bool = False, viewer: bool 
 
 
 def compare_steps(names, analysis: bool = False, training: bool = False,
-                  viewer: bool = False) -> tuple[list[str], list[str]]:
-    """찍힌 단계 이름 → (빠진 것, 목록에 없는 것). 건너뜀 표시('analysis_flow'·'training_flow'·'viewer_flow')는 대조하지
-    않는다."""
+                  viewer: bool = False, discern: bool = False) -> tuple[list[str], list[str]]:
+    """찍힌 단계 이름 → (빠진 것, 목록에 없는 것). 건너뜀 표시('analysis_flow'·'training_flow'·'viewer_flow'·
+    'discern_flow')는 대조하지 않는다."""
     seen = [s for s in dict.fromkeys(names) if s not in SKIP_MARKS]
-    want = expected_steps(analysis, training, viewer)
+    want = expected_steps(analysis, training, viewer, discern)
     return [s for s in want if s not in seen], [s for s in seen if s not in want]
+
+
+def discern_hand_calc(plan=DISCERN_PLAN) -> dict:
+    """합성 판정 틀의 손 계산(app.core.discern·origin 을 쓰지 않는다). 정답: replay·retrieved = 실제, generated = 생성.
+    사람: real·virtual·unsure. 3×3 혼동표(행 정답 실제·생성·판별 불가, 열 사람 진짜·가짜·모르겠음)와 명목 κ,
+    가짜 탐지율(생성 → 가짜 / 생성 판정 수), 진짜 오인율(실제 → 가짜 / 실제 판정 수), 가져옴 오인율, 모르겠음 비율."""
+    col = {"real": 0, "virtual": 1, "unsure": 2}
+    conf = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+    by = {}
+    for src, answers in plan:
+        row = 1 if src == "generated" else 0
+        for a in answers:
+            conf[row][col[a]] += 1
+            d = by.setdefault(src, {"n": 0, "virtual": 0})
+            d["n"] += 1
+            d["virtual"] += a == "virtual"
+    n = sum(map(sum, conf))
+    p_o = sum(conf[i][i] for i in range(3)) / n
+    rows = [sum(r) for r in conf]
+    cols = [sum(conf[i][j] for i in range(3)) for j in range(3)]
+    p_e = sum(rows[i] * cols[i] for i in range(3)) / (n * n)
+    kappa = (p_o - p_e) / (1 - p_e)
+
+    def rate(hit, m):
+        return {"hit": hit, "n": m, "rate": (hit / m) if m else None}
+    gen = by.get("generated", {"n": 0, "virtual": 0})
+    real_n = by.get("replay", {"n": 0})["n"] + by.get("retrieved", {"n": 0})["n"]
+    real_v = by.get("replay", {"virtual": 0})["virtual"] + by.get("retrieved", {"virtual": 0})["virtual"]
+    ret = by.get("retrieved", {"n": 0, "virtual": 0})
+    correct = conf[0][0] + conf[1][1]
+    return {"confusion": conf, "n": n, "p_o": p_o, "p_e": p_e, "kappa": kappa,
+            "detection": rate(conf[1][1], rows[1]), "false_alarm": rate(real_v, real_n),
+            "retrieved": rate(ret["virtual"], ret["n"]), "unsure": rate(cols[2], n),
+            "marks": {"✓": correct, "?": cols[2], "✗": n - correct - cols[2]}, "generated": gen["n"], "real": real_n}
+
+
+def _fmt_hand(d: dict) -> str:
+    """손 계산 비율 → '0.50 (2/4)' (화면 숫자 줄과 같은 꼴)."""
+    r = d.get("rate")
+    return f"{'—' if r is None else f'{r:.2f}'} ({d['hit']}/{d['n']})"
+
+
+def smoke_llm_respond(messages) -> str:
+    """--discern-flow 가짜 LM Studio 의 답(합성): 확인 요청이면 '아니오', 생성 요청이면 요청에 온 전사 낱말로 n 줄."""
+    import re
+    from engine import generate as G
+    sysm = str(messages[0].get("content")) if messages else ""
+    user = str(messages[-1].get("content")) if messages else ""
+    if sysm == G.CHECK_SYSTEM_V1:
+        return "아니오"
+    words = []
+    for pat in (r"방금 나온 낱말: ([^\n]*)", r"주제 낱말: ([^\n]*)"):
+        m = re.search(pat, user)
+        words += [w.strip() for w in (m.group(1).split(",") if m else []) if w.strip() and w.strip() != "(없음)"]
+    words = words or ["오늘"]
+    m = re.search(r"채팅 (\d+)줄", user)
+    n = int(m.group(1)) if m else 3
+    return "\n".join(f"{i + 1}. " + SMOKE_GEN_TEMPLATES[i % len(SMOKE_GEN_TEMPLATES)].format(w=words[i % len(words)])
+                     for i in range(n))
+
+
+def outgoing_fields(messages) -> list[str]:
+    """보낸 요청에서 채워 넣은 값만(지시문 틀 글자는 뺌): 생성 요청의 낱말 두 줄, 확인 요청의 '검사할 채팅' 한 줄."""
+    import re
+    user = str(messages[-1].get("content")) if messages else ""
+    out = []
+    for pat in (r"방금 나온 낱말: ([^\n]*)", r"주제 낱말: ([^\n]*)", r"검사할 채팅: ([^\n]*)"):
+        out += re.findall(pat, user)
+    return out
 
 
 # --store-copy 가 임시 폴더로 복사하는 것: 라벨 저장·되돌리기에 필요한 최소한만(03 2-3). 보호 구역(chat/protected·
@@ -424,6 +522,26 @@ def copy_for_viewer(src: str, dst: str) -> list[str]:
             os.makedirs(os.path.join(dst, "derived"), exist_ok=True)
             shutil.copy2(p, os.path.join(dst, "derived", name))
             done.append("derived/" + name)
+    return done
+
+
+DISCERN_PROTECTED_COPY = (os.path.join("chat", "protected", "identities.jsonl"),
+                          os.path.join("derived", "asr-words.json"), os.path.join("derived", "asr-topic-flow.json"))
+
+
+def copy_for_discern(src: str, dst: str) -> list[str]:
+    """--discern-flow 사본: 훈련 흐름 사본(project.json · guide/ · chat/messages.jsonl · labels/manual-*.csv — 훈련 구간을
+    정해 '가상 채팅 만들기' 를 켜려고) + 생성에 필요한 보호 구역 파일(원 닉네임 목록 identities.jsonl — 생성 줄·보낸 글의
+    닉네임 대조, 없으면 엔진이 nicknames_missing 으로 닫는다 · 전사 낱말 asr-words.json · 주제 흐름 asr-topic-flow.json).
+    보호 구역 파일이라 사본은 흐름 끝에 shutil.rmtree 로 지운다(remove_tree_checked). 시나리오·라벨 기록·잠금·영상·전사문
+    원문(asr.json)·수집 기록·솔트는 옮기지 않는다."""
+    done = copy_for_training(src, dst)
+    for rel in DISCERN_PROTECTED_COPY:
+        p = os.path.join(src, rel)
+        if os.path.isfile(p):
+            os.makedirs(os.path.dirname(os.path.join(dst, rel)), exist_ok=True)
+            shutil.copy2(p, os.path.join(dst, rel))
+            done.append(rel.replace(os.sep, "/"))
     return done
 
 
@@ -2698,6 +2816,455 @@ class Smoke:
                 self.check("vw_cleanup", True, time.perf_counter(),
                            f"사본 지움(shutil.rmtree, 남은 것 0) (흐름 전체 {time.perf_counter() - t0:.1f}초)")
 
+    # ---------------------------------------------------------------- H-5 가려내기 (20 7장, 25 6-2, 08 D-24 3·7 가)
+    @staticmethod
+    def _identity_names(path: str) -> set[str]:
+        """원 닉네임 목록(보호 구역)의 닉네임(2자 이상) — 바이트 검사용, 메모리에만(찍지 않는다)."""
+        from app import jsonl
+        names: set[str] = set()
+        if not os.path.isfile(path):
+            return names
+        for r in jsonl.read(path).records:
+            nk = r.get("nicknames")
+            for s in (nk if isinstance(nk, list) else [nk]):
+                if isinstance(s, dict):                   # 수집기가 쓰는 모양 {"nickname", "first_seen_ms"} (chzzk_chat)
+                    s = s.get("nickname")
+                if isinstance(s, str) and len(s) >= 2:
+                    names.add(s)
+        return names
+
+    def _click_judge(self, view, disp: str, answer: str) -> bool:
+        """채팅 표 '종류' 칸의 단추(왼쪽·가운데·오른쪽 1/3 = 진짜·가짜·모름)를 진짜 마우스로 한 번 누른다(QTest)."""
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        from app.ui import discern_view as dv
+        chat = view.chat
+        data = chat.chat_data()
+        row = next((r for r in range(chat.row_count()) if data.chat_ids[chat.model.rows[r]] == disp), None)
+        if row is None:
+            return False
+        v = chat.view
+        idx = chat.model.index(row, dv.COL_KIND)
+        v.scrollTo(idx)
+        self.pump(30)
+        rect = v.visualRect(idx)
+        if not rect.isValid() or rect.width() <= 0 or rect.height() <= 0:
+            return False
+        part = [a for a, _label in dv.JUDGE_LABELS].index(answer)
+        x = rect.left() + int(rect.width() * (2 * part + 1) / 6)
+        QTest.mouseClick(v.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(x, rect.center().y()))
+        self.pump(30)
+        return True
+
+    def step_discern_flow(self) -> bool:
+        """'가상 채팅 만들기' 를 가짜 LM Studio(127.0.0.1 빈 포트, engine.llm_fake)로 생성까지(D-24 3) → 메뉴로 가려내기
+        열기(소리 켬 · 가상 표시 숨김 · 맨 위 한 줄) → 합성 판정 10건을 진짜 마우스로(생성 4 · 가져옴 2 · 실제 4, 한 번은
+        바꾸기) → 구간 끝에 저절로 정답 · 숫자 줄을 손 계산(discern_hand_calc)과 대조 · 표시가 다시 붙음 → 닫기 → 기록 줄 ·
+        바이트 검사(본문·닉네임·가림 이름·출처 칸 0) · 보호 구역 · 노출 0. 실제 LM Studio 는 부르지 않는다(설정은 이 흐름
+        동안만 가짜 서버 주소, 끝에 지움). 사람 클릭 수를 단계마다 찍는다. 본문·닉네임은 찍지 않는다."""
+        t0 = time.perf_counter()
+        if not self.args.discern_flow:
+            return self.check("discern_flow", True, t0, "skip (--discern-flow 없음)")
+        if not self.args.video or not os.path.isfile(self.args.video):
+            return self.check("discern_flow", False, t0, "영상(--video)이 있어야 합니다 — 가려내기는 소리 켠 다시보기")
+        import hashlib
+        import json
+        import logging
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication
+        from app import backup, exposure_io
+        from app import discern_store as ds
+        from app import reference_set as rsm
+        from app import scenario_mix
+        from app import scenario_store as sst
+        from app import training_store as ts
+        from app.core import discern as dc
+        from app.core import exposure as ex
+        from app.core import training as trc
+        from app.ui import discern_view as dv
+        from app.ui import mainwindow as mw
+        from engine import generate as G
+        from engine import llm_fake as LF
+        tmp = smoke_mkdtemp("ds")
+        dst = os.path.join(tmp, "한글 사본", "projects", "프로젝트")
+        clicks, keys = 0, 0
+        secret_texts: list[str] = []      # 바이트 검사용 본문(4자 이상)·가림 이름·viewer_id — 메모리에만, 찍지 않음
+        secret_masks: list[str] = []
+        secret_ids: list[str] = []
+        emitted: list = []
+        logged: list[str] = []
+        srv = None
+
+        class _Cap(logging.Handler):
+            def emit(self, record):
+                try:
+                    logged.append(record.getMessage())
+                except Exception:  # noqa: BLE001
+                    pass
+        cap = _Cap(logging.DEBUG)
+        logging.getLogger().addHandler(cap)
+
+        def clear_llm():
+            for k in (mw.LMSTUDIO_URL_KEY, mw.LMSTUDIO_MODEL_KEY, mw.LMSTUDIO_CHECK_KEY):
+                self.win.settings.remove(k)
+            self.win.settings.sync()
+        try:
+            # ---- 사본 (보호 구역 파일 3개는 생성 길에만 쓰고 흐름 끝에 사본째 지운다)
+            llm_before = self.win.lmstudio_settings()[0].enabled
+            done = copy_for_discern(self.args.project, dst)
+            n_csv = sum(1 for d in done if d.startswith("labels/"))
+            has_ident = "chat/protected/identities.jsonl" in done
+            ok = has_ident and n_csv > 0 and not rsm.is_pilot_project(dst) and not llm_before
+            self.check("ds_copy", ok, t0, f"copied={len(done)} manual_csv={n_csv} identities={has_ident} "
+                                          f"words={'derived/asr-words.json' in done} "
+                                          f"topic_flow={'derived/asr-topic-flow.json' in done} "
+                                          f"lmstudio_model_before={llm_before}")
+            if not ok:
+                return False
+            if self.args.window_size:
+                self._resize(self.args.window_size)
+            # ---- 열기: 보기 전용(세션 화면 '보기 전용' 1번) + 사본에 영상 연결
+            t1 = time.perf_counter()
+            ok = self._open_view_only(dst)
+            if ok:
+                self._connect_copy_media(self.wb)
+                ok = self.wait(lambda: bool(self.wb.media_path) and self.wb.chat_data.count > 0
+                               and "chat" not in self.wb._jobs)
+            clicks += 1
+            self.check("ds_open", ok, t1, f"view_only={self.wb.session is None if self.wb else '-'} "
+                                          f"chats={self.wb.chat_data.count if self.wb else 0} clicks=1(세션 화면 '보기 전용')")
+            if not ok:
+                return False
+            mpath = os.path.join(dst, "chat", "messages.jsonl")
+            with open(mpath, "rb") as f:
+                msgs_sha = hashlib.sha256(f.read()).hexdigest()
+            # ---- '훈련 → 가상 채팅 만들기' 한 번: 가짜 LM Studio 로 확인 → 생성(--llm-check) → 섞기 (D-24 3)
+            t1 = time.perf_counter()
+            srv = LF.FakeLLMServer(default={"respond": smoke_llm_respond}, models=(SMOKE_GEN_MODEL,))
+            srv.__enter__()
+            self.win.settings.setValue(mw.LMSTUDIO_URL_KEY, srv.base_url)
+            self.win.settings.setValue(mw.LMSTUDIO_MODEL_KEY, SMOKE_GEN_MODEL)
+            self.win.settings.setValue(mw.LMSTUDIO_CHECK_KEY, "1")
+            self.win.scenario_tool_args = SMOKE_SCENARIO_ARGS
+            self.win.m_training.aboutToShow.emit()
+            make_vis, make_en = self.win.a_make_virtual.isVisible(), self.win.a_make_virtual.isEnabled()
+            tip_ok = f"LM Studio({SMOKE_GEN_MODEL})" in self.win.a_make_virtual.toolTip()
+            ds_off_before = not self.win.a_discern.isEnabled() and "가상 채팅 만들기" in self.win.a_discern_reason.text()
+            before = self._file_set(dst)
+            t_make = time.perf_counter()
+            if make_vis and make_en:
+                self.win.a_make_virtual.trigger()
+            make_ms = (time.perf_counter() - t_make) * 1000
+            reqs = list(srv.requests)
+            srv.__exit__(None, None, None)
+            srv = None
+            clear_llm()                                              # 가려내기·훈련은 LM Studio 를 쓰지 않는다
+            new_files = sorted(self._file_set(dst) - before)
+            ids = sst.list_scenarios(dst)
+            scn = None
+            try:
+                scn = sst.load_scenario(dst, ids[0]) if len(ids) == 1 else None
+            except (sst.ScenarioStoreError, OSError):
+                scn = None
+            hdr = scn.header if scn is not None else {}
+            counts = hdr.get("counts") or {}
+            n_gen, n_ret = int(counts.get("generated", 0)), int(counts.get("retrieved", 0))
+            rng_h = hdr.get("range") or {}
+            gen_path = scenario_mix.generation_path(dst, (int(rng_h.get("vod_from_ms", 0)), int(rng_h.get("vod_to_ms", 0))))
+            want_new = {f"scenarios/{ids[0]}.jsonl" if ids else "-",
+                        os.path.relpath(gen_path, dst).replace(os.sep, "/"), "scenarios/llm-send.jsonl"}
+            posts = [r["json"] for r in reqs if r.get("method") == "POST" and isinstance(r.get("json"), dict)]
+            sysm = [str((p.get("messages") or [{}])[0].get("content")) for p in posts]
+            n_gen_req, n_chk_req = sysm.count(G.SYSTEM_V1), sysm.count(G.CHECK_SYSTEM_V1)
+            n_get = sum(1 for r in reqs if r.get("method") == "GET")
+            names = self._identity_names(os.path.join(dst, "chat", "protected", "identities.jsonl"))
+            sent = [x for p in posts for x in outgoing_fields(p.get("messages") or [])]
+            hit_sent = sum(1 for x in sent for nm in names if nm in x)
+            n_names, n_sent = len(names), len(sent)
+            reqs.clear(), posts.clear(), sent.clear()
+            gen_sha = None
+            if os.path.isfile(gen_path):
+                with open(gen_path, "rb") as f:
+                    gen_sha = hashlib.sha256(f.read()).hexdigest()
+            vers = set((hdr.get("filters") or {}).get("versions") or ())
+            prov_ok = len(str((hdr.get("generator") or {}).get("response_sha256", ""))) == 64 \
+                and (hdr.get("inputs") or {}).get("generated_sha256") == gen_sha and gen_sha is not None \
+                and {"gscore-v1", "llm-check-v1"} <= vers
+            msg = self.win.statusBar().currentMessage()
+            status_ok = msg == scenario_mix.MSG_WRITTEN_GEN.format(n_ret, n_gen)
+            ok = make_vis and make_en and tip_ok and ds_off_before and scn is not None and n_gen > 0 \
+                and set(new_files) == want_new and n_gen_req >= 1 and n_chk_req >= n_gen and n_get >= 1 \
+                and hit_sent == 0 and n_names > 0 and prov_ok and status_ok and QApplication.activeModalWidget() is None
+            clicks += 2
+            self.check("ds_make", ok, t1, f"menu_visible={make_vis} enabled={make_en} tip_lmstudio={tip_ok} "
+                                          f"discern_off_before={ds_off_before} generated={n_gen} retrieved={n_ret} "
+                                          f"requests=GET {n_get}/gen {n_gen_req}/check {n_chk_req} "
+                                          f"new_files={len(new_files)}(scenario·gen·llm-send={set(new_files) == want_new}) "
+                                          f"sent_fields={n_sent} nickname_in_sent={hit_sent}/{n_names} "
+                                          f"provenance={prov_ok} status_line={status_ok} make_ms={make_ms:.0f} "
+                                          f"clicks=2(메뉴 '훈련' + '가상 채팅 만들기')")
+            names_for_log = names
+            if not ok:
+                names.clear()
+                return False
+            gen_texts = [c["text"] for c in scn.records if c.get("source") == "generated" and isinstance(c.get("text"), str)]
+            # ---- '훈련 → 가상 채팅 가려내기' 한 번
+            t1 = time.perf_counter()
+            self.win.m_training.aboutToShow.emit()
+            en = self.win.a_discern.isEnabled()
+            reason_len = len(self.win.a_discern_reason.text()) if not en else 0
+            t_menu = time.perf_counter()
+            self.win.a_discern.trigger()
+            view = self.win.discern_view
+            ok = en and isinstance(view, dv.DiscernView) and self.win.stack.currentWidget() is view \
+                and view.state() == "judging"
+            playing = ok and self.wait(lambda: view.player.is_playing(), 20)
+            open_ms = (time.perf_counter() - t_menu) * 1000
+            no_dialog = QApplication.activeModalWidget() is None
+            sids = ds.list_sessions(dst)
+            recs0 = ds.read_valid(ds.session_path(dst, sids[0]))[0] if len(sids) == 1 else []
+            sb = recs0[0]["body"] if recs0 else {}
+            if view is not None:
+                view.discernEvent.connect(lambda d: emitted.append(d))
+                view.resultShown.connect(lambda d: emitted.append(d))
+                view.messageShown.connect(lambda s: emitted.append(s))
+            tg = view.targets() if view is not None else {}
+            by_src = {s: sum(1 for t in tg.values() if t.source == s) for s in dc.SOURCES}
+            data = view.chat.chat_data() if view is not None else None
+            v_marks = sum(1 for n in (data.nicks if data is not None else ())
+                          if n.startswith(("가 ", "생 ")) or n.endswith(("· 가져옴", "· 생성")))
+            col_hidden = bool(view is not None and view._chat_view is not None
+                              and view._chat_view.isColumnHidden(dv.COL_VIEWER))
+            banner_ok = view is not None and view.banner.isVisible() and view.banner.text() == dv.BANNER_GENERATED
+            self.pump(300)
+            fit = self._fit(view) if (view is not None and self.args.window_size) else "-"
+            fit_ok = not self.args.window_size or "/outside=0" in fit
+            start_ok = [r["kind"] for r in recs0] == [ds.K_START] and sb.get("scenario_id") == scn.scenario_id \
+                and sb.get("marks_hidden") is True and sb.get("audio") == "on" \
+                and (sb.get("shown") or {}).get("generated") == by_src[dc.SRC_GENERATED]
+            ok = ok and playing and not view.is_muted() and no_dialog and banner_ok and v_marks == 0 and col_hidden \
+                and start_ok and fit_ok and by_src[dc.SRC_GENERATED] > 0
+            clicks += 2
+            self.check("ds_menu", ok, t1, f"enabled={en} reason_len={reason_len} autoplay={playing} "
+                                          f"muted={view.is_muted() if view else '-'} modal_dialog={not no_dialog} "
+                                          f"banner_generated={banner_ok} marks_shown={v_marks} viewer_col_hidden={col_hidden} "
+                                          f"targets={len(tg)}(replay {by_src['replay']} · retrieved {by_src['retrieved']} · "
+                                          f"generated {by_src['generated']}) start_line={start_ok} "
+                                          f"seen_before={sb.get('seen_before')} repeat={sb.get('repeat')} fit={fit} "
+                                          f"open_to_play_ms={open_ms:.0f} clicks=2(메뉴 '훈련' + '가상 채팅 가려내기')")
+            if not ok:
+                return False
+            self.pump(500)
+            # ---- 합성 판정 10건: Space 로 멈추고, 출처마다 앞쪽 줄을 골라 '종류' 칸 단추를 진짜 마우스로
+            t1 = time.perf_counter()
+            self.win.activateWindow()
+            view.setFocus()
+            self.pump(30)
+            QTest.keyClick(view, Qt.Key_Space)
+            keys += 1
+            if not self.wait(lambda: not view.player.is_playing(), 5):
+                view.toggle_play()
+                self.wait(lambda: not view.player.is_playing(), 5)
+            seg = view._segment
+            pick = []
+            short = None
+            for src, answers in DISCERN_PLAN:
+                cands = sorted(((d, t) for d, t in tg.items() if t.source == src
+                                and seg[0] + 5_000 <= t.vod_ms < seg[1] - 30_000), key=lambda kv: kv[1].vod_ms)
+                if len(cands) < len(answers):
+                    short = f"{src} {len(cands)}/{len(answers)}"
+                    break
+                pick += [(d, t, a) for (d, t), a in zip(cands, answers)]
+            if short:
+                return self.check("ds_judge", False, t1, f"구간 안 대상이 모자람({short})")
+            rows_by_id = {r.get("chat_id"): r for r in view._rows}
+            for d, _t, _a in pick:                                   # 바이트 검사 재료(메모리에만)
+                r = rows_by_id.get(d) or {}
+                if isinstance(r.get("text"), str) and len(r["text"]) >= 4:
+                    secret_texts.append(r["text"])
+                if isinstance(r.get("nickname_masked"), str) and r["nickname_masked"]:
+                    secret_masks.append(r["nickname_masked"])
+                if isinstance(r.get("viewer_id"), str) and len(r["viewer_id"]) >= 4:
+                    secret_ids.append(r["viewer_id"])
+            secret_texts += [s for s in gen_texts if len(s) >= 4]
+            at = max(t.vod_ms for _d, t, _a in pick) + 500
+            view.seek_vod(at)
+            self.pump(150)
+            gap = QApplication.instance().doubleClickInterval() / 1000.0
+            n_click = 0
+            d0, _t0x, a0 = pick[0]
+            wrong = dc.REAL if a0 != dc.REAL else dc.VIRTUAL           # 먼저 다른 단추 → 바꾸기(다시 누르면 바뀜)
+            if self._click_judge(view, d0, wrong):
+                n_click += 1
+            changed_first = view.answer_of(d0) == wrong
+            time.sleep(gap + 0.1)
+            self.pump(10)
+            for d, _t, a in pick:
+                if self._click_judge(view, d, a):
+                    n_click += 1
+            want = {t.key: a for _d, t, a in pick}
+            marks = view.chat.label_marks() if hasattr(view.chat, "label_marks") else {}
+            ok = view.answers() == want and view.judged_count() == len(pick) == 10 and n_click == 11 \
+                and changed_first and len(marks) == 10
+            clicks += n_click
+            self.check("ds_judge", ok, t1, f"picked=generated 4·retrieved 2·replay 4 judged={view.judged_count()} "
+                                           f"answers_match={view.answers() == want} changed_once={changed_first} "
+                                           f"marks={len(marks)} at_ms={at - seg[0]} keys=1(Space) "
+                                           f"clicks={n_click}(판정 10 + 바꾸기 1)")
+            if not ok:
+                return False
+            # ---- 구간 끝: 끝 바로 앞으로 옮겨 재생이 구간 끝에 닿으면 정답이 저절로 (사람 클릭 0)
+            t1 = time.perf_counter()
+            view.seek_vod(seg[1] - 2_500)
+            if not view.player.is_playing():
+                view.toggle_play()
+            reached = self.wait(lambda: view.state() == "result", 30)
+            via = "segment_end"
+            if not reached:                                          # 재생이 안 되는 환경
+                view.finish("segment_end")
+                via = "fallback"
+            r = view.result()
+            hc = discern_hand_calc()
+            unseen_want = len(tg) - 10
+            conf = [list(x) for x in r.confusion["rows"]] if r is not None else []
+
+            def same_rate(got, hand):
+                return (got or {}).get("hit") == hand["hit"] and (got or {}).get("n") == hand["n"] and \
+                    ((got or {}).get("rate") is None) == (hand["rate"] is None) and \
+                    (hand["rate"] is None or abs(got["rate"] - hand["rate"]) < 1e-9)
+            nums_ok = r is not None and conf == hc["confusion"] and r.kappa is not None \
+                and abs(r.kappa - hc["kappa"]) < 1e-9 and abs(r.p_o - hc["p_o"]) < 1e-9 \
+                and abs(r.p_e - hc["p_e"]) < 1e-9 \
+                and all(same_rate(getattr(r, k), hc[k]) for k in ("detection", "false_alarm", "retrieved", "unsure")) \
+                and r.judged == 10 and r.unseen == unseen_want and r.gate["status"] == dc.GATE_LOW_N
+            want_line = (f"가짜 탐지율 {_fmt_hand(hc['detection'])} · κ {hc['kappa']:.2f} · 진짜 오인율 "
+                         f"{_fmt_hand(hc['false_alarm'])} · 가져옴 오인율 {_fmt_hand(hc['retrieved'])} · 모르겠음 "
+                         f"{_fmt_hand(hc['unsure'])}")
+            line_ok = r is not None and want_line in dv.result_lines(r) and want_line in view.result_label.text()
+            data = view.chat.chat_data()
+            n_vrows = sum(1 for c in data.chat_ids if trc.is_virtual_id(c))
+            n_vmarked = sum(1 for c, n in zip(data.chat_ids, data.nicks) if trc.is_virtual_id(c)
+                            and n.startswith(("가 ", "생 ")) and n.endswith(("· 가져옴", "· 생성")))
+            shown_ok = n_vrows > 0 and n_vmarked == n_vrows and view.banner.text() == dv.BANNER_RESULT \
+                and view.result_label.isVisible()
+            am = view.answer_marks()
+            jm = [am.get(d, "") for d, _t, _a in pick]
+            mc = {h: sum(1 for m in jm if m.startswith(h)) for h in ("✓", "?", "✗")}
+            others = [m for d, m in am.items() if d not in {p[0] for p in pick}]
+            marks_ok = mc == hc["marks"] and len(am) == len(tg) and all(m.startswith("·") for m in others)
+            paused = self.wait(lambda: not view.player.is_playing(), 5)
+            fit = self._fit(view) if self.args.window_size else "-"
+            fit_ok = not self.args.window_size or "/outside=0" in fit
+            ok = view.state() == "result" and nums_ok and line_ok and shown_ok and marks_ok and paused and fit_ok
+            self.check("ds_result", ok, t1, f"via={via} confusion={conf}/hand {hc['confusion']} "
+                                            f"kappa={(r.kappa if r and r.kappa is not None else float('nan')):.4f}/hand "
+                                            f"{hc['kappa']:.4f} p_o={hc['p_o']:.2f} p_e={hc['p_e']:.2f} "
+                                            f"detection={_fmt_hand(hc['detection'])} false_alarm={_fmt_hand(hc['false_alarm'])} "
+                                            f"retrieved={_fmt_hand(hc['retrieved'])} unsure={_fmt_hand(hc['unsure'])} "
+                                            f"numbers_match={nums_ok} line_match={line_ok} judged={r.judged if r else '-'} "
+                                            f"unseen={r.unseen if r else '-'}/{unseen_want} gate={r.gate['status'] if r else '-'} "
+                                            f"virtual_rows_marked={n_vmarked}/{n_vrows} answer_marks={mc}/hand {hc['marks']} "
+                                            f"unseen_marks_ok={all(m.startswith('·') for m in others)} paused={paused} "
+                                            f"fit={fit} clicks=0")
+            if not ok:
+                return False
+            # 정답 화면은 찍지 않는다: 실제 채팅 본문(가림 이름과 함께)이 보이기 때문(vw_summary 와 같은 규칙). 숫자는 위 줄에.
+            # ---- 닫기 한 번 → 작업대. 기록 줄 · 바이트 검사
+            t1 = time.perf_counter()
+            ev_blob = json.dumps(list(view.events) + emitted, ensure_ascii=False, default=str)
+            view.btn_close.click()
+            self.pump(100)
+            clicks += 1
+            back = self.win.discern_view is None and self.win.stack.currentWidget() is self.wb
+            sids = ds.list_sessions(dst)
+            path = ds.session_path(dst, sids[0]) if len(sids) == 1 else None
+            recs, summ = ds.read_valid(path) if path else ([], {})
+            kinds = [x["kind"] for x in recs]
+            want_kinds = [ds.K_START] + [ds.K_JUDGE] * 11 + [ds.K_END]
+            eb = recs[-1]["body"] if recs else {}
+            rr = eb.get("result") or {}
+            rec_ok = eb.get("reason") == "segment_end" and eb.get("judged") == 10 and eb.get("unseen") == unseen_want \
+                and rr.get("confusion") == hc["confusion"] and rr.get("kappa") is not None \
+                and abs(rr["kappa"] - hc["kappa"]) < 1e-9 and same_rate(rr.get("detection"), hc["detection"]) \
+                and same_rate(rr.get("false_alarm"), hc["false_alarm"]) and rr.get("gate") == dc.GATE_LOW_N
+            allowed = {"chat_id", "scenario_id", "line_id", "answer", "judged_vod_ms", "wall_at"}
+            keys_ok = all(set(x["body"]) <= allowed for x in recs if x["kind"] == ds.K_JUDGE)
+            blob = open(path, "rb").read() if path else b""
+            leaked = sum(1 for s in secret_texts if s.encode("utf-8") in blob)
+            leaked += sum(1 for s in secret_masks if json.dumps(s, ensure_ascii=False).encode("utf-8") in blob)
+            leaked += sum(1 for s in secret_ids if s.encode("utf-8") in blob)
+            leaked += blob.count(b'"v:')
+            banned = sum(blob.count(k) for k in (b'"text":', b'"nickname', b'"display_mask":', b'"viewer_id":',
+                                                 b'"source":'))
+            leak_sig = sum(1 for s in secret_texts + secret_ids if s in ev_blob)
+            leak_sig += sum(1 for s in secret_masks if json.dumps(s, ensure_ascii=False) in ev_blob)
+            leak_log = sum(1 for s in secret_texts + secret_ids for m in logged if s in m)
+            ok = back and kinds == want_kinds and summ.get("invalid", 1) == 0 and rec_ok and keys_ok and leaked == 0 \
+                and banned == 0 and leak_sig == 0 and leak_log == 0
+            self.check("ds_log", ok, t1, f"back_to_workbench={back} sessions={len(sids)} lines={len(recs)} "
+                                         f"kinds_ok={kinds == want_kinds} invalid={summ.get('invalid')} "
+                                         f"end_reason={eb.get('reason')} end_numbers_match={rec_ok} judge_keys_only={keys_ok} "
+                                         f"bytes={len(blob)} text_mask_id_in_file={leaked} banned_keys={banned} "
+                                         f"in_signals={leak_sig} in_app_log={leak_log} "
+                                         f"checked={len(secret_texts)}/{len(secret_masks)}/{len(secret_ids)} clicks=1(닫기)")
+            # ---- 보호 구역·백업 제외·노출 0·보낸 기록 숫자만·실제 채팅 그대로·LM Studio 설정 지움
+            t1 = time.perf_counter()
+            pdata = self.wb.project.data
+            zone = backup.protected_patterns(pdata)
+            prot = bool(sids) and backup.in_protected_zone(f"discern/{sids[0]}.jsonl", zone) \
+                and backup.in_protected_zone("scenarios/llm-send.jsonl", zone)
+            sel = backup.select_files(dst, include_chat=True, include_protected=False, project=pdata)
+            n_out = sum(1 for x in sel if x.replace("\\", "/").startswith(("discern/", "scenarios/")))
+            later = ex.SessionInfo("L99-P-20991231-zz99", "primary", "2099-12-31T00:00:00+09:00")
+            xv, _w = exposure_io.compute_for(dst, [later], include_unseals=False)
+            n_train = len(ts.list_sessions(dst))
+            with open(mpath, "rb") as f:
+                msgs_same = hashlib.sha256(f.read()).hexdigest() == msgs_sha
+            sl = open(os.path.join(dst, "scenarios", "llm-send.jsonl"), "rb").read()
+            hit_send = sum(1 for s in gen_texts if s.encode("utf-8") in sl)
+            hit_send += sum(1 for s in names_for_log if json.dumps(s, ensure_ascii=False).encode("utf-8") in sl)
+            llm_after = self.win.lmstudio_settings()[0].enabled
+            self.win.m_training.aboutToShow.emit()
+            again = self.win.a_discern.isEnabled()
+            ok = prot and n_out == 0 and n_train == 0 and xv.exposed_any() == frozenset() and msgs_same \
+                and hit_send == 0 and b'"llm-check-v1"' in sl and not llm_after and again
+            self.check("ds_privacy", ok, t1, f"protected_zone={prot} backup_or_export_files={n_out} "
+                                             f"training_logs={n_train} later_session_exposed={len(xv.exposed_any())} "
+                                             f"messages_unchanged={msgs_same} send_log_bytes={len(sl)} "
+                                             f"send_log_text_or_nick={hit_send} lmstudio_model_after={llm_after} "
+                                             f"menu_enabled_again={again} human_clicks_total={clicks} keys_total={keys}")
+            print(f"    사람 클릭 합계: 보기 전용 1 + 만들기 2 + 가려내기 열기 2 + 판정 10 + 바꾸기 1 + 정답 0 + 닫기 1 "
+                  f"= {clicks} (키 {keys})")
+            names_for_log.clear()
+            return ok
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc(limit=3)
+            return self.check("discern_flow", False, t0, type(e).__name__)
+        finally:
+            logging.getLogger().removeHandler(cap)
+            secret_texts.clear(), secret_masks.clear(), secret_ids.clear(), emitted.clear(), logged.clear()
+            if srv is not None:
+                try:
+                    srv.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                clear_llm()
+            except Exception:  # noqa: BLE001
+                pass
+            if self.win is not None and getattr(self.win, "discern_view", None) is not None:
+                self.win.close_discern()
+            if self.wb is not None and getattr(self.wb, "project", None) is not None and _inside(self.wb.project.root, tmp):
+                self.win.show_home()
+                self.pump(50)
+            leftover = remove_tree_checked(tmp)
+            if leftover:
+                self.check("ds_cleanup", False, t0, f"임시 사본을 다 지우지 못함({len(leftover)}개, {tmp}) — 직접 지우세요")
+            else:
+                self.check("ds_cleanup", True, time.perf_counter(),
+                           f"사본 지움(shutil.rmtree, 남은 것 0) (흐름 전체 {time.perf_counter() - t0:.1f}초)")
+
     @staticmethod
     def _file_set(root: str) -> set[str]:
         out = set()
@@ -2721,6 +3288,9 @@ class Smoke:
         # ---- 만들기: 메뉴 '훈련 → 가상 채팅 만들기' 한 번 (엔진 도구를 워커로, 사본의 scenarios\ 에만 쓴다)
         t1 = time.perf_counter()
         self.win.scenario_tool_args = SMOKE_SCENARIO_ARGS
+        # 이 흐름은 retrieved 만 — 스모크 데이터 폴더 settings.ini 에 [lmstudio] model 이 있으면 실제 127.0.0.1:1234 에
+        # 붙으므로 비어 있는지 먼저 본다(D-24 6, gen_menu 확인 필요 3)
+        llm_set = self.win.lmstudio_settings()[0].enabled
         self.win.m_training.aboutToShow.emit()
         make_vis, make_en = self.win.a_make_virtual.isVisible(), self.win.a_make_virtual.isEnabled()
         mix_vis_before = self.win.a_mix_virtual.isVisible()
@@ -2739,9 +3309,10 @@ class Smoke:
         n_lines = int((scn.header.get("counts") or {}).get("retrieved", 0)) if scn else 0
         only_scen = bool(new_files) and all(f.startswith("scenarios/") and f.endswith(".jsonl") for f in new_files)
         ok = make_vis and make_en and not mix_vis_before and scn is not None and n_lines > 0 and only_scen \
-            and QApplication.activeModalWidget() is None
+            and QApplication.activeModalWidget() is None and not llm_set
         clicks += 2
-        self.check("tr_v_make", ok, t1, f"menu_visible={make_vis} enabled={make_en} mix_before={mix_vis_before} "
+        self.check("tr_v_make", ok, t1, f"lmstudio_model_set={llm_set} "
+                                        f"menu_visible={make_vis} enabled={make_en} mix_before={mix_vis_before} "
                                         f"scenarios={len(ids)} retrieved_lines={n_lines} new_files={len(new_files)} "
                                         f"only_scenarios_dir={only_scen} canonical={scn.canonical if scn else '-'} "
                                         f"make_ms={make_ms:.0f} clicks=2(메뉴 '훈련' + '가상 채팅 만들기')")
@@ -3029,7 +3600,7 @@ class Smoke:
                  self.step_seek, self.step_chat_activate, self.step_play, self.step_zoom, self.step_filter,
                  self.step_store_copy, self.step_shot, self.step_labeling_flow, self.step_agreement_flow,
                  self.step_adjudication_flow, self.step_analysis_flow, self.step_training_flow, self.step_viewer_flow,
-                 self.step_close]
+                 self.step_discern_flow, self.step_close]
         t_all = time.perf_counter()
         for st in steps:
             try:
@@ -3053,13 +3624,16 @@ class Smoke:
         a = self.args
         if a.store_copy and a.labeling_flow and a.agreement_flow and a.adjudication_flow and not failed:
             an, trn, vw = bool(a.analysis_flow), bool(a.training_flow), bool(a.viewer_flow)
-            missing, extra = compare_steps((r[0] for r in self.results), analysis=an, training=trn, viewer=vw)
+            dsc = bool(a.discern_flow)
+            missing, extra = compare_steps((r[0] for r in self.results), analysis=an, training=trn, viewer=vw,
+                                           discern=dsc)
             steps_ok = not missing
             seen = [s for s in dict.fromkeys(r[0] for r in self.results) if s not in SKIP_MARKS]
             print(f"== 단계 목록(14 c5 의 49{f' + E 분석 {len(STEPS_ANALYSIS)}' if an else ''}"
                   f"{f' + F 훈련 {len(STEPS_TRAINING)}' if trn else ''}"
-                  f"{f' + G 시청자 {len(STEPS_VIEWER)}' if vw else ''} 와 대조, 15 5-2 의 16): {len(seen)}"
-                  f"/{len(expected_steps(an, trn, vw))} missing={missing} extra={extra}")
+                  f"{f' + G 시청자 {len(STEPS_VIEWER)}' if vw else ''}"
+                  f"{f' + H-5 가려내기 {len(STEPS_DISCERN)}' if dsc else ''} 와 대조, 15 5-2 의 16): {len(seen)}"
+                  f"/{len(expected_steps(an, trn, vw, dsc))} missing={missing} extra={extra}")
         if self._wd_gaps:
             tot = sum(g for _s, g, _c in self._wd_gaps)
             print(f"== external_suspend: 프로세스 전체가 멈춘 구간 {len(self._wd_gaps)}번, 합 {tot:.1f}초 "

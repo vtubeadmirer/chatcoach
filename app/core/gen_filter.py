@@ -47,6 +47,9 @@ DROP_NO_ROOM = "no_room"          # 그 창에 넣을 자리가 없음(드문 �
 #: 채점으로 빼는 축(이 판의 규칙). 확장성은 기록만.
 EXCLUDE_AXES = ("topic", "repeat")
 RECORD_ONLY_AXES = ("expand",)
+#: 빼는 축 안에서도 기록만 하는 까닭 코드(08 D-24 4 · D-25 5): 생성 줄의 '같은 말버릇 되풀이' 는 가짜 응답이 같은 틀이라
+#: 지금은 비율을 잴 수 없어 빼지 않는다. 시범 뒤 실제 비율을 보고 다시 정한다.
+RECORD_ONLY_CODES = ("repeat.habit",)
 
 
 # ───────────────────────────────────────────────────────────── 자리 (창별 생성 수)
@@ -186,7 +189,7 @@ def show_time(cand: Mapping, range_ms: Sequence[int] | None = None) -> int | Non
 def _weak_reason(score: VS.ViewerScore) -> str | None:
     for axis in EXCLUDE_AXES:
         a = getattr(score, axis)
-        if a.level == VS.WEAK:
+        if a.level == VS.WEAK and a.code not in RECORD_ONLY_CODES:
             return a.code
     return None
 

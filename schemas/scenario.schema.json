@@ -66,6 +66,7 @@
             "messages_sha256": {"$ref": "#/$defs/sha256", "description": "이 프로젝트 chat/messages.jsonl 의 SHA-256."},
             "asr_sha256": {"$ref": "#/$defs/sha256"},
             "topic_flow_sha256": {"$ref": "#/$defs/sha256"},
+            "generated_sha256": {"$ref": "#/$defs/sha256", "description": "(선택, D-24 1) 생성 줄을 합쳤으면 그 생성 후보 파일(engine generate --out, scenarios\\ 아래 generation.header 로 시작하는 JSONL)의 바이트 SHA-256. 본문은 적지 않는다."},
             "from_projects": {
               "type": "array",
               "maxItems": 64,
@@ -113,14 +114,15 @@
             "prompt_sha256": {"$ref": "#/$defs/sha256"},
             "temperature": {"type": "number", "minimum": 0, "maximum": 2},
             "seed": {"type": "integer", "minimum": 0},
-            "context_ms": {"type": "integer", "minimum": 0, "maximum": 600000}
+            "context_ms": {"type": "integer", "minimum": 0, "maximum": 600000},
+            "response_sha256": {"$ref": "#/$defs/sha256", "description": "(선택, D-24 1) 받은 생성 응답들의 해시(응답마다 SHA-256 을 이어 다시 SHA-256, engine generate). 응답 본문은 적지 않는다. 같은 지시문·seed 로 다시 돌렸을 때 LLM 이 같은 답을 냈는지 견줄 때 쓴다."}
           }
         },
         "filters": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "versions": {"type": "array", "uniqueItems": true, "items": {"enum": ["nickname-v1", "copy-v1", "block-v1", "llm-check-v1"]}},
+            "versions": {"type": "array", "uniqueItems": true, "description": "쓴 거르기 판 이름. nickname-v1 닉네임 · copy-v1 베끼기 · block-v1 금칙어 · llm-check-v1 LLM 예/아니오 확인 · (D-24 1 에 더함) length-v1 길이 · idform-v1 식별자 꼴(멘션·링크·전화·후원·공지) · dup-v1 중복 · gscore-v1 G 채점기 거르기(app.core.gen_filter).", "items": {"enum": ["nickname-v1", "copy-v1", "block-v1", "llm-check-v1", "length-v1", "idform-v1", "dup-v1", "gscore-v1"]}},
             "blocklist_sha256": {"$ref": "#/$defs/sha256"},
             "dropped": {"type": "object", "additionalProperties": {"$ref": "#/$defs/count"}, "description": "거르기마다 걸러 낸 줄 수(숫자만)."}
           }

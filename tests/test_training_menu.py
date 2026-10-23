@@ -164,7 +164,7 @@ def test_menu_one_click_opens_trainer_and_logs_exposure(win, proj):  # noqa: F81
     titles = [a.text() for a in win.menuBar().actions()]
     assert titles.index("훈련(&T)") == titles.index("분석(&I)") + 1
     assert [a.text() for a in win.m_training.actions() if a.isVisible() and not a.isSeparator()] == \
-        ["스트리머 훈련(&S)", "시청자 훈련(&W)"]                     # G 시청자 훈련(D-20 2)은 구분선 아래
+        ["스트리머 훈련(&S)", "시청자 훈련(&W)", "가상 채팅 가려내기(&D)"]   # G 시청자 훈련(D-20 2)·H-5 가려내기는 구분선 아래
     win.update_training_actions()                                  # 프로젝트 없음
     assert not win.a_streamer_training.isEnabled() and win.a_training_reason.isVisible()
 
@@ -623,3 +623,313 @@ def test_make_virtual_off_without_tool(win, proj, monkeypatch):  # noqa: F811
     assert win.a_make_virtual.toolTip() == scenario_mix.REASON_NO_TOOL
     assert win.make_virtual_chat() is None
     win.show_home()
+
+
+# ----------------------------------------------------------------------------- 생성 연결 (D-24 3·5·1, 25 5-3 4·6)
+# '훈련 → 가상 채팅 만들기' 한 번 = LM Studio 확인 → generate → make_scenario --generated. 실제 LM Studio 는 부르지 않는다:
+# engine.llm_fake.FakeLLMServer(127.0.0.1 의 빈 포트) 와 127.0.0.1 닫힌 포트만. 소켓 연결은 가짜 서버 포트만 허용하고
+# 나머지(1234 포함)는 막아 센다. 생성 응답·확인 답·닉네임·전사 낱말은 모두 합성이다.
+NICK_SYN = "합성닉네임가"           # 합성 원 닉네임(identities.jsonl) — 생성 줄·보낸 글에 나오면 안 된다
+BAD_SYN = "합성나쁜말"              # 확인 가짜가 '예' 라고 답할 합성 표지
+GEN_TEMPLATES = ("오 {w} 얘기 나오니까 궁금해지네요", "저도 {w} 진짜 좋아해요 요즘", "{w} 다음엔 뭐 하실 거예요?",
+                 "와 {w} 이건 처음 들어봐요", "{w} 하는 거 보니까 재밌어요 ㅋㅋ", "혹시 {w} 언제부터 하셨어요?")
+
+
+def _gen_setup(root, rng):
+    """합성 원 닉네임 목록·전사 낱말(구간 전체)을 프로젝트에 더한다(생성의 닉네임 대조·맥락). 본문은 합성."""
+    import json as _json
+    from tests.test_generate import words_doc
+    os.makedirs(os.path.join(root, "chat", "protected"), exist_ok=True)
+    with open(os.path.join(root, "chat", "protected", "identities.jsonl"), "w", encoding="utf-8") as f:
+        f.write(_json.dumps({"viewer_id": "vw_aaaaaaaaaaaa", "nicknames": [{"nickname": NICK_SYN}]},
+                            ensure_ascii=False) + "\n")
+    os.makedirs(os.path.join(root, "derived"), exist_ok=True)
+    lo, hi = (max(0, rng[0] - 120_000) // 10_000) * 10_000, rng[1] + 10_000
+    wins = [(s, ["떡볶이", "보스", "캐릭터", "노래"]) for s in range(lo, hi, 10_000)]
+    doc = words_doc(wins)
+    doc["range"] = {"start_ms": lo, "end_ms": hi}
+    with open(os.path.join(root, "derived", "asr-words.json"), "w", encoding="utf-8") as f:
+        _json.dump(doc, f, ensure_ascii=False)
+
+
+def _respond(messages):
+    """가짜 서버 respond(합성): 확인 요청이면 '아니오'(BAD_SYN 줄은 '예'), 생성 요청이면 자료 낱말로 n 줄 + 나쁜 줄 1."""
+    import re as _re
+    from engine import generate as G
+    sysm = str(messages[0].get("content")) if messages else ""
+    user = str(messages[-1].get("content")) if messages else ""
+    if sysm == G.CHECK_SYSTEM_V1:
+        return "예" if BAD_SYN in user else "아니오"
+    m = _re.search(r"방금 나온 낱말: ([^\n]*)", user)
+    words = [w.strip() for w in (m.group(1).split(",") if m else []) if w.strip() and w.strip() != "(없음)"] or ["오늘"]
+    n = int((_re.search(r"채팅 (\d+)줄", user) or [None, 3])[1])
+    out = [f"{BAD_SYN} 들어간 합성 줄"]
+    for i in range(n):
+        out.append(GEN_TEMPLATES[i % len(GEN_TEMPLATES)].format(w=words[i % len(words)]))
+    return "\n".join(f"{i}. {s}" for i, s in enumerate(out, 1))
+
+
+class _Loopback:
+    """with 블록 안 소켓 연결은 127.0.0.1 의 allow 포트만. 나머지는 막고 센다(실제 LM Studio 1234 포함)."""
+
+    def __init__(self, monkeypatch, allow=()):
+        import socket
+        self.allow, self.allowed, self.blocked = set(allow), 0, []
+        real = socket.socket.connect
+
+        def connect(sock, addr):
+            if isinstance(addr, tuple) and addr[0] == "127.0.0.1" and int(addr[1]) in self.allow:
+                self.allowed += 1
+                return real(sock, addr)
+            self.blocked.append(addr[1] if isinstance(addr, tuple) and len(addr) > 1 else -1)
+            raise ConnectionRefusedError("시험: 허용 밖 연결")
+        monkeypatch.setattr(socket.socket, "connect", connect)
+
+
+def _inproc_gen_runner(calls):
+    """세 단계의 따로 프로세스 대신 같은 도구를 같은 인자로 이 프로세스에서: engine generate(…-c BOOT 루트 generate …) ·
+    tools/make_scenario.py. 단계 이름만 calls 에 남긴다(인자 목록은 따로 cmds)."""
+    import contextlib
+    import io
+    from app import scenario_mix
+    from engine import generate as G
+    mod = _make_scenario_module()
+    cmds = []
+
+    def run(cmd, cancelled):
+        cmd = list(cmd)
+        cmds.append(cmd)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            if "-c" in cmd and cmd[cmd.index("-c") + 1] == scenario_mix.ENGINE_BOOT:
+                i = cmd.index("-c")
+                assert cmd[i + 2] == scenario_mix.repo_root() and cmd[i + 3] == "generate"
+                calls.append("check" if "--check-server" in cmd else "generate")
+                rc = G.main(cmd[i + 4:])
+            else:
+                calls.append("make")
+                rc = mod.main(list(cmd[3:]))
+        res = scenario_mix.parse_output(buf.getvalue())
+        res["rc"] = rc
+        return res
+    run.cmds = cmds
+    return run
+
+
+def _set_llm(win, url, model="synthetic-model", check=True):
+    from app.ui import mainwindow as mw
+    win.settings.setValue(mw.LMSTUDIO_URL_KEY, url)
+    win.settings.setValue(mw.LMSTUDIO_MODEL_KEY, model)
+    win.settings.setValue(mw.LMSTUDIO_CHECK_KEY, "1" if check else "0")
+
+
+def _tree(root):
+    return {os.path.relpath(os.path.join(d, f), root) for d, _x, fs in os.walk(root) for f in fs}
+
+
+def test_make_virtual_generates_with_fake_server(win, proj, monkeypatch):  # noqa: F811
+    """D-24 3: 메뉴 한 번 = LM Studio 확인 → 생성(--llm-check) → make_scenario --generated. 가짜 서버(127.0.0.1)만.
+    사람 클릭: 메뉴 '훈련' + '가상 채팅 만들기' = 2 (고르는 창·입력 칸 0). 생성 줄은 '생' 으로 섞인다."""
+    from app import scenario_mix
+    from app import scenario_store as sst
+    from engine import generate as G
+    from engine import llm_fake as LF
+    root = proj["root"]
+    rng = win._training_range(rsm.training_availability(root))
+    msgs_before = _add_outside_chats(root, rng)
+    _gen_setup(root, rng)
+    calls = []
+    runner = _inproc_gen_runner(calls)
+    win.scenario_runner = runner
+    with LF.FakeLLMServer(default={"respond": _respond}, models=("synthetic-model",)) as srv:
+        guard = _Loopback(monkeypatch, allow={srv.port})
+        base_url = srv.base_url
+        _set_llm(win, base_url)
+        _open(win, root, None)
+        assert win.a_make_virtual.isVisible() and win.a_make_virtual.isEnabled()
+        assert "LM Studio(synthetic-model)" in win.a_make_virtual.toolTip()
+        before = _tree(root)
+        res = win.make_virtual_chat()                              # = a_make_virtual.trigger() (클릭 1)
+        reqs = list(srv.requests)
+    assert calls == ["check", "generate", "make"]
+    assert res["rc"] == 0 and res["written"] is True
+    li = res["llm"]
+    assert li["tried"] is True and li["code"] is None and li["generated_lines"] > 0
+    assert guard.blocked == [] and guard.allowed > 0               # 가짜 서버 밖 연결 0
+    gen_cmd = runner.cmds[1]
+    assert "--llm-check" in gen_cmd and gen_cmd[gen_cmd.index("--url") + 1] == base_url
+    out_path = gen_cmd[gen_cmd.index("--out") + 1]
+    assert out_path == scenario_mix.generation_path(root, rng)
+    assert runner.cmds[2][runner.cmds[2].index("--generated") + 1] == out_path
+    # 생성 줄이 시나리오에 들어갔고, 걸러진 나쁜 줄은 없다
+    ids = sst.list_scenarios(root)
+    assert len(ids) == 1
+    scn = sst.load_scenario(root, ids[0])
+    n_gen = int(scn.header["counts"]["generated"])
+    assert n_gen > 0 and res["counts"]["generated"] == n_gen
+    gens = [r for r in scn.records if r.get("source") == "generated"]
+    assert len(gens) == n_gen and all(BAD_SYN not in r["text"] and NICK_SYN not in r["text"] for r in gens)
+    assert scn.header["generator"]["backend"] == "lmstudio" and scn.header["generator"]["model_id"] == "synthetic-model"
+    msg = win.statusBar().currentMessage()
+    assert msg == scenario_mix.MSG_WRITTEN_GEN.format(int(scn.header["counts"]["retrieved"]), n_gen)
+    # 서버에 간 것: GET /v1/models(확인 2번 — 메뉴 단계 + generate 안) · 생성 POST · 확인 POST. 보낸 글에 닉네임·본문 없음
+    posts = [r["json"] for r in reqs if r["method"] == "POST"]
+    sysm = [p["messages"][0]["content"] for p in posts]
+    assert sysm.count(G.SYSTEM_V1) >= 1 and sysm.count(G.CHECK_SYSTEM_V1) >= n_gen
+    body = __import__("json").dumps(posts, ensure_ascii=False)
+    assert NICK_SYN not in body and "합성 본문" not in body and "합성 후보" not in body and "vw_" not in body
+    # 쓴 파일은 scenarios\ 아래만: 시나리오 1 + 생성 후보 1 + 보낸 기록 1. 실제 채팅은 그대로
+    new = _tree(root) - before
+    assert new == {os.path.join("scenarios", ids[0] + ".jsonl"), os.path.relpath(out_path, root),
+                   os.path.join("scenarios", "llm-send.jsonl")}
+    with open(os.path.join(root, "chat", "messages.jsonl"), "rb") as f:
+        assert f.read() == msgs_before
+    with open(os.path.join(root, "scenarios", "llm-send.jsonl"), "rb") as f:
+        log = f.read()
+    assert BAD_SYN.encode() not in log and NICK_SYN.encode() not in log and "궁금".encode() not in log
+    assert b'"llm-check-v1"' in log and b'"gen-chat-v1"' in log
+    assert ts.list_sessions(root) == []                            # 만들기는 훈련을 열지 않는다(노출 없음)
+    # 섞인 훈련: 생성 줄이 '생' 표시로 보인다(스트리머 훈련 클릭 1)
+    win.update_training_actions()
+    assert win.a_mix_virtual.isVisible() and win.a_mix_virtual.isChecked()
+    view = win.streamer_training()
+    assert view is not None and view.virtual_line_count() == n_gen + int(scn.header["counts"]["retrieved"])
+    rec = ts.read_valid(ts.session_path(root, ts.list_sessions(root)[0]))[0][0]
+    assert rec["body"]["scenario_id"] == ids[0]
+    win.close_training()
+    blob = open(ts.session_path(root, ts.list_sessions(root)[0]), "rb").read()
+    assert not any(r["text"].encode() in blob for r in gens)       # 훈련 기록에 생성 본문 없음
+    win.show_home()
+
+
+def test_make_virtual_server_off_retrieved_only(win, proj, monkeypatch):  # noqa: F811
+    """서버 꺼짐(127.0.0.1 닫힌 포트): 생성 0 · 상태 줄에 'lmstudio_off' 한 줄 · retrieved 만으로 시나리오. 생성 단계는
+    부르지 않는다. 사람 클릭 그대로 2."""
+    from app import scenario_mix
+    from app import scenario_store as sst
+    from engine import llm_fake as LF
+    root = proj["root"]
+    rng = win._training_range(rsm.training_availability(root))
+    _add_outside_chats(root, rng)
+    _gen_setup(root, rng)
+    port = LF.closed_port()
+    calls = []
+    win.scenario_runner = _inproc_gen_runner(calls)
+    guard = _Loopback(monkeypatch, allow={port})
+    _set_llm(win, f"http://127.0.0.1:{port}")
+    _open(win, root, None)
+    res = win.make_virtual_chat()
+    assert calls == ["check", "make"]                              # 꺼져 있으면 generate 를 부르지 않는다
+    assert res["written"] is True and res["llm"]["code"] == "lmstudio_off" and res["llm"]["step"] == "check"
+    assert res["counts"]["generated"] == 0 and res["counts"]["retrieved"] > 0
+    msg = win.statusBar().currentMessage()
+    assert "lmstudio_off" in msg and msg.startswith(scenario_mix.MSG_WRITTEN.format(res["counts"]["retrieved"]))
+    assert msg.count("\n") == 0                                    # 한 줄
+    assert guard.blocked == []
+    assert not os.path.exists(scenario_mix.generation_path(root, rng))
+    assert not os.path.exists(os.path.join(root, "scenarios", "llm-send.jsonl"))   # 보낸 것 없음
+    assert len(sst.list_scenarios(root)) == 1
+    win.show_home()
+
+
+def test_make_virtual_without_model_never_contacts_lmstudio(win, proj, monkeypatch):  # noqa: F811
+    """모델 설정이 없으면(기본) LM Studio 확인·생성을 부르지 않는다 — 지금까지와 같은 retrieved 만, 연결 0."""
+    from app.ui import mainwindow as mw
+    root = proj["root"]
+    rng = win._training_range(rsm.training_availability(root))
+    _add_outside_chats(root, rng)
+    calls = []
+    win.scenario_runner = _inproc_gen_runner(calls)
+    guard = _Loopback(monkeypatch, allow=())
+    _open(win, root, None)
+    assert win.a_make_virtual.toolTip() == mw.MAKE_TIP_RETRIEVED
+    res = win.make_virtual_chat()
+    assert calls == ["make"] and res["written"] is True and res["llm"]["tried"] is False
+    assert "생성" not in win.statusBar().currentMessage()
+    assert guard.blocked == [] and guard.allowed == 0
+    win.show_home()
+
+
+@pytest.mark.parametrize("url", ["http://192.168.0.5:1234", "http://example.com:1234", "http://127.0.0.1.evil:1234",
+                                 "http://user@127.0.0.1:1234", "file:///c:/x", "http://127.0.0.1:99999"])
+def test_make_virtual_non_local_url_refused_before_spawn(win, proj, monkeypatch, url):  # noqa: F811
+    """설정 주소가 이 PC 밖이면 명령도 만들지 않는다(not_local) — retrieved 만, 연결 0."""
+    root = proj["root"]
+    rng = win._training_range(rsm.training_availability(root))
+    _add_outside_chats(root, rng)
+    calls = []
+    win.scenario_runner = _inproc_gen_runner(calls)
+    guard = _Loopback(monkeypatch, allow=())
+    _set_llm(win, url)
+    _open(win, root, None)
+    res = win.make_virtual_chat()
+    assert calls == ["make"] and res["llm"]["code"] == "not_local"
+    assert "not_local" in win.statusBar().currentMessage()
+    assert guard.blocked == [] and guard.allowed == 0
+    win.show_home()
+
+
+def test_make_virtual_model_missing_and_no_identities(win, proj, monkeypatch):  # noqa: F811
+    """올라가지 않은 모델 → model_missing(확인 단계), 원 닉네임 목록 없음 → nicknames_missing(생성 단계, 보낸 것 0).
+    둘 다 retrieved 만으로 만든다."""
+    from engine import llm_fake as LF
+    root = proj["root"]
+    rng = win._training_range(rsm.training_availability(root))
+    _add_outside_chats(root, rng)
+    with LF.FakeLLMServer(default={"respond": _respond}, models=("synthetic-model",)) as srv:
+        _Loopback(monkeypatch, allow={srv.port})
+        calls = []
+        win.scenario_runner = _inproc_gen_runner(calls)
+        _set_llm(win, srv.base_url, model="not-loaded-model")
+        _open(win, root, None)
+        res = win.make_virtual_chat()
+        assert calls == ["check", "make"] and res["llm"]["code"] == "model_missing"
+        assert "model_missing" in win.statusBar().currentMessage()
+        win.show_home()
+        _gen_setup(root, rng)
+        os.remove(os.path.join(root, "chat", "protected", "identities.jsonl"))
+        calls.clear()
+        _set_llm(win, srv.base_url)
+        _open(win, root, None)
+        res = win.make_virtual_chat()
+        posts = [r for r in srv.requests if r["method"] == "POST"]
+    assert calls == ["check", "generate", "make"] and res["llm"]["code"] == "nicknames_missing"
+    assert posts == [] and res["counts"]["generated"] == 0
+    assert "nicknames_missing" in win.statusBar().currentMessage()
+    win.show_home()
+
+
+def test_check_command_real_subprocess_with_fake_server(proj):  # noqa: F811
+    """따로 프로세스 길(-I -c ENGINE_BOOT 저장소 generate --check-server)이 실제로 돈다 — 가짜 서버(127.0.0.1)만."""
+    from app import scenario_mix
+    from engine import llm_fake as LF
+    with LF.FakeLLMServer(models=("synthetic-model",)) as srv:
+        llm, prob = scenario_mix.lm_settings_from(srv.base_url, "synthetic-model")
+        assert prob is None
+        res = scenario_mix.run_make(scenario_mix.check_command(llm), timeout_s=60)
+        reqs = list(srv.requests)
+    assert res["rc"] == 0 and res["server"] == "on" and res["model"] == "ok"
+    assert [r["method"] for r in reqs] == ["GET"]
+    res = scenario_mix.run_make(scenario_mix.check_command(
+        scenario_mix.lm_settings_from(f"http://127.0.0.1:{LF.closed_port()}", "m")[0]), timeout_s=60)
+    assert res["rc"] == 3 and res["error"] == "lmstudio_off"
+
+
+def test_lm_settings_parse():
+    from app import scenario_mix as sm
+    s, p = sm.lm_settings_from("", "")
+    assert s.url == sm.LMSTUDIO_DEFAULT_URL and not s.enabled and p is None and s.llm_check is True
+    s, p = sm.lm_settings_from("http://localhost:1234/", "qwen2.5-7b-instruct", "0")
+    assert s.url == "http://localhost:1234" and s.enabled and s.llm_check is False and p is None
+    assert sm.lm_settings_from("http://[::1]:1234/v1", "org/model-GGUF")[1] is None
+    assert sm.lm_settings_from("http://127.0.0.1:1234", "--evil")[0].enabled is False      # 옵션처럼 보이는 이름
+    assert sm.lm_settings_from("http://127.0.0.1:1234", "--evil")[1] == "bad_model"
+    assert sm.lm_settings_from("http://10.0.0.1:1234", "m")[1] == "not_local"
+    assert sm.generate_threshold_args(["--quiet-max-real", "45", "--target-per-min", "60"]) == ["--threshold", "45/60"]
+    assert sm.generate_threshold_args(["--threshold", "test", "--max-virtual-ratio", "0.4"]) == \
+        ["--threshold", "test", "--max-virtual-ratio", "0.4"]
+    assert sm.generate_threshold_args([]) == []
+    ok, m = sm.describe({"written": True, "counts": {"retrieved": 3, "generated": 2}})
+    assert ok and m == sm.MSG_WRITTEN_GEN.format(3, 2)
+    ok, m = sm.describe({"written": True, "counts": {"retrieved": 3}, "llm": {"tried": True, "code": "lmstudio_off"}})
+    assert ok and m.startswith(sm.MSG_WRITTEN.format(3)) and "lmstudio_off" in m

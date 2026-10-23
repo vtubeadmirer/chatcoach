@@ -17,7 +17,22 @@
 | `export_labels.py` | 프로젝트의 현재 유효 라벨을 zip 하나로 내보낸다 (`app.export.export_labels`). |
 | `make_scenario.py` | 가상 채팅 시나리오(retrieved, H-2)를 `scenarios\` 에 만든다. `--generated <생성 후보>`(H-3, `python -m engine generate --out` 이 만든 파일)를 주면 retrieved 와 합치고 G 채점기(`app.core.gen_filter`)로 한 번 더 거른다 — 기본 `--generated-mode replace` 는 생성 몫(`--max-generated-ratio`, 기본 0.25)을 먼저 잡고 그 창의 점수 낮은 retrieved 를 뺀다(창 목표·가상 비율 상한은 그대로). 이 도구는 LLM 을 부르지 않는다. 시범 프로젝트는 거부(`--generated`·`--topic-flow`·`--blocklist`·`--projects-root` 가 시범 폴더 안이어도 읽기 전에 종료 2). `--generated` 는 원 닉네임 목록(`chat\protected\identities.jsonl`)이 없으면 `nicknames_missing` 종료 1(`--allow-no-identities` 로만 진행, 경고). 금칙어는 저장소 밖 `config\blocklist-ko.txt`(해시만 기록). |
 | `gen_e2e.py` | **H-3 생성 끝에서 끝까지 스모크(가짜 LLM, 사람 클릭 0)**: 원 프로젝트(기본 개발용 `p15767532`, 읽기만)의 필요한 파일만 `%LOCALAPPDATA%\ChatCoachSmoke\gen-e2e-*` 사본으로 → `engine generate --fake`(고정 합성 응답) · `engine generate --model … --url http://127.0.0.1:<가짜 서버>`(`engine.llm_local` → `engine.llm_fake.FakeLLMServer`, 받은 자료 낱말로 합성 줄) → `make_scenario --generated` → 스트리머 훈련 화면에 섞여 흐름(가·생 표시) → 시나리오·생성 후보·보낸 기록·보낸 요청·훈련 기록 바이트 검사(실제 닉네임·viewer_id·user_id_hash·가림 닉네임·본문 0건). 소켓 연결은 가짜 서버 포트만(그 밖은 막고 셈). 시범(pilot-*·시범 기록)은 아무것도 열기 전에 종료 2. 끝나면 `shutil.rmtree`. 출력은 숫자·코드만. 종료 0 = 검사 모두 통과. |
+| `discern_report.py` | **H-5 가려내기 관문(대표값)**: `--projects-root <…\projects>`(또는 `--project` 여러 번) `[--labeler L01] [--sessions]` — 프로젝트(= 방송)마다의 `discern\*.jsonl` 을 다시 읽어(정답은 판정 키 → start 줄이 가리킨 시나리오 파일의 source, 바이트 해시가 다르면 그 세션을 뺌) `app.core.discern.evaluate_sessions` 로 혼동표·κ·탐지율·관문(pass·fail·low_n·unknown)을 낸다. 화면은 세션 하나라 늘 '표본 적음' 이라 통과·실패는 이 도구로만 나온다. 다시 봄 세션은 뺀다. 시범(`pilot-*`)은 기본으로 폴더를 열지 않고 건너뜀(`--allow-locked-pilot` 이면 모두 잠긴 것만). 읽기만, 출력은 JSON 한 줄(숫자·ID·코드만). 종료 0 계산함 · 1 입력 오류. |
 | `viewer_score_calib.py` | 시청자 훈련 채점 보정 자료: 반응받은 채팅과 같은 구간 다른 채팅의 세 축 분포·lift·정밀도·문턱 후보(기본값은 바꾸지 않음). 손라벨 길과 시범 최종 세트 길(`--final-set`, D-22). 출력은 숫자·코드만. |
+
+### 가상 채팅 생성 (H-3) — `python -m engine generate` 와 LM Studio
+
+`tools/` 밖의 엔진 명령이지만 `make_scenario.py --generated` 와 짝이라 여기 적는다. 자세한 규칙은 `engine/generate.py` 머리말과 [20](../docs/design/20-plan-virtual-chat.md) 4-3.
+
+- **실제 길**: `.venv-engine\Scripts\python -m engine generate --project <P> --from 20:00 --to 40:00 --model <모델 id> --out <P>\scenarios\<이름>.jsonl` → `.venv\Scripts\python tools\make_scenario.py --project <P> … --generated <그 파일>`. `engine generate` 의 기본(시나리오를 바로 씀)은 시험·개발용이다. 앱 메뉴 '훈련 → 가상 채팅 만들기' 가 이 둘을 한 번에 부르게 한다(08 D-24 3).
+- **LM Studio 켜는 법(사용자, 클릭 2)**: LM Studio 를 열고 개발자 탭 → '서버 시작'. 쓸 모델이 올라가 있어야 한다(`/v1/models` 에 안 보이면 `model_missing`). 주소는 `http://127.0.0.1:1234` 만 쓴다 — `localhost`·`127.0.0.1`·`::1` 밖 주소는 `not_local` 로 거부하고, 프록시 환경 변수를 무시하고, 넘겨주기(3xx)를 따르지 않는다. Claude 는 `lms server start` 를 **실행하지 않는다**(시범 뒤 사용자 확인을 받고 시험, D-24 6).
+- **서버가 꺼져 있으면** 생성 0건으로 멈추고 `lmstudio_off`(종료 3), 아무것도 쓰지 않는다. 밖으로 넘어가지 않는다.
+- **보낸 기록**: 실제 서버를 부를 때마다(거부·실패 포함) `<P>\scenarios\llm-send.jsonl` 에 한 줄 — 언제·몇 글자·모델·지시문 판·요청/응답 해시·코드만, 본문·닉네임 없음(D-06 5, D-24 2). `--send-log`·`--out` 은 `<P>\scenarios\` 아래 `.jsonl` 만 받는다.
+- **`--dry-run` 은 '파일(시나리오·생성 후보)을 쓰지 않음'** 이다. 실제 서버 길이면 dry-run 이어도 LLM 을 부르고 보낸 기록을 남긴다.
+- **원 닉네임 목록이 없으면 닫는다**: `chat\protected\identities.jsonl` 이 없으면 `nicknames_missing`(종료 1). 가짜 응답(`--fake`) 길만 `--allow-no-identities` 로 연다(경고). 그래서 실제 생성은 채팅을 수집한 PC 에서만 된다.
+- **시험은 실제 LM Studio 를 부르지 않는다**: `--fake <합성 응답.json>` 또는 `engine.llm_fake.FakeLLMServer`(127.0.0.1 전용 가짜 서버). 끝에서 끝까지는 `gen_e2e.py`.
+- 시범 프로젝트(`pilot-*`)와 시범 폴더 안 경로는 읽기 전에 거부(`pilot_locked`, 종료 2).
+- 종료 코드: 0 정상 · 1 입력 오류(`not_local`·`nicknames_missing`·`out_path_unprotected`·`send_log_unprotected` 등) · 2 시범 거부 · 3 LLM 없음(`lmstudio_off`·`model_missing`) · 4 만들 수 없음.
 
 ## AI 결과 · 봉인
 
@@ -50,7 +65,7 @@
 | 도구 | 한 줄 설명 |
 |---|---|
 | `make_fixture.py` | 합성 픽스처 생성기 (sha1('fixture-N')·'시청자N'·video_no 0). `--check` 로 `tests/fixtures/labels_*.jsonl` 골든이 그대로 다시 만들어지는지 본다. |
-| `gui_smoke.py` | 실제 창을 띄워 작업대 단계(프로젝트 열기 → 영상 → 탐색 → 채팅 → 타임라인)를 PASS/FAIL 로 점검한다 (릴리스 전 수동). `--labeling-flow` 는 사본(project.json·guide·messages.jsonl)에서 세션 → 구간 → 반응(재확인) → 표본 → 내보내기 → 다시 열기까지 돌리고 사본을 지운다. |
+| `gui_smoke.py` | 실제 창을 띄워 작업대 단계(프로젝트 열기 → 영상 → 탐색 → 채팅 → 타임라인)를 PASS/FAIL 로 점검한다 (릴리스 전 수동). `--labeling-flow` 는 사본(project.json·guide·messages.jsonl)에서 세션 → 구간 → 반응(재확인) → 표본 → 내보내기 → 다시 열기까지 돌리고 사본을 지운다. `--discern-flow`(H-5)는 사본(+ 원 닉네임 목록·전사 낱말·주제 흐름, 끝에 rmtree)에서 '가상 채팅 만들기' 를 가짜 LM Studio(127.0.0.1 빈 포트)로 생성까지 돌리고, '가상 채팅 가려내기' 를 메뉴로 열어 합성 판정 10건 → 구간 끝 숫자 줄을 손 계산과 대조 → 기록 바이트 검사까지 본다(단계 `ds_*`). 실제 LM Studio 설정은 이 흐름 동안만 가짜 주소로 두고 끝에 지운다. |
 | `smoke_watch.py` | gui_smoke 를 자식으로 띄워 **바깥에서** 감시한다(22 5-2 의 1번). 2초마다 자식 나무의 스레드 수·Suspended 수·CPU 를 적고, 출력이 `--stall` 초(기본 30) 멈추면 그 순간의 스레드 상태를 남기고 gui_smoke `--faulthandler-file` 로 모든 스레드 스택을 받는다. 끝에 요약 한 줄(종료 코드·멈춤·Suspended·덤프 수). 사용: `python tools/smoke_watch.py -- --project <P> --offscreen --analysis-flow`. 기록은 `%LOCALAPPDATA%\ChatCoachSmoke\watch\<시각>-<pid>\`(watch.log·stack.txt, 새 20개만 남김). **`--summarize [기록 폴더·stack.txt·watch.log …] [--last N]`** 은 감시하지 않고 끝난 기록을 읽어 멈춤마다 앞·뒤 단계·CPU 초/초·Suspended·판정 한 마디와, 덤프마다 주 스레드의 gui_smoke 단계 함수(`step_*`)·줄·앱 코드 틀을 요약한다(23 5-2 의 23. 경로가 없으면 가장 새 기록). |
 | `ci_selftest.py` | 빌드된 exe 를 한글 폴더 사본에서 `--selftest` 로 점검한다 (release.yml). |
 | `bench_c6.py` | 합성 20만 건으로 채팅 색인·재현 검증 워커·타임라인 갱신·확대 성능을 잰다 (14 6-1). 숫자만. |

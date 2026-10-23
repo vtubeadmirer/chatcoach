@@ -66,7 +66,7 @@ RESTORE_MAX_BYTES = 4 * 1024 ** 3
 RESTORE_MAX_ENTRIES = 200_000
 
 DEFAULT_PROTECTED_ZONE = ("chat/protected/", "derived/asr*", "derived/ocr*", "origin/",
-                          "scenarios/", "viewer/")   # project.DEFAULT_PROTECTED_ZONE 와 같다. scenarios/: 가상 채팅은 앱 밖으로 안 나간다(D-05). viewer/: 시청자 연습 글(D-20 4)
+                          "scenarios/", "viewer/", "discern/")   # project.DEFAULT_PROTECTED_ZONE 와 같다. scenarios/: 가상 채팅은 앱 밖으로 안 나간다(D-05). viewer/: 시청자 연습 글(D-20 4). discern/: 가려내기 기록(H-5, 시나리오와 짝지으면 생성 줄이 드러남, 03 2-3)
 CORE_DIRS = ("guide", "labels", "samples", "locks", "relabel")        # 03 16-2 '백업' 열
 PRE_UPDATE_DIRS = ("labels", "samples", "locks", "relabel")          # 04 6-7
 PROJECT_FILE = "project.json"

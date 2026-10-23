@@ -498,7 +498,8 @@ def test_spec_bundles_runtime_schemas():
     import importlib
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     spec = open(os.path.join(root, "ChatCoach.spec"), encoding="utf-8").read()
-    mods = ("store", "export", "locking", "ai_results", "scenario_store", "training_store", "viewer_store")
+    mods = ("store", "export", "locking", "ai_results", "scenario_store", "training_store", "viewer_store",
+            "discern_store")
     for m in mods:
         rel = importlib.import_module(f"app.{m}").SCHEMA_REL
         assert os.path.isfile(os.path.join(root, *rel)), m

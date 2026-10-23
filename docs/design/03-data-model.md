@@ -81,6 +81,9 @@
 ├─ training\<session_id>.jsonl       스트리머 훈련 기록(training-event, 6-16). 라벨 기록과 다른 폴더   [원본 · 추가만]
 ├─ viewer\<session_id>.jsonl         시청자 훈련 기록(viewer-event, 6-18). 시청자가 쓴 연습 글이 있다   [원본 · 추가만 · ★보호]
 ├─ scenarios\SC-<yyyymmdd>-<4자>.jsonl  가상 채팅 시나리오(H-1, 형식은 [20](20-plan-virtual-chat.md) 3장·`schemas/scenario.schema.json`, 저장 규칙 6-17). `messages.jsonl`·`labels\` 와 섞지 않는다   [원본 · 불변 · ★보호]
+├─ scenarios\llm-send.jsonl          LLM 에 보낸 기록(H-3, `chatcoach-llm-send-v1`, 6-17 '보낸 기록'). 숫자·해시만, 본문 없음 (D-24 2)   [원본 · 추가만 · ★보호]
+├─ scenarios\<이름>.jsonl             생성 후보 파일(`engine generate --out`, 첫 줄 `generation.header`). `make_scenario --generated` 의 입력   [중간 · ★보호]
+├─ discern\<session_id>.jsonl        가상 채팅 가려내기 기록(H-5, discern-event, 6-19). 판정만, 본문·닉네임 없음 (D-24 7)   [원본 · 추가만 · ★보호(2-3)]
 └─ derived\                          비싼 파생: asr.json · vad.json · ocr.jsonl · asr-words.json · asr-topic-vectors.json · asr-topic-flow.json     [파생 · ★asr*·ocr 는 보호]
 ```
 
@@ -113,6 +116,8 @@
 ### 2-3. 보호 구역 기본값
 
 `project.json` 의 `protected_zone` 기본값: `chat/protected/`, `derived/asr*`, `derived/ocr*`, `origin/`. H-1 에서 `scenarios/` 를 더했다([20](20-plan-virtual-chat.md) 3장 — 가상 채팅은 내보내기·패키지에 넣지 않는다, D-05. 옛 project.json 에도 합집합으로 적용, 21 4-1 25번). G 첫 묶음에서 `viewer/` 를 더했다(시청자가 쓴 연습 글, 08 D-20 4, 6-18. `app/project.py`·`app/backup.py` 의 `DEFAULT_PROTECTED_ZONE`).
+H-3 의 보낸 기록 `scenarios/llm-send.jsonl` 과 생성 후보 파일은 `scenarios/` 안에 두므로 따로 더하지 않아도 보호 구역이다(D-24 2). `engine generate` 는 `--out`·`--send-log` 가 `scenarios\` 밖이면 쓰기 전에 거부한다(25 4-1 4번).
+가려내기 기록 `discern/`(6-19)은 본문·닉네임이 없다. 그래도 **보호 구역 기본값에 `discern/` 를 더했다**(2026-10-23 통합, `app/project.py`·`app/backup.py` 의 `DEFAULT_PROTECTED_ZONE`) — 시나리오(보호)와 짝을 지으면 어느 줄이 생성인지와 사람이 무엇을 못 가렸는지가 드러나는 가상 채팅 자료라서다(20 1장 2번, [05](05-security.md) S-25 쪽으로 안전). 이미 있는 project.json 의 `protected_zone` 에 없어도 `backup.protected_patterns` 가 기본값과 합치므로 빠지지 않는다. 내보내기·패키지는 원래 허용 목록 방식이라(16-2) 이 폴더가 나가지 않는다.
 
 보호 구역은 라벨러 패키지·정답 세트·일반 백업에서 빠진다. 넣으려면 '보호 포함' 을 켜야 하고, 켜면 경고 후 매니페스트에 기록된다(16장, [05](05-security.md)).
 
@@ -633,7 +638,7 @@ flowchart LR
 
 ### 6-14. 잠금 · 재라벨 계획 · 가상 채팅 생성 기록 · AI 봉인 · 보고서
 
-잠금·재라벨 계획·보고서는 C단계 넷째 묶음에서 만들었다(스키마 `session-lock`·`relabel-plan`, 19장). AI 봉인은 E 첫 묶음에서 만들고 짝(주제 흐름 E 둘째, 전사 낱말 G 둘째, 창별 주제 벡터·해제 기록의 엔진 판 '시범 해제 준비' 묶음 D-22)을 더했다. 가상 채팅 생성 기록은 아직 v1 이다. 아래 잠금·계획 표는 구현과 스키마를 따른다(D-12 1, 13 4-1 1·5번). 어긋나면 스키마가 맞다.
+잠금·재라벨 계획·보고서는 C단계 넷째 묶음에서 만들었다(스키마 `session-lock`·`relabel-plan`, 19장). AI 봉인은 E 첫 묶음에서 만들고 짝(주제 흐름 E 둘째, 전사 낱말 G 둘째, 창별 주제 벡터·해제 기록의 엔진 판 '시범 해제 준비' 묶음 D-22)을 더했고, 짝 보충(`attach-pairs`)과 원인 코드(`SEAL_ERROR_CODES`)를 0번 운영 마감(D-23 4, [25](25-progress-2026-10-23-h3-prep.md) 1-2)에서 더했다. 가상 채팅 생성 기록은 따로 두지 않고 시나리오 파일과 보낸 기록이 맡는다(아래, 6-17). 아래 잠금·계획 표는 구현과 스키마를 따른다(D-12 1, 13 4-1 1·5번). 어긋나면 스키마가 맞다.
 
 **잠금 `locks/<session_id>.json`** ([스키마](../../schemas/session-lock.schema.json))
 
@@ -676,7 +681,7 @@ flowchart LR
 - **계획 색인 `relabel/index.json`** (D-12 2, 13 4-3 3번): 계획을 만들거나 취소할 때 `plan_id`·원 세션·라벨러·종류·상태(`active`·`cancelled`·`unreadable`) 다섯 칸만 담은 색인을 다시 만들어 원자적으로 바꿔 넣는다(`relabel-plan.schema.json` 의 `$defs/planIndex`). 세션 선택 화면은 라벨러를 고르기 전에는 계획을 열지 않고, 고른 뒤에는 색인으로 **그 라벨러의 계획 파일만** 연다(`ProjectSurvey.plans_of` → `app.relabel.plans_for_labeler`). 색인은 계획 파일에서 다시 만들 수 있는 파생 파일이다. 색인이 없거나 깨졌거나 색인에 없는 계획 파일이 있으면 **그 자리에서 한 번 다시 만들고** 새 색인으로 고른다. 다시 만들기가 실패하면 계획을 하나도 열지 않고 재라벨 선택을 막는다(블라인드 쪽으로 실패). 다시 만든 뒤에도 색인에 없는 파일은 열지 않는다 (D-13 2, 14 3-2 3번·4-2 13번. 옛 '모든 계획 파일로 물러남' 은 없앴다). 다시 만드는 그 한 번은 모든 계획·취소 기록을 연다(이름에 라벨러가 없음). 이 자리를 세션 밖(프로젝트를 열 때)으로 옮기는 것은 14 4-2 2번 (D-13 1, 14 4-1 21번). 구현: 프로젝트를 열 때(세션 밖) `MainWindow.refresh_relabel_index` 가 다시 만들고, **내용이 같으면 쓰지 않는다** — 열 때마다 프로젝트 폴더가 바뀌지 않게 (D-14 1, 15 5-1 8번).
 - **계획 취소 `relabel/<plan_id>.cancel.json`** (D-12 7): 막힌 비교를 풀려고 검토자가 사유를 적고 계획을 취소한다. 길은 **메뉴 '세션 → 재라벨 계획 취소…'(`app/ui/plan_cancel_dialog.py`) 대화상자 하나**다. `app.relabel.cancel_plan` 을 부른다. 조정 화면 아래 칸의 취소 칸은 1366x768 에서 잘려 지웠다 (D-14 1·2, 15 1-2 1번·5-2 17번. 앞 판 문서의 '두 곳' 은 틀림). 권한은 **조정 세션만**이고 `role = reviewer` 는 검사하지 않는다(1인 겸임, D-12 3). 외부 검토자가 생기면 role 검사를 더한다 (D-13 1, 14 4-1 6번). 계획 파일은 지우지도 고치지도 않고 취소 기록을 한 번만 만든다. 형식은 `relabel-plan.schema.json` 의 `$defs/cancelRecord`(계획 sha256·읽을 수 있었는지·원 세션·종류·라벨러·사유·취소 시각·사람·machine4·`canceller_is_labeler`)다. 읽지 못한 계획도 취소할 수 있다. 취소된 계획은 세션 화면에서 고를 수 없고 보고서 관문의 '남은 계획' 에서 빠진다. 깨진 취소 기록은 취소로 치지 않는다(보고서는 계속 막힌다). 비교하는 재라벨 세션의 계획이 취소됐으면 그 세션은 대표값에서 빠진다([06](06-evaluation-and-agreement.md) 7-1).
 
-**가상 채팅 생성 기록** (v1) — 형식이 아직 없다(열린 질문). 지금 가정하는 최소 필드: `gen_id`, `wall_time`(ms 포함 ISO 8601), `text`, `nickname`, `account_user_id_hash`(봇 계정으로 실제 전송한 경우). 가져올 때 `account_user_id_hash` 는 같은 HMAC 로 `viewer_id` 로 바꿔 대조하고, 원본은 `origin/` 에 보호 구역으로 둔다.
+**가상 채팅 생성 기록** — 따로 두지 않는다. D-05 가 실제 채팅창 전송을 막아 봇 계정이 없으므로, 옛 가정(`account_user_id_hash`·`nickname`·벽시계 `wall_time`)은 버렸다([20](20-plan-virtual-chat.md) 9장 5번). 생성 기록은 둘이 맡는다: (가) **시나리오 파일** `scenarios/SC-*.jsonl` 의 `generated` 줄(만든 글자·`gen_id`·보일 영상 시각·맥락 구간, 6-17) (나) **보낸 기록** `scenarios/llm-send.jsonl`(언제·몇 글자·모델·응답 해시, 본문 없음, 6-17 '보낸 기록', D-24 2). 06 4-7 의 `generation_ref` 는 `{file: "scenarios/SC-….jsonl", gen_id}` 로 (가)를 가리킨다.
 
 **AI 봉인 기록 `<앱>\data\ai\<project_id>\seal.jsonl`** (v1)
 
@@ -691,6 +696,7 @@ flowchart LR
 | `topics.sealed` | `size`, `source`(`engine_topics`·`file`), `pair`(짝 ai-result 의 `sha256`), `check`, `reject_reasons[]` | 엔진 주제 흐름(topic-flow, [스키마](../../schemas/topic-flow.schema.json))을 판정 봉인 하나의 **짝으로** 봉인한다(08 D-17 5, `seal.seal_topics_bytes`). 짝 판정 봉인이 없거나 이미 풀렸으면 받지 않는다(풀린 결과에 나중에 붙이면 봉인 없이 보이게 되므로). 같은 바이트·같은 짝이면 새 줄을 쓰지 않는다. 상한 4 MiB. 검사 `app.core.topics`, 거부 코드 `topics_json`·`topics_format`·`topics_video_mismatch`. 18 5-2 16번 몫 |
 | `words.sealed` | `topics.sealed` 와 같은 칸. `source` 는 `engine_words`·`file` | 시각별 전사 낱말(transcript-words, [스키마](../../schemas/transcript-words.schema.json), D-20 3, `seal.seal_words_bytes`). **전사문과 같은 등급**이다 — 기록·오류·화면에 낱말을 넣지 않는다(해시·크기·코드만). 상한 16 MiB. 검사 `app.core.words_doc`, 거부 코드 `words_json`·`words_format`·`words_video_mismatch`·`words_project_mismatch` (22 5-2 의 7, 23 3-3) |
 | `vectors.sealed` | `topics.sealed` 와 같은 칸. `source` 는 `engine_vectors`·`file` | 창별 주제 벡터(topic-vectors, [스키마](../../schemas/topic-vectors.schema.json), 23 5-2 의 2, `seal.seal_vectors_bytes`). 벡터는 어느 정도 거꾸로 풀 수 있어 **전사문과 같은 등급**이다(2-1 의 `derived/asr*` 와 같은 까닭) — 기록·오류에 수를 넣지 않는다. 상한 64 MiB. 검사 `seal.vectors_check`(앱 쪽 규칙: 칸 모양·target·벡터 해시·`app.core.viewer_score.vectors_from_doc` 이 모든 창을 읽는지 — 앱은 엔진을 import 하지 않는다, D-06), 거부 코드 `vectors_json`·`vectors_format`·`vectors_video_mismatch`·`vectors_project_mismatch` |
+| (짝 보충) `topics.sealed`·`words.sealed`·`vectors.sealed` | 위 짝 칸 + `attached`(늘 true) · `after_primary_lock`(이 보충이 첫 1차 잠금 뒤였나) | **판정만 봉인한 것에 짝을 나중에 붙인 기록**(`seal.attach_pairs`, D-23 3). 판정 봉인은 다시 쓰지 않으므로 사전 봉인 여부는 그대로다. 두 칸이 없는 짝 기록 = 판정과 함께(또는 따로) 처음부터 봉인한 짝. `RECORD_V` 는 1 그대로(칸만 더함). 상태 보기의 `pairs_attached`(`SealEntry.pairs_attached`)가 이 칸을 읽는다. 아래 '짝 보충' |
 | `ai.unsealed` | 아래 '해제 기록 칸' 표 | 풀면서 `runs\<run_id>.json` 으로 옮기고, 짝이 있으면 `topics\`·`words\`·`vectors\<run_id>.json` 으로 같이 푼다. 06 7-1 조건(계획된 세션 모두 잠김 + 표본 재현 검증 통과) 전에 열면 `conditions_met = false` 와 사유(필수)를 남긴다. 그 뒤 만든 재라벨 세션은 `ai_exposed` 로 표시된다. |
 
 **해제 기록 칸 (`ai.unsealed`)** — seal.jsonl 형식은 하위 호환이다(`v` = 1 그대로, 칸만 더함). 옛 기록에 없는 칸은 '모름' 으로 읽는다.
@@ -712,6 +718,35 @@ flowchart LR
 - **시범 프로젝트(`pilot-*`)의 전사 낱말·벡터는 이 해제 길로만 만든다**(`tools/engine_to_ai.py --from-project … --words --vectors --seal`). `derived\asr-words.json`·`asr-topic-vectors.json` 을 시범 프로젝트에 쓰지 않는다(2-1).
 
 '사전 봉인'(봉인 시각 < 1차 세션 잠금 시각) 여부는 봉인 줄에 저장하지 않는다. 이 기록과 잠금 파일의 시각에서 계산하고, 해제 때의 계산값만 `ai.unsealed.presealed` 에 남긴다(D12 와 같은 이유).
+
+**짝 보충 (`attach-pairs`, D-23 3)** — 실제 시범 봉인에 짝(주제 흐름·전사 낱말·벡터)이 없을 때, 잠긴 뒤·해제 전에 엔진으로 만들어 **이미 있는 판정 봉인**에 붙인다. 새 판정 run 을 다시 봉인하지 않는다(그러면 '사전 봉인' 이 아니게 된다).
+
+| 규칙 | 내용 |
+|---|---|
+| 붙일 수 있는 판정 | 받을 때 `valid` 이고 아직 풀지 않은 판정 봉인. 없으면 `pair_missing`, 거부된 것이면 `pair_not_valid`, 이미 풀렸으면 `pair_unsealed`(아무것도 쓰지 않음) |
+| 이미 있는 짝 | 덮어쓰지 않고 `present`. 그래서 두 번 돌려도 같다 |
+| 하나라도 거부 | **먼저 모두 검사한다.** 한 짝이라도 거부(크기·형식·방송 번호·project_id)되면 그 판정에는 아무 짝도 붙이지 않는다(거부 짝 `rejected`, 나머지 `skipped`). 반쯤 붙은 상태가 없다 |
+| 기록 | 붙인 짝 줄에 `attached = true`·`after_primary_lock`. 해제·읽기는 보통 짝과 같다(판정을 풀 때 같은 해제 안에서 한 번에) |
+| 시범의 짝 파일 | 전사 낱말·벡터 파일은 `<데이터>\sealed-work` 아래만 받는다(아니면 읽기 전에 종료 2, `pair_file_unprotected`) |
+
+해제 당일 3단계(짝 확인·보충)의 명령은 이렇다([24](24-progress-2026-10-23-unseal-prep.md) 6장 3단계, 25 5-2 의 12번). **판정을 만들 때와 같은 asr·범위·보정**을 주는 것은 Claude 몫이다(도구는 같은지 모른다). 엔진을 쓰므로 **엔진 venv** 로 돌린다(앱 venv 면 `engine_unavailable`, 종료 1).
+
+```text
+.venv\Scripts\python tools\ai_seal.py status --project <pilot 폴더>          (먼저 pairs 의 topics·words·vectors 를 본다)
+.venv-engine\Scripts\python tools\ai_seal.py attach-pairs --project <pilot 폴더> --all --by L01 --from-engine --asr <sealed-work\…asr.json> [--start-ms N --end-ms N]
+```
+
+**해제·봉인 오류 원인 코드 (`app.seal.SEAL_ERROR_CODES`, 32개)** — `SealError` 마다 `.code` 속성에 둔다. 메시지(문장)는 사람이 읽는 그대로 화면에 보이고, 도구·요약은 코드만 적는다(`ai_seal` 오류 줄의 `code`, 해제 당일 요약의 `unseal:<코드>`). 코드에는 내용·경로·ID 가 없다. 어긋나면 `app/seal.py` 의 튜플이 맞다.
+
+| 묶음 | 코드 |
+|---|---|
+| 기본·자리 | `seal_error`(코드를 주지 않은 옛 호출) · `reader_blind`(이 세션 종류는 `data\ai` 를 열지 않음) · `not_unsealed`(해제 기록 없는 run 읽기) · `conditions_unmet`(06 7-1 조건 안 됨) · `already_unsealed` |
+| 폴더·입력 | `project_id_format` · `ai_dir_in_project` · `ai_dir_in_repo` · `project_json` · `bad_by` · `source_kind` · `too_large` · `sha_format` · `reason_length` · `run_id_format` |
+| 기록·잠금 | `seal_jsonl_corrupt`(깨진 줄·끝 줄 잘림 — 새 기록을 쓰지 않음) · `lock_unreadable` · `lock_session_mismatch` · `no_seal_record` · `rejected_at_seal` |
+| 짝 | `pair_sha_format` · `pair_missing` · `pair_unsealed` · `pair_not_valid` · `pair_kind` |
+| 해제 | `messages_missing`(채팅 파일 없음·읽을 줄 없음) · `sealed_unreadable` · `sealed_mismatch`(봉인 파일이 기록과 다름) · `recheck_rejected`(지금 프로젝트와 대조하면 거부) · `all_dropped`(판정이 모두 이 프로젝트에 없는 chat_id) · `dup_run_id`(같은 run_id 의 다른 결과가 이미 해제됨) · `unsealed_mismatch`(해제한 파일이 기록 해시와 다름) |
+
+도구 쪽에만 있는 코드(`SEAL_ERROR_CODES` 밖): `ai_seal attach-pairs` 의 입력 오류(종료 2) `args`·`pair_file_unprotected`·`sha_ambiguous`(+ 위의 `sha_format`·`no_seal_record`·`pair_kind`), 엔진 실패(종료 1) `engine_unavailable`·`topics_check`·`words:<엔진 코드>`·`vectors:<엔진 코드>`, 해제 대상 없음 `no_target`. 해제 당일 요약(`tools/pilot_unseal_day.py`)의 오류 줄은 `unseal:<위 코드>`(SealError 가 아닌 예외면 그 이름, 예 `unseal:OSError` — `seal.error_code`) · `seal_jsonl:problems` · `verify:unsealed_files` · `report:<예외 이름>` · `pair:<예외 이름>` · `compare:<예외 이름>` · `calib:<예외 이름>` · `pool:<예외 이름>` 이다(24 6장 7단계).
 
 **보고서 `<보고서 폴더>\<project_id>\<report_id>\report.json`** (일치도는 넷째 묶음, AI 비교·시범 점검은 v1)
 
@@ -794,6 +829,30 @@ flowchart LR
 | 금칙어 | 목록은 저장소 밖 `<데이터 폴더>\config\blocklist-ko.txt`(UTF-8, 한 줄에 하나, '#' 줄·빈 줄 무시, 공백·기호 뺀 뒤 부분 일치, D-20 6). 시나리오 머리 `filters.blocklist_sha256` 에 **파일 바이트의 sha256 만** 적고 낱말은 어디에도 적지 않는다(통계에는 낱말 수만). 파일이 없으면 거르기 0낱말로 만들고 경고만(`blocklist_missing`), 있는데 읽지 못하면 만들지 않는다(`bad_blocklist`) |
 | 불변·같은 시나리오 | 한 번 쓰면 고치지 않는다. 같은 project_id·구간·`lines_sha256` 이면 새로 쓰지 않고 그 ID 를 준다(`created_at` 은 보지 않음) |
 | 시범 | 대상이 시범이면 읽기 전에 거부(`pilot_locked`), 같은 채널 후보의 시범 프로젝트는 열지 않는다 |
+| 생성 줄(H-3) | `generated` 줄은 만든 글자(`text`, 100자 이하)를 적는 **유일한** 줄이다. 실제 길은 `python -m engine generate --out <생성 후보>` → `tools/make_scenario.py --generated <생성 후보>`(retrieved 와 합치고 G 채점기 `app.core.gen_filter` 로 한 번 더 거름, 기본 `--generated-mode replace`). 단독 시나리오 쓰기(`engine generate` 의 기본)는 시험·개발용이다(25 5-3 의 3번) |
+
+**시나리오 머리의 선택 칸 (D-24 1, 25 5-3 의 1번)** — 생성 결과의 출처를 남기려고 머리에 **선택 칸만** 더한다. 칸이 없는 옛 시나리오도 그대로 읽힌다. label-event·guide-config 와는 무관하다(D-14 7). 칸 이름·값 목록은 스키마(`schemas/scenario.schema.json`)가 정한다 — 이 표와 다르면 스키마가 맞다.
+
+| 칸 | 뜻 | 전에는 |
+|---|---|---|
+| `generator.response_sha256` | 받은 생성 응답들의 해시(응답마다 SHA-256 을 이어 다시 SHA-256). 본문 대신 해시만. 같은 지시문·seed 로 다시 돌렸을 때 LLM 이 같은 답을 냈는지 견주는 값이다 | 스키마에 칸이 없어 `engine generate` 통계(`stats.response_sha256`)와 보낸 기록에만 있었다 |
+| `filters.versions` 의 판 이름 넷 더함 | 원래 넷(`nickname-v1` 닉네임 · `copy-v1` 베끼기 · `block-v1` 금칙어 · `llm-check-v1` LLM 예/아니오)에 `length-v1` 길이 · `idform-v1` 식별자 꼴(멘션·링크·전화·후원·공지) · `dup-v1` 중복 · `gscore-v1` G 채점기 거르기(`app.core.gen_filter.FILTER_ID`) | 길이·식별자·중복·G 채점기는 판 이름이 없어 `filters.dropped` 코드로만 남았다 |
+| `inputs.generated_sha256` | 생성 줄을 합쳤으면 그 생성 후보 파일(`engine generate --out`, 첫 줄 `generation.header`) 바이트의 SHA-256 | 없었다 |
+
+**보낸 기록 `scenarios/llm-send.jsonl`** (H-3, D-06 5, D-24 2) — `engine.llm_local` 이 LLM 을 **부를 때마다**(거부·실패 포함) 한 줄 덧붙인다. 보호 구역(`scenarios/`)에 있고 **숫자·해시·코드만** 적는다(본문·닉네임·낱말 없음). 형식 이름은 `chatcoach-llm-send-v1`(`engine.llm_local.RECORD_SCHEMA`)이고 따로 스키마 파일은 없다(19장 '아직 없는 스키마').
+
+| 칸 | 뜻 |
+|---|---|
+| `schema`, `client`, `client_version`, `at` | 형식 이름, 부른 모듈(`engine llm_local`)·판, 부른 시각(초) |
+| `service`, `host`, `endpoint` | `lmstudio-local`, 부른 주소의 호스트(`127.0.0.1`·`::1` — `localhost` 는 127.0.0.1 로 바꿔 부름), `/v1/chat/completions` |
+| `model_requested`, `model`, `prompt_template_id`, `temperature`, `max_tokens`, `seed` | 부탁한 모델·응답이 알린 모델, 지시문 판(`gen-chat-v1`), 생성 설정 |
+| `messages`, `sent_chars`, `sent`, `attempts`, `sent_chars_total` | 보낸 메시지 수·글자 수, 실제로 보냈나, 시도 수(다시 하기 포함), 시도를 곱한 글자 수 |
+| `ok`, `code`, `http_status`, `privacy` | 성공 여부, 실패 코드(`lmstudio_off`·`not_local`·`privacy`·`too_long`·`model_missing`·`timeout`·`connection_lost`·`bad_response`·`server_error`·`http_error`·`redirect_refused` 등), HTTP 상태, 보낼 글 검사에 걸린 **종류별 건수**(걸린 글 없음) |
+| `request_sha256`, `response_sha256`, `response_chars`, `finish_reason`, `usage`, `elapsed_ms` | 요청·응답 바이트 해시, 받은 글자 수, 끝난 까닭, 토큰 수, 걸린 시간 |
+
+- `--dry-run` 은 **파일(시나리오·생성 후보)을 쓰지 않는다**는 뜻이다. 실제 서버 길의 dry-run 도 LLM 을 부르므로 보낸 기록은 남는다(D-06 5, 25 5-2 의 11번).
+- `--send-log` 는 `<P>\scenarios\` 아래 `.jsonl` 만 받는다. 이미 있는 파일이 이 형식이 아니면 부르기 전에 거부한다(`send_log_unprotected`).
+- 가짜 응답(`--fake`)은 LLM 을 부르지 않으므로 보낸 기록이 없다. 그때 보낸 글자 수는 `engine generate` 통계에만 있다.
 
 ### 6-18. 시청자 훈련 기록 — `viewer/<session_id>.jsonl` ([스키마](../../schemas/viewer-event.schema.json))
 
@@ -822,6 +881,43 @@ flowchart LR
   `config\synonyms-ko.txt`(있으면). 어느 것이 쓰였는지는 앱 로그에 코드·개수만 남는다(`viewer-event` 에는 없다).
 - 채점 문턱은 지금 기준서(`project.json` 의 `active_guide_version`)의 **선택 칸** `viewer_score` 에서 읽는다(`app/viewer_flow.score_settings` → `viewer_score.settings_from_values`, 22 5-2 의 5번). 칸이 없으면 기본값(`viewer_score` 의 `DEFAULT_*`), 틀린 칸은 그 칸만 기본값. 시범 중인 기준서 v0.1 파일(`assets/guide-config.v0.1.json`)은 그대로다(D-21 4, D-14 7).
 - 채점기 판이 바뀌면 같은 글도 단계·코드가 달라질 수 있다. 판끼리 견줄 때는 `scorer` 로 나눠 본다(`scorer` 가 없는 줄은 첫 판).
+
+### 6-19. 가상 채팅 가려내기 기록 — `discern/<session_id>.jsonl` (discern-event)
+
+H-5 품질 관문(20 7장, [25](25-progress-2026-10-23-h3-prep.md) 6-2, 08 D-24 7 가)의 기록이다. 사람이 구간에 보인 채팅마다 '진짜 · 가짜 · 모르겠음' 을 한 번씩 눌러 가려내고, 구간 끝에 정답과 숫자를 본다. 라벨 기록(`labels/`)·스트리머 훈련(`training/`)·시청자 훈련(`viewer/`)과 **다른 폴더·다른 종류**다. label-event 스키마는 그대로다(D-14 7).
+**상태: 이 묶음에서 만드는 중.** 스키마 `schemas/discern-event.schema.json`, 쓰기·읽기 `app/discern_store.py`(쓰기 전에 스키마 검사 — 맞지 않으면 쓰지 않음), 계산 `app/core/discern.py`(`DiscernResult.numbers()`), 화면은 같은 묶음의 H-5 담당. 칸 이름·값은 스키마가 정하고, 이 절과 다르면 스키마가 맞다.
+
+- **20 5-3 과 다르게 한 곳**: 20 은 판정을 `training-event` 의 새 줄 `training.judge` 로 두려 했다. 가려내기는 표시를 숨기고 소리를 켜는 다른 화면이고, 스트리머 훈련의 노출 규칙(6-16 '노출 규칙 5')에 섞이지 않게 **따로 종류를 둔다.** training-event 에는 `training.judge` 를 더하지 않는다.
+- **세션 ID** `<labeler_id>-DS-<yyyymmdd>-<4자>`. 라벨 세션 종류 코드·TR·VW 와 겹치지 않고, label-event 의 세션 정규식에는 넣지 않는다. labeler_id 는 묻지 않고 6-16 과 같은 순서로 정한다(D-16).
+- **본문·닉네임·가림 이름 칸이 없다.** 대상은 실제 채팅이면 `chat_id`, 시나리오 줄이면 `scenario_id` + `line_id` 다. 판정·VOD 시각(ms)·숫자만 적는다(20 1장 10번, D-17 8). 생성 글도 적지 않는다(시나리오 파일에만 있다).
+- **판정 중에는 표시를 숨긴다.** 이 화면만 '가'·'생'·'가져옴·생성' 표시를 숨기고(`show_virtual_marks=False`), 맨 위에 '이 화면에는 생성 채팅이 섞여 있습니다' 한 줄을 늘 보인다(20 11장 1번 — D-05 의 '사람을 속이지 않음' 을 지킴). 끝 줄을 쓴 뒤에 줄마다 정답 표시를 보인다.
+- **먼저 쓰고 보인다**(6-16 과 같은 규칙): start 줄을 못 쓰면 화면이 열리지 않고, end 줄을 못 쓰면 정답 표시를 보이지 않는다(`tests/test_discern_view.py` 의 기록 실패 시험이 확인).
+- **노출로 세지 않는다.** 원래 반응·사람 라벨·엔진 판정을 보이지 않는다(6-18 시청자 훈련과 같은 까닭). 다만 시범 프로젝트(`pilot-*`)는 시범 세션이 모두 잠기기 전 메뉴를 끈다(D-18 7, 20 7-3 — 평가용 구간은 `<P>` 사본이나 합성 프로젝트).
+- **라벨링 세션은 이 폴더를 열지 않는다**(12-1, `scenarios/` 와 같다). 가려내기 화면도 시나리오는 읽기만 한다.
+
+| 칸 (공통) | 뜻 |
+|---|---|
+| `v`(1), `id`(UUID v4), `seq`(파일 안 1부터), `kind`, `session_id`, `labeler_id`, `created_at`(벽시계·오프셋), `app_version`, `body` | 모든 줄 |
+
+| kind | `body` 칸 | 뜻 |
+|---|---|---|
+| `discern.start` | `mode`(`discern`), `project_id`, `scenario_id`, `scenario_sha256`, `range`(`start_ms`·`end_ms`), `audio`(`on`), `marks_hidden`(true), `shown`(출처별 대상 수 `replay`·`retrieved`·`generated`), `seen_before`(이 구간을 연 다른 세션 기록이 있나 — 계산값, 모르면 null, 20 7-3), `repeat`(같은 사람이 같은 시나리오를 이미 가려냈나) | 화면을 연 순간 |
+| `discern.judge` | 실제 채팅이면 `chat_id`, 시나리오 줄이면 `scenario_id`·`line_id`. 그리고 `answer`(`real`·`virtual`·`unsure`, 같은 단추를 다시 눌러 지우면 `none` = '안 봄'), `judged_vod_ms`(누른 순간 재생 위치), `wall_at`. **출처(정답) 칸은 없다** — 시나리오 파일에서 계산한다 | 채팅 옆 단추 한 번. 다시 누르면 새 줄을 쓰고 **seq 가 큰 줄이 유효**하다 |
+| `discern.end` | `reason`(`segment_end` 구간 끝 · `finish` [끝내고 정답 보기] · `closed` 정답을 보기 전에 닫음), `judged`, `unseen`('안 봄' — 판정하지 않은 대상 수), `result`(정답을 보였을 때만, 아래 숫자) | 구간 끝·끝내기·닫기 |
+
+'본 적 있음'(`seen_before`)은 그 라벨러의 스트리머 훈련·시청자 훈련·가려내기 start 줄의 구간과, `labels\` 의 **파일 이름**(그 라벨러의 세션이 있으면 방송 전체를 본 것으로 침 — 내용은 읽지 않음)으로 계산한다(`discern_store`).
+
+**계산 (20 7-2, 06 4-7 재사용)** — `app.core.origin.compare_origins(a, b, strict=False)` 하나만 부르고 **고치지 않는다**(20 13장 H-5).
+
+| 항목 | 값 |
+|---|---|
+| A 쪽(정답) | 시나리오에서 만든다. `replay`·`retrieved` → `real`, `generated` → `virtual`. method = `generation_log_match` |
+| B 쪽(사람) | 대상마다 seq 가 가장 큰 `discern.judge`. 진짜 → `real`, 가짜 → `virtual`, 모르겠음 → `undeterminable`, `none`(지움)은 '안 봄' 으로 세고 넣지 않는다. method = `manual` |
+| 짝 키 | 실제 채팅은 `chat_id`, 시나리오 줄은 `scenario_id:line_id` |
+| `result` 칸 | `targets`·`judged`·`unseen`, `confusion`(3×3, 행 = 정답 real·virtual·undeterminable, 열 = 사람 — 결과의 `all` 묶음. A 쪽이 모두 자동이라 `human` 묶음은 비고 `all` 만 뜻이 있다), `kappa`(명목 κ, 못 셈이면 null), `detection`(가짜 탐지율: 생성 → 가짜 / 생성 판정 수), `false_alarm`(진짜 오인율: 실제 줄 replay + retrieved → 가짜 / 실제 판정 수), `retrieved`(retrieved 만의 오인율, 따로 한 줄), `unsure`(모르겠음 / 판정 수) — 비율은 모두 `{hit, n, rate}`(n 이 0 이면 rate null). 그리고 `sample`·`gate`(20 7-3 관문)·`low_n`(표본이 관문에 못 미침) |
+| 대표값 | `repeat = true` 인 세션은 숫자는 내되 대표값에서 뺀다(20 7-1). 보고 머리에 `seen_before` 를 적는다 |
+
+관문 시작값(20 7-3): 생성 40줄 이상 + 실제 40줄 이상, 방송 2편 이상에서 가짜 탐지율 **0.65 이하** 이고 κ **0.4 이하** 면 통과. 실제 측정은 시범 뒤(D-22 3) 사용자가 판정한다(채팅마다 1클릭).
 
 ---
 
@@ -1489,12 +1585,14 @@ MVP 에는 4단계(`missed_candidate`) 입력 화면이 없다(v1). 그래서 �
 | [`schemas/training-event.schema.json`](../../schemas/training-event.schema.json) | `training/<session_id>.jsonl` 한 줄 (6-16, 08 D-18 8) |
 | [`schemas/scenario.schema.json`](../../schemas/scenario.schema.json) | `scenarios/SC-*.jsonl` 가상 채팅 시나리오 (H-1, [20](20-plan-virtual-chat.md) 3장) |
 | [`schemas/viewer-event.schema.json`](../../schemas/viewer-event.schema.json) | `viewer/<session_id>.jsonl` 한 줄 (6-18, 08 D-20 4) |
+| [`schemas/discern-event.schema.json`](../../schemas/discern-event.schema.json) | `discern/<session_id>.jsonl` 한 줄 — 가상 채팅 가려내기 기록 (6-19, 08 D-24 7 가) |
 
 **아직 없는 스키마** — 만들 때 이 묶음에 넣는다. 파일 이름은 가칭이다. (D-12 1: 위 세 스키마는 이미 있어 이 표에서 옮겼다.)
 
 | 파일 | 대상 | 단계 | 필드 출처 |
 |---|---|---|---|
 | `schemas/ai-seal.schema.json` | `<앱>\data\ai\<project_id>\seal.jsonl` 한 줄 | v1 | 6-14 'AI 봉인 기록' |
+| (스키마 파일 없음) `chatcoach-llm-send-v1` | `scenarios/llm-send.jsonl` 한 줄 (LLM 에 보낸 기록) | 지금은 `engine.llm_local` 이 칸을 정하고 `engine generate` 가 첫 줄 `schema` 로 종류만 대조한다. 엔진 밖에서 읽는 곳이 생기면 만든다 | 6-17 '보낸 기록' |
 | `schemas/origin-targets.schema.json` | `origin/OT-*.json` 출처 판정 대상 파일. 지금은 `app.core.origin.parse_targets` 가 손으로 검사한다 | 필요해지면 (D-13 1, 14 4-1 7번) | 6-11 '출처 판정 대상 파일' |
 | `schemas/report.schema.json` | 보고서 폴더(2-2)의 `…\report.json` | v1 (일치도 보고서는 넷째 묶음에 스키마 없이 먼저 만들었다. `schema` = `chatcoach.report.agreement`) | 6-14 '보고서', [06](06-evaluation-and-agreement.md) 6-7 |
 | `schemas/eval-settings.schema.json` | 분석 설정(eval_settings: 일치도 허용 오차·판단 기준·보고서 경고값) | v1 (일치도·AI 비교를 앱 안에서 계산할 때) | [06](06-evaluation-and-agreement.md) 10장 분석 묶음. 기준서 시작값이 아니라 guide-config 에 넣지 않는다(9-3). 파일 위치는 그때 정한다(확인 필요) |
@@ -1517,7 +1615,7 @@ MVP 에는 4단계(`missed_candidate`) 입력 화면이 없다(v1). 그래서 �
 | 4 | (결정됨 — 사용자 확정 전, 반대하면 되돌림) 표본에서 경계 완충에 걸린 항목을 빼기만 하고 다시 뽑지 않는 것(실제 판정 수 < 100)이 괜찮은지 | 빼기만 하지 않는다. 완충은 적격에서 빼고 임계 키 τ 로 처음에 정확히 100개를 뽑는다(15-2, [07](07-roadmap.md) ADR-09·질문 42) |
 | 5 | '강한 증거 없는 직접 반응' 을 사유를 받고도 막는 것(하드 차단)이 맞는지 | 안내서 문구대로 했다. 증거 체크 실수 때 라벨러가 막힐 수 있다 |
 | 6 | (구현은 정함 — D-12 1) 재라벨 단위 기본값: `segment`(v0.1 문구) vs `block`(구간 일치도 측정 가능) | `guide-config` 의 `relabel.unit`. 계획은 v0.1 의 `segment` 여도 10분 블록으로 고르고 `notes` 에 적는다(6-14). v0.2 기준서에서 값을 `block` 으로 바꾼다 |
-| 7 | 가상 채팅 생성 기록의 형식과 시각 기준(벽시계 vs 영상 시각), 주입 경로(봇 계정 전송 vs 화면 오버레이) | `origin/` 스키마와 대조 방법 |
+| 7 | (닫힘 — D-05·D-24) 가상 채팅 생성 기록의 형식과 시각 기준(벽시계 vs 영상 시각), 주입 경로(봇 계정 전송 vs 화면 오버레이) | 전송·오버레이 없이 앱 화면 안에서만 쓴다(D-05). 생성 기록은 시나리오 파일(영상 시각 `show_vod_ms`)과 보낸 기록 `scenarios/llm-send.jsonl` 이 맡는다(6-14·6-17) |
 | 8 | 보존 기한 기본값(지금 가정: 생성일 + 12개월) | 파기 일정 |
 | 9 | AI 엔진이 실제로 내는 결과 종류(구간·등급·반응 시각·후보·출처 중 무엇) | `ai-result` 스키마 확정 |
 | 10 | 후원 금액을 파생 필드에 남기지 않는 것(보호 원문에만)이 괜찮은지 | 후원 반응을 따로 분석하려면 바꿔야 함 |
