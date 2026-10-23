@@ -73,7 +73,7 @@ ORIGIN_KINDS = frozenset({vis.ORIGIN_REVIEW})       # 출처 판정 세션끼리
 FORMAT_REV = 2                                      # 1: 구간·표본만, 2: + 연결·이어짐·놓친 후보·출처 (칸 추가만)
 
 __all__ = [
-    "ReportError", "NotLockedError", "RelabelPendingError", "SampleVerifyError", "ReportBlindError",
+    "ReportError", "NotLockedError", "RelabelPendingError", "SampleVerifyError", "PlanUnreadableError", "ReportBlindError",
     "LockMismatchError", "GuideMismatchError", "ReportLocationError",
     "LockedSession", "ReportResult", "load_locked_session", "build_report", "write_report", "make_report",
     "render_markdown", "check_out_root", "default_out_root", "reader_block_reason", "pending_relabel_plans",
@@ -106,6 +106,15 @@ class RelabelPendingError(NotLockedError):
 
 class SampleVerifyError(ReportError):
     """표본·계획 재현 검증이 통과하지 않았다(06 7-1). 라벨 파일은 열지 않았다."""
+
+
+class PlanUnreadableError(SampleVerifyError):
+    """비교하는(잠긴) 재라벨 세션의 계획 파일을 읽지 못했다 — 깨졌거나 없음(06 7-1). plan_ids 에 그 계획 ID.
+    SampleVerifyError 의 하나라 예전처럼 다루면 되고, 해제 조건(seal.unseal_conditions)만 사유 코드를 plan_unreadable 로 가른다."""
+
+    def __init__(self, msg: str, plan_ids: Iterable[str]):
+        super().__init__(msg)
+        self.plan_ids = list(plan_ids)
 
 
 class ReportBlindError(ReportError, PermissionError):
@@ -630,7 +639,7 @@ def _comparison_gate(project_root: str, project_data: Mapping, session_ids: Iter
         try:
             plan = relabel_io.read_plan(root, pid)
         except (OSError, ValueError):
-            raise SampleVerifyError(f"{sid} 의 재라벨 계획 {pid} 를 읽지 못했습니다") from None
+            raise PlanUnreadableError(f"{sid} 의 재라벨 계획 {pid} 를 읽지 못했습니다", [pid]) from None
         primaries.add(plan["source_session_id"])
         compared_plans.add(pid)
         if relabel_io.is_cancelled(root, pid):

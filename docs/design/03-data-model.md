@@ -736,17 +736,19 @@ flowchart LR
 .venv-engine\Scripts\python tools\ai_seal.py attach-pairs --project <pilot 폴더> --all --by L01 --from-engine --asr <sealed-work\…asr.json> [--start-ms N --end-ms N]
 ```
 
-**해제·봉인 오류 원인 코드 (`app.seal.SEAL_ERROR_CODES`, 32개)** — `SealError` 마다 `.code` 속성에 둔다. 메시지(문장)는 사람이 읽는 그대로 화면에 보이고, 도구·요약은 코드만 적는다(`ai_seal` 오류 줄의 `code`, 해제 당일 요약의 `unseal:<코드>`). 코드에는 내용·경로·ID 가 없다. 어긋나면 `app/seal.py` 의 튜플이 맞다.
+**해제·봉인 오류 원인 코드 (`app.seal.SEAL_ERROR_CODES`, 33개)** — `SealError` 마다 `.code` 속성에 둔다. 메시지(문장)는 사람이 읽는 그대로 화면에 보이고, 도구·요약은 코드만 적는다(`ai_seal` 오류 줄의 `code`, 해제 당일 요약의 `unseal:<코드>`). 코드에는 내용·경로·ID 가 없다. 어긋나면 `app/seal.py` 의 튜플이 맞다.
 
 | 묶음 | 코드 |
 |---|---|
 | 기본·자리 | `seal_error`(코드를 주지 않은 옛 호출) · `reader_blind`(이 세션 종류는 `data\ai` 를 열지 않음) · `not_unsealed`(해제 기록 없는 run 읽기) · `conditions_unmet`(06 7-1 조건 안 됨) · `already_unsealed` |
 | 폴더·입력 | `project_id_format` · `ai_dir_in_project` · `ai_dir_in_repo` · `project_json` · `bad_by` · `source_kind` · `too_large` · `sha_format` · `reason_length` · `run_id_format` |
-| 기록·잠금 | `seal_jsonl_corrupt`(깨진 줄·끝 줄 잘림 — 새 기록을 쓰지 않음) · `lock_unreadable` · `lock_session_mismatch` · `no_seal_record` · `rejected_at_seal` |
+| 기록·잠금 | `seal_jsonl_corrupt`(깨진 줄·끝 줄 잘림 — 새 기록을 쓰지 않음) · `seal_busy`(다른 프로세스가 seal.jsonl 잠금 `<ai>\<project_id>\.unseal.lock` 을 쥐어 30초 기다리다 멈춤 — 아무것도 쓰지 않음, 2026-10-23) · `lock_unreadable` · `lock_session_mismatch` · `no_seal_record` · `rejected_at_seal` |
 | 짝 | `pair_sha_format` · `pair_missing` · `pair_unsealed` · `pair_not_valid` · `pair_kind` |
 | 해제 | `messages_missing`(채팅 파일 없음·읽을 줄 없음) · `sealed_unreadable` · `sealed_mismatch`(봉인 파일이 기록과 다름) · `recheck_rejected`(지금 프로젝트와 대조하면 거부) · `all_dropped`(판정이 모두 이 프로젝트에 없는 chat_id) · `dup_run_id`(같은 run_id 의 다른 결과가 이미 해제됨) · `unsealed_mismatch`(해제한 파일이 기록 해시와 다름) |
 
 도구 쪽에만 있는 코드(`SEAL_ERROR_CODES` 밖): `ai_seal attach-pairs` 의 입력 오류(종료 2) `args`·`pair_file_unprotected`·`sha_ambiguous`(+ 위의 `sha_format`·`no_seal_record`·`pair_kind`), 엔진 실패(종료 1) `engine_unavailable`·`topics_check`·`words:<엔진 코드>`·`vectors:<엔진 코드>`, 해제 대상 없음 `no_target`. 해제 당일 요약(`tools/pilot_unseal_day.py`)의 오류 줄은 `unseal:<위 코드>`(SealError 가 아닌 예외면 그 이름, 예 `unseal:OSError` — `seal.error_code`) · `seal_jsonl:problems` · `verify:unsealed_files` · `report:<예외 이름>` · `pair:<예외 이름>` · `compare:<예외 이름>` · `calib:<예외 이름>` · `pool:<예외 이름>` 이다(24 6장 7단계).
+
+**해제 조건 사유 코드 (`app.seal.UNSEAL_REASON_CODES` — `UnsealConditions.codes`, 사유 문장과 같은 차례, 해제 당일 요약의 `reasons`)**: `unlocked_sessions` · `no_primary` · `no_relabel_plan` · `relabel_not_locked`(계획은 읽히는데 잠긴 재라벨 세션이 없음) · **`plan_unreadable`**(계획 파일이 깨졌거나 형식이 아님 — 남은 계획이든 잠긴 재라벨 세션의 계획이든, 계획 ID 는 `unreadable_plans`·요약의 `plans_unreadable`, 2026-10-23 에 `relabel_not_locked` 와 가름) · `sample_verify` · `other`. 도구에만 `pilot_count`·`open_watch`.
 
 **보고서 `<보고서 폴더>\<project_id>\<report_id>\report.json`** (일치도는 넷째 묶음, AI 비교·시범 점검은 v1)
 

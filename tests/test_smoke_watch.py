@@ -21,6 +21,8 @@ import gui_smoke  # noqa: E402
 import smoke_watch as sw  # noqa: E402
 
 WIN = os.name == "nt"
+# 가짜 자식은 끝까지 간 실행이면 gui_smoke 끝 요약 줄('== N passed, M failed, …')을 찍는다 — 이 줄이 없으면 감시는 125
+# (26 5-2 의 4). 끝 요약 줄 없는 자식은 test_child_without_final_line_is_rc125 가 본다.
 
 
 def child(tmp_path, body: str, name="fake_child.py") -> str:
@@ -113,16 +115,54 @@ def test_prune_runs_keeps_newest_and_ignores_others(tmp_path):
 
 # ---------------------------------------------------------------------------- 가짜 자식으로 감시
 def test_quick_child_rc_and_log(tmp_path):
+    """끝 요약 줄이 있으면 예전대로 자식의 종료 코드를 그대로 낸다."""
     script = child(tmp_path, """
         print("PASS step_a 1 ms", flush=True)
         print("PASS step_b 2 ms", flush=True)
+        print("== 2 passed, 0 failed, 0.1 s, platform=offscreen", flush=True)
         sys.exit(3)
     """)
     res, lines = run_watch(tmp_path, script)
-    assert res.rc == 3 and not res.timed_out and res.stalls == []
-    assert lines == ["PASS step_a 1 ms", "PASS step_b 2 ms"]
+    assert res.rc == 3 and res.child_rc == 3 and res.final_line is True and not res.timed_out and res.stalls == []
+    assert lines == ["PASS step_a 1 ms", "PASS step_b 2 ms", "== 2 passed, 0 failed, 0.1 s, platform=offscreen"]
     log = read(os.path.join(res.out_dir, "watch.log"))
-    assert " out  PASS step_a" in log and "--faulthandler-file" in log and " end  [watch] 끝: rc=3" in log
+    assert " out  PASS step_a" in log and "--faulthandler-file" in log and " end  [watch] 끝: rc=3 · " in log
+    assert "끝 요약 줄 없음" not in log and "끝 요약 줄 없음" not in res.summary()
+
+
+def test_child_without_final_line_is_rc125(tmp_path):
+    """밖에서 멈췄다가 끝 요약 줄('== N passed, M failed') 없이 끝난 자식(26 5-2 의 4): 자식이 0 을 내도 125.
+    요약 한 줄과 watch.log 에 그렇게 적는다. 자식의 실제 종료 코드는 child_rc 에 남는다."""
+    script = child(tmp_path, """
+        print("PASS step_a 1 ms", flush=True)
+        print("== 스모크 사본 정리: 지난 사본 0개 지움", flush=True)     # '== ' 로 시작해도 끝 요약 줄이 아니다
+        sys.exit(0)
+    """)
+    res, lines = run_watch(tmp_path, script)
+    assert res.rc == sw.NO_SUMMARY_RC == 125 and res.child_rc == 0 and res.final_line is False and not res.timed_out
+    s = res.summary()
+    assert s.startswith("[watch] 끝: rc=125 (끝 요약 줄 없음 — 끝까지 못 감 · 자식 rc=0) · ") and "\n" not in s
+    log = read(os.path.join(res.out_dir, "watch.log"))
+    assert "끝 요약 줄 없음 — 자식 rc=0 → 125" in log and " end  [watch] 끝: rc=125 (끝 요약 줄 없음" in log
+    # 자식이 0 이 아닌 값으로 끝나도 끝 요약 줄이 없으면 125(자식 rc 는 요약 줄에 남김)
+    script2 = child(tmp_path, "print('PASS a 1 ms', flush=True)\nsys.exit(7)\n", name="fake_child_rc7.py")
+    res2, _ = run_watch(tmp_path, script2)
+    assert res2.rc == 125 and res2.child_rc == 7 and "자식 rc=7" in res2.summary()
+    # 끝 요약 줄의 꼴은 gui_smoke 가 찍는 그대로다(실패가 있어도 끝 요약 줄)
+    assert sw.FINAL_LINE_RE.match("== 97 passed, 1 failed, 196.7 s, platform=offscreen")
+    assert not sw.FINAL_LINE_RE.match("PASS x 1 ms  == 1 passed, 0 failed")
+    assert "== {len(self.results) - len(failed)} passed, {len(failed)} failed, " in read(gui_smoke.__file__)
+
+
+def test_main_cli_without_final_line_returns_125(tmp_path, capsys):
+    script = child(tmp_path, """
+        print("PASS only 1 ms", flush=True)
+        sys.exit(0)
+    """)
+    rc = sw.main(["--stall", "5", "--sample", "0.5", "--out-dir", str(tmp_path / "cli"), "--script", script, "--",
+                  "--offscreen"])
+    last = capsys.readouterr().out.strip().splitlines()[-1]
+    assert rc == 125 and last.startswith("[watch] 끝: rc=125 (끝 요약 줄 없음")
 
 
 def test_stall_requests_stack_dump(tmp_path):
@@ -137,6 +177,7 @@ def test_stall_requests_stack_dump(tmp_path):
                 time.sleep(0.05)
         fake_slow_step_marker()
         print("step-b", flush=True)
+        print("== 2 passed, 0 failed, 0.1 s, platform=offscreen", flush=True)
         disarm()
     """)
     res, lines = run_watch(tmp_path, script)
@@ -146,7 +187,7 @@ def test_stall_requests_stack_dump(tmp_path):
     assert res.dumps["requested"] == st.requests and res.dumps["written"] >= 1 and res.dumps["fatal"] == 0
     text = read(res.stack_path)
     assert "fake_slow_step_marker" in text and "== 요청 덤프 1 " in text
-    assert any(x.startswith("[watch] 멈춤: 출력이") for x in lines) and lines[-1] == "step-b"
+    assert any(x.startswith("[watch] 멈춤: 출력이") for x in lines) and lines[-2] == "step-b"
     assert not os.path.exists(res.stack_path + sw.REQUEST_SUFFIX)
     if WIN:
         assert res.probe_ok and res.samples >= 3 and st.probe is not None and st.probe.threads >= 1
@@ -181,6 +222,7 @@ def test_gil_hang_auto_dump(tmp_path):
         fake_gil_hog_marker()
         sys.setswitchinterval(0.005)
         print("b", flush=True)
+        print("== 2 passed, 0 failed, 0.1 s, platform=offscreen", flush=True)
         disarm()
     """)
     res, _ = run_watch(tmp_path, script, stall_s=30.0)
@@ -197,6 +239,7 @@ def test_max_time_kills_child_tree(tmp_path):
     res, lines = run_watch(tmp_path, script, stall_s=30.0, max_s=1.0)
     assert res.timed_out and res.rc == sw.TIMEOUT_RC and time.monotonic() - t0 < 20
     assert any("시간 초과" in x for x in lines) and "rc=124 (시간 초과로 끝냄)" in res.summary()
+    assert "끝 요약 줄 없음" not in res.summary()             # 시간 초과가 먼저다(124 그대로)
 
 
 def test_fake_probe_all_suspended_is_reported(tmp_path):
@@ -204,6 +247,7 @@ def test_fake_probe_all_suspended_is_reported(tmp_path):
         print("a", flush=True)
         time.sleep(1.8)
         print("b", flush=True)
+        print("== 2 passed, 0 failed, 0.1 s, platform=offscreen", flush=True)
     """)
     calls = []
 
@@ -228,6 +272,7 @@ def test_launch_failure_rc2(tmp_path):
 def test_main_cli_with_fake_script(tmp_path, capsys):
     script = child(tmp_path, """
         print("PASS only 1 ms", flush=True)
+        print("== 1 passed, 0 failed, 0.1 s, platform=offscreen", flush=True)
         sys.exit(0 if FH else 9)
     """)
     out = tmp_path / "cli"
@@ -467,6 +512,7 @@ def test_summarize_real_watch_of_fake_child(tmp_path):
                 time.sleep(0.05)
         step_fake_slow()
         print("PASS fake_slow             3500 ms  n=1", flush=True)
+        print("== 2 passed, 0 failed, 3.6 s, platform=offscreen", flush=True)
         disarm()
     """, name="fake_gui_smoke.py")
     res, _ = run_watch(tmp_path, script)
@@ -529,6 +575,7 @@ def test_watch_records_externally_suspended_child(tmp_path):
         print("a", flush=True)
         time.sleep(4.0)
         print("b", flush=True)
+        print("== 2 passed, 0 failed, 4.0 s, platform=offscreen", flush=True)   # 풀린 뒤 끝까지 감 — rc 0
         disarm()
     """)
     seen = threading.Event()

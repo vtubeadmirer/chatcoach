@@ -7,7 +7,8 @@
   2. 조건 확인(06 7-1, D-17 4): 프로젝트마다 seal.unseal_conditions — 1차·재라벨 세션이 모두 잠김, 1차마다 재라벨 계획,
      계획마다 잠긴 재라벨 세션, 표본·계획 재현 검증. **잠금·계획·표본 매니페스트·project.json 만 연다**(라벨 파일·봉인 폴더는
      열지 않는다). 한 편이라도 안 되면 **아무것도 풀지 않고** 종료 3. 라벨 형식 고정(tools/pilot_freeze --check 와 같은 비교)은
-     참고로만 적는다(막지 않음).
+     참고로만 적는다(막지 않음). 사유 코드는 seal.UNSEAL_REASON_CODES 그대로다 — 계획 파일이 깨졌으면 plan_unreadable 이고
+     그 계획 ID 는 plans_unreadable 에 따로 적는다(relabel_not_locked 와 섞지 않는다: 그때 볼 것은 잠기지 않은 재라벨이 아니라 파일).
   3. 해제: 프로젝트마다 seal_status 의 봉인(검사 valid, 아직 안 푼 것)을 모두 seal.unseal 로 푼다(짝 주제 흐름·전사 낱말·
      벡터는 seal 이 같이 푼다). 해제는 되돌릴 수 없으므로 조건을 모두 본 뒤에만. 푼 뒤 tools/ai_seal.verify_project 로
      결과·짝 파일을 해제 기록 해시와 대조한다(어긋나면 오류 'verify:unsealed_files', 종료 1). 유효한 봉인이 풀리지 않으면
@@ -88,12 +89,13 @@ CONDITION_FILES = (os.path.join("chat", "protected", "salt.json"),)
 LABELER_RE = re.compile(r"\A[A-Z][A-Z0-9]{1,7}\Z")
 DATE_RE = re.compile(r"\A\d{8}\Z")
 
-# 조건 미충족 사유 코드 (seal.unseal_conditions 의 문장 → 코드, 내용 없음)
+# 조건 미충족 사유 코드 (seal.unseal_conditions 의 codes — app.seal.UNSEAL_REASON_CODES 와 같은 글자, 내용 없음)
 R_PILOT_COUNT = "pilot_count"
 R_UNLOCKED = "unlocked_sessions"
 R_NO_PRIMARY = "no_primary"
 R_NO_PLAN = "no_relabel_plan"
 R_RELABEL_PENDING = "relabel_not_locked"
+R_PLAN_UNREADABLE = "plan_unreadable"     # 계획 파일이 깨짐 — 잠기지 않은 재라벨을 찾지 말고 plans_unreadable 의 파일을 본다
 R_SAMPLE_VERIFY = "sample_verify"
 R_OTHER = "other"
 R_WATCH = "open_watch"
@@ -227,7 +229,8 @@ def find_pilots(projects_root: str) -> list[str]:
 
 
 def reason_code(text: str) -> str:
-    """seal.unseal_conditions 의 사유 문장 → 코드(세션·계획 ID 를 남기지 않는다)."""
+    """seal.unseal_conditions 의 사유 문장 → 코드(세션·계획 ID 를 남기지 않는다). 사유 코드(UnsealConditions.codes)가 없는
+    옛 결과에만 쓴다 — check_conditions 는 codes 를 먼저 본다."""
     t = str(text)
     if t.startswith("잠기지 않은 라벨링 세션"):
         return R_UNLOCKED
@@ -237,17 +240,20 @@ def reason_code(text: str) -> str:
         return R_NO_PLAN
     if t.startswith("잠긴 재라벨 세션이 없는 계획"):
         return R_RELABEL_PENDING
+    if t.startswith("읽지 못한 재라벨 계획") or ("재라벨 계획" in t and "읽지 못했습니다" in t):
+        return R_PLAN_UNREADABLE
     if "재현 검증" in t:
         return R_SAMPLE_VERIFY
     return R_OTHER
 
 
 def check_conditions(root: str) -> dict:
-    """프로젝트 하나의 06 7-1 조건 → {name, labeling_sessions, locked, met, reasons[코드], gate_warnings}.
-    잠금·계획·매니페스트·project.json 만 연다(seal.unseal_conditions). 라벨 파일·AI 결과 폴더는 열지 않는다."""
+    """프로젝트 하나의 06 7-1 조건 → {name, labeling_sessions, locked, met, reasons[코드], plans_unreadable[계획 ID],
+    gate_warnings}. 잠금·계획·매니페스트·project.json 만 연다(seal.unseal_conditions). 라벨 파일·AI 결과 폴더는 열지 않는다.
+    plans_unreadable: 사유 plan_unreadable 의 대상(깨진 계획 파일 relabel\\<ID>.json — 해제 당일에 볼 파일)."""
     from app import seal
     out = {"name": os.path.basename(root), "labeling_sessions": 0, "locked": 0, "met": False, "reasons": [],
-           "gate_warnings": 0}
+           "plans_unreadable": [], "gate_warnings": 0}
     try:
         cond = seal.unseal_conditions(root)
     except WatchViolation as e:
@@ -261,7 +267,11 @@ def check_conditions(root: str) -> dict:
     out["labeling_sessions"] = len(sids)
     out["locked"] = sum(1 for s in sids if os.path.isfile(os.path.join(root, "locks", f"{s}.json")))
     out["met"] = bool(cond.met)
-    out["reasons"] = sorted({reason_code(r) for r in cond.reasons})
+    codes = list(getattr(cond, "codes", None) or ())
+    if len(codes) != len(cond.reasons):                 # 사유 코드가 없는 옛 결과 — 문장으로 가른다
+        codes = [reason_code(r) for r in cond.reasons]
+    out["reasons"] = sorted(set(codes))
+    out["plans_unreadable"] = sorted(set(getattr(cond, "unreadable_plans", None) or ()))
     out["gate_warnings"] = len(cond.warnings)
     return out
 
@@ -737,8 +747,10 @@ def _print(summary: Mapping) -> None:
     print(f"시범 {len(c['projects'])}편 · 라벨링 세션 {c['labeling_sessions']} · 잠김 {c['locked']} · 조건 충족 {c['met']}"
           f" · 사유 {', '.join(c['reason_kinds']) or '없음'} · 사람 클릭 {summary['user_clicks']}")
     for p in c["projects"]:
+        bad = p.get("plans_unreadable") or ()
         print(f"  {p['name']}: 라벨링 세션 {p['labeling_sessions']} · 잠김 {p['locked']} · 충족 {p['met']}"
-              f" · 사유 {', '.join(p['reasons']) or '-'}")
+              f" · 사유 {', '.join(p['reasons']) or '-'}"
+              + (f" · 읽지 못한 계획 파일 {', '.join(f'relabel/{x}.json' for x in bad)}" if bad else ""))
     w = summary.get("watch") or {}
     print(f"열기 감시(조건): 시범 폴더 읽기 {w.get('guarded_reads')} · 쓰기 {w.get('writes')} · 위반 {w.get('violations')}"
           f" · 라벨 형식 고정 {summary['freeze']['state']}")

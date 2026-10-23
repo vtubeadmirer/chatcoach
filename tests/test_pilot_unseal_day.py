@@ -309,7 +309,12 @@ def test_reason_codes_have_no_ids():
     assert day.reason_code("재라벨 계획이 없는 1차 세션 L01-P-20261024-ab12") == day.R_NO_PLAN
     assert day.reason_code("잠긴 재라벨 세션이 없는 계획 RP-1") == day.R_RELABEL_PENDING
     assert day.reason_code("재현 검증이 통과하지 않아 보고서를 만들지 않습니다(06 7-1): x") == day.R_SAMPLE_VERIFY
+    assert day.reason_code("읽지 못한 재라벨 계획 RP-1 (계획 파일이 깨졌거나 형식이 아닙니다)") == day.R_PLAN_UNREADABLE
+    assert day.reason_code("L01-RS-20261019-cd34 의 재라벨 계획 RP-1 를 읽지 못했습니다") == day.R_PLAN_UNREADABLE
     assert day.reason_code("무엇") == day.R_OTHER
+    # 도구의 사유 코드 = seal 의 사유 코드(+ 도구에만 있는 pilot_count·open_watch)
+    assert {day.R_UNLOCKED, day.R_NO_PRIMARY, day.R_NO_PLAN, day.R_RELABEL_PENDING, day.R_PLAN_UNREADABLE,
+            day.R_SAMPLE_VERIFY, day.R_OTHER} == set(seal.UNSEAL_REASON_CODES)
     assert day.version_label("0.3.1") == "v0.3" and day.version_label(None) == "v?"
     # 실제 engine/link.py 의 값: v0.2 규칙 결과는 '0.1.0'(판 번호를 올리지 않음) — 'v0.1' 로 적지 않는다
     from engine import link
@@ -348,6 +353,34 @@ def test_dry_run_reports_unmet_reasons_and_writes_nothing(tmp_path, capsys):
     assert s["user_clicks"] == 0 and s["projects"] == []
     for blob in (printed, json.dumps(s, ensure_ascii=False)):
         assert P_ID not in blob and RS_ID not in blob and SECRET_TEXT not in blob    # 세션 ID 도 남기지 않는다
+
+
+def test_dry_run_corrupt_plan_file_is_plan_unreadable(tmp_path, capsys):
+    """합성 시범 하나의 relabel\\ 에 깨진 계획 파일(찢어진 쓰기)이 있다 → 그 편만 사유 plan_unreadable 이고 계획 ID 가
+    plans_unreadable·표준 출력에 나온다. 예전에는 relabel_not_locked 로 적혀 해제 당일에 잠기지 않은 재라벨을 찾게 됐다.
+    막는 판정은 그대로(종료 3, 아무것도 풀지도 쓰지도 않음)."""
+    base, projects = _data(tmp_path)
+    pjs = [ready_pilot(projects, i) for i in (1, 2, 3)]
+    bad = "RP-20261018-zz99"
+    with builtins.open(relabel.plan_path(pjs[0]["root"], bad), "wb") as f:
+        f.write(b'{"schema": "chatcoach/relabel-plan", "plan_id": "RP-2026')
+    before = tree(base)
+    out_root = base / "reports"
+    code = day.main(["--projects-root", str(projects), "--out-root", str(out_root), "--dry-run",
+                     "--freeze", str(base / "pilot" / "freeze.json")])
+    printed = capsys.readouterr().out
+    assert code == 3 and tree(base) == before and not out_root.exists()
+    code2, s = day.run_day(day.find_pilots(str(projects)), out_root=str(out_root), dry_run=True, freeze_path=None)
+    assert code2 == 3 and s["watch"]["violations"] == 0 and s["projects"] == []
+    name = os.path.basename(pjs[0]["root"])
+    per = {p["name"]: p for p in s["conditions"]["projects"]}
+    assert per[name]["reasons"] == [day.R_PLAN_UNREADABLE] and per[name]["plans_unreadable"] == [bad]
+    assert not per[name]["met"] and s["conditions"]["reason_kinds"] == [day.R_PLAN_UNREADABLE]
+    assert all(p["met"] and p["reasons"] == [] and p["plans_unreadable"] == [] for n, p in per.items() if n != name)
+    line = next(x for x in printed.splitlines() if x.strip().startswith(name + ":"))
+    assert "사유 plan_unreadable" in line and f"relabel/{bad}.json" in line
+    assert day.R_RELABEL_PENDING not in printed and P_ID not in printed and RS_ID not in printed
+    assert all(seal.seal_status(p["root"]).unsealed_count == 0 for p in pjs)
 
 
 def test_dry_run_never_opens_labels_or_ai_folder(tmp_path, monkeypatch):

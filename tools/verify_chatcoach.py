@@ -52,7 +52,7 @@ VIDEO_CONFIG = os.path.join(DATA_HOME, "config", "verify-video.txt")
 EVIDENCE_PREFIX = "verify-"
 VDATA_KIND = "vdata"                                            # 실행마다의 데이터 폴더: chatcoach_smoke_vdata_<시각>
 DEFAULT_MAX_S = 1200.0
-TIMEOUT_RC, NO_SUMMARY_RC = SW.TIMEOUT_RC, 125
+TIMEOUT_RC, NO_SUMMARY_RC = SW.TIMEOUT_RC, SW.NO_SUMMARY_RC
 
 FEATURES: dict[str, tuple[str, ...]] = {
     "base": (),                                                 # 창 → 열기 → 채팅 → 타임라인 → 영상 → 탐색 → … → 닫기
@@ -434,7 +434,8 @@ def run(args) -> int:
         "features": feats, "gui_smoke_flags": list(dict.fromkeys(flags)),
         "platform": "window" if args.window else "offscreen", "window_size": args.window_size,
         "video_from": vsrc if video else None, "app_git": _git("rev-parse", "--short", "HEAD"),
-        "rc": rc, "child_rc": res.rc, "timed_out": res.timed_out, "final_line": final is not None,
+        "rc": rc, "child_rc": res.child_rc if res.child_rc is not None else res.rc, "timed_out": res.timed_out,
+        "final_line": final is not None,
         "passed": sum(1 for s in steps if s["ok"] and not s["skip"]), "failed": len(failed), "skipped": skipped,
         "failed_steps": failed, "smoke_summary": final, "step_list": steplist,
         "steps": steps,

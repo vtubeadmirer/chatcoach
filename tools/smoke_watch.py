@@ -16,12 +16,15 @@ gui_smoke 를 **자식 프로세스**로 띄우고 바깥에서 본다. 스모�
   스레드가 모두 Suspended 면 덤프는 오지 않는다 — 그것이 곧 '밖에서 멈췄다' 는 증거다.
 - --max-time 을 넘기면 스택을 한 번 요청하고 3초 기다린 뒤 자식 나무를 끝내고 종료 코드 124.
 - 끝나면 요약 한 줄: 종료 코드 · 걸린 시간 · 멈춤 횟수·최장 · 그때 Suspended · 덤프(요청·받음·자동·치명) · 기록 폴더.
+- 자식 출력에 gui_smoke 끝 요약 줄('== N passed, M failed')이 없으면 끝까지 못 간 실행이다(밖에서 멈췄다 끝남 등 —
+  26 5-2 의 4, 08 D-25 6). 자식이 0 으로 끝났어도 종료 코드 125 이고, 요약 한 줄에 '끝 요약 줄 없음 · 자식 rc=…' 을 적는다.
 
 기록 폴더(기본 %LOCALAPPDATA%\\ChatCoachSmoke\\watch\\<시각>-<pid>): watch.log(출력·표본·사건), stack.txt(스택 파일).
 가장 새 20개만 남기고 그보다 오래된 이 스크립트의 기록 폴더는 shutil.rmtree 로 지운다(휴지통 아님, 공용 TEMP 아님).
 자식 출력은 gui_smoke 규칙대로 숫자·통과 여부뿐이고, 스택 파일은 파일·함수 이름·줄 번호뿐이다(채팅 본문·닉네임 없음).
 
-종료 코드: 자식의 종료 코드. 시간 초과로 끝냈으면 124, 자식을 띄우지 못했으면 2.
+종료 코드: 자식의 종료 코드. 시간 초과로 끝냈으면 124, 끝 요약 줄 없이 끝났으면 125, 자식을 띄우지 못했으면 2.
+(자식의 실제 종료 코드는 WatchResult.child_rc 에 남는다.)
 
 멈춤 요약 (23 5-2 의 23번, 08 D-22 2 의 '멈춤 스택 보기')
 
@@ -61,8 +64,10 @@ DEFAULT_MAX_S = 3600.0
 MAX_REQUESTS_PER_STALL = 3
 KEEP_RUNS = 20
 TIMEOUT_RC = 124
+NO_SUMMARY_RC = 125                  # 자식 출력에 gui_smoke 끝 요약 줄이 없음(끝까지 못 감) — verify_chatcoach 와 같은 값
 MOSTLY_SUSPENDED = 0.8               # 스레드의 이 비율 이상이 Suspended 면 '밖에서 멈춤으로 보임'
 RUN_DIR_RE = re.compile(r"\A\d{8}-\d{6}-\d+\Z")
+FINAL_LINE_RE = re.compile(r"\A== \d+ passed, \d+ failed\b")   # gui_smoke Smoke.run 의 끝 요약 줄
 _REQ_DUMP_RE = re.compile(r"\A== 요청 덤프 \d+ (?!끝)")     # gui_smoke.arm_faulthandler 의 시작 줄('… 끝' 줄은 빼고)
 
 
@@ -265,6 +270,8 @@ class WatchResult:
     probe_ok: bool = False
     timed_out: bool = False
     dumps: dict = field(default_factory=dict)        # requested · written · auto · fatal
+    child_rc: int | None = None                      # 자식의 실제 종료 코드(띄우지 못했으면 None)
+    final_line: bool | None = None                   # 끝 요약 줄('== N passed, M failed')을 봤나(None = 보지 않음)
 
     def summary(self) -> str:
         """끝에 찍는 요약 한 줄."""
@@ -282,6 +289,8 @@ class WatchResult:
         susp = (f"Suspended 최대 {self.max_suspended}/{self.max_threads}" if self.probe_ok
                 else "스레드 상태 못 봄")
         rc = f"rc={self.rc}" + (" (시간 초과로 끝냄)" if self.timed_out else "")
+        if self.final_line is False and not self.timed_out:
+            rc += f" (끝 요약 줄 없음 — 끝까지 못 감 · 자식 rc={self.child_rc})"
         return (f"[watch] 끝: {rc} · {self.elapsed_s:.1f}초 · {stall} · {susp} · {dump} · 표본 {self.samples}"
                 f" · 기록 {self.out_dir}")
 
@@ -351,6 +360,7 @@ def watch(cmd: Sequence[str], *, out_dir: str, stack_path: str, stall_s: float =
     next_sample = 0.0
     stall: Stall | None = None
     eof = False
+    final_seen = False                   # gui_smoke 끝 요약 줄을 봤나 — 없으면 끝까지 못 간 실행(125)
 
     def request_dump(why: str) -> None:
         nonlocal requested
@@ -387,6 +397,8 @@ def watch(cmd: Sequence[str], *, out_dir: str, stack_path: str, stall_s: float =
                 echo(line)
                 w("out", line)
                 last_out = now_s()
+                if FINAL_LINE_RE.match(line):
+                    final_seen = True
                 if stall is not None:
                     stall.end_s = last_out
                     w("evt", f"멈춤 끝: {stall.length(last_out):.1f}초")
@@ -435,7 +447,15 @@ def watch(cmd: Sequence[str], *, out_dir: str, stack_path: str, stall_s: float =
     except subprocess.TimeoutExpired:
         kill_tree(proc)
         rc = proc.wait(timeout=10)
-    res.rc = TIMEOUT_RC if res.timed_out else rc
+    res.child_rc, res.final_line = rc, final_seen
+    if res.timed_out:
+        res.rc = TIMEOUT_RC
+    elif not final_seen:
+        # 밖에서 멈췄다가(보안 프로그램) 끝 요약 없이 끝난 자식이 0 을 내도 통과로 보이지 않게 (26 5-2 의 4, D-25 6)
+        res.rc = NO_SUMMARY_RC
+        w("evt", f"끝 요약 줄 없음 — 자식 rc={rc} → {NO_SUMMARY_RC}")
+    else:
+        res.rc = rc
     res.elapsed_s = now_s()
     if stall is not None and stall.end_s is None:
         stall.end_s = res.elapsed_s

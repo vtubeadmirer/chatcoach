@@ -380,9 +380,21 @@ def facts_of(world: World, snap: Snap) -> Facts:
 # ----------------------------------------------------------------------------- 명세: 06 7-1 해제 조건 (oracle)
 ORACLE_RULES = {"unlocked", "no_primary", "no_plan", "plan_unreadable", "plan_pending", "session_plan_unreadable",
                 "sample_verify"}
+#: 명세 규칙 → seal.unseal_conditions 의 사유 코드(seal.UNSEAL_REASON_CODES). 계획 파일이 깨진 것(남은 계획이든 잠긴 재라벨
+#: 세션의 계획이든)은 plan_unreadable 이고, '잠긴 재라벨 세션이 없는 계획' 만 relabel_not_locked 다.
+CODE_OF_RULE = {"unlocked": "unlocked_sessions", "no_primary": "no_primary", "no_plan": "no_relabel_plan",
+                "plan_unreadable": "plan_unreadable", "session_plan_unreadable": "plan_unreadable",
+                "plan_pending": "relabel_not_locked", "sample_verify": "sample_verify"}
+PLAN_CODES = ("plan_unreadable", "relabel_not_locked")      # G1b 가 명세와 견주는 코드
 
 
 def oracle_met(f: Facts, rules=None) -> tuple[bool, list[str]]:
+    """(조건이 되는가, 안 된 사유 문장). 규칙 이름까지 보려면 oracle_why."""
+    why = oracle_why(f, rules)
+    return (not why), [t for _r, t in why]
+
+
+def oracle_why(f: Facts, rules=None) -> list[tuple[str, str]]:
     """06 7-1 과 seal 머리말·comparison_gate 문서에서 따로 쓴 판정. 코드를 부르지 않는다.
     - 라벨링 세션(1차·재라벨: labels/ 파일 이름이나 locks/ 에 있는 것)이 모두 잠김
     - 1차 세션이 하나 이상, 1차마다 그것을 원 세션으로 하는 (읽을 수 있는) 계획이 하나 이상(취소된 계획도 '계획 있음')
@@ -390,18 +402,18 @@ def oracle_met(f: Facts, rules=None) -> tuple[bool, list[str]]:
       재라벨 세션이 있어야 함(취소된 계획은 세지 않음)
     - 잠긴 재라벨 세션이 적은 계획은 (취소됐어도) 읽을 수 있어야 함
     - 잠긴 라벨링 세션의 표본 재현 검증(sample_verify) 이 모두 ok, 매니페스트가 있으면 검증이 비어 있지 않음
-    rules: 변이 자가 시험에서 규칙 하나를 뺀 '틀린 모델' 을 만들 때만 준다."""
+    rules: 변이 자가 시험에서 규칙 하나를 뺀 '틀린 모델' 을 만들 때만 준다. → [(규칙 이름, 사유 문장)]."""
     rules = ORACLE_RULES if rules is None else rules
-    why: list[str] = []
+    why: list[tuple[str, str]] = []
     labeling = {s for s in f.labels | set(f.locks) if kind_of(s) in LABELING_KINDS}
     if "unlocked" in rules:
-        why += [f"잠기지 않은 라벨링 세션 {SID_NAME.get(s, s)}" for s in sorted(labeling) if s not in f.locks]
+        why += [("unlocked", f"잠기지 않은 라벨링 세션 {SID_NAME.get(s, s)}") for s in sorted(labeling) if s not in f.locks]
     primaries = sorted(s for s in labeling if kind_of(s) == vis.PRIMARY)
     if "no_primary" in rules and not primaries:
-        why.append("1차 세션 없음")
+        why.append(("no_primary", "1차 세션 없음"))
     readable = {p: d for p, d in f.plans.items() if d["readable"]}
     if "no_plan" in rules:
-        why += [f"재라벨 계획이 없는 1차 {SID_NAME.get(p, p)}" for p in primaries
+        why += [("no_plan", f"재라벨 계획이 없는 1차 {SID_NAME.get(p, p)}") for p in primaries
                 if not any(d["source"] == p for d in readable.values())]
     refs = {d["plan"] for s, d in f.locks.items() if kind_of(s) in RELABEL_KINDS and isinstance(d["plan"], str)}
     for p, d in sorted(f.plans.items()):
@@ -409,18 +421,19 @@ def oracle_met(f: Facts, rules=None) -> tuple[bool, list[str]]:
             continue
         if not d["readable"]:
             if "plan_unreadable" in rules:
-                why.append(f"읽지 못한 계획 {pname(p)}")
+                why.append(("plan_unreadable", f"읽지 못한 계획 {pname(p)}"))
             continue
         if "plan_pending" in rules and d["source"] in primaries and p not in refs:
-            why.append(f"잠긴 재라벨 세션이 없는 계획 {pname(p)}")
+            why.append(("plan_pending", f"잠긴 재라벨 세션이 없는 계획 {pname(p)}"))
     if "session_plan_unreadable" in rules:
-        why += [f"{SID_NAME.get(s, s)} 의 계획 {pname(d['plan'])} 을 읽지 못함" for s, d in sorted(f.locks.items())
+        why += [("session_plan_unreadable", f"{SID_NAME.get(s, s)} 의 계획 {pname(d['plan'])} 을 읽지 못함")
+                for s, d in sorted(f.locks.items())
                 if kind_of(s) in RELABEL_KINDS and isinstance(d["plan"], str)
                 and not (d["plan"] in f.plans and f.plans[d["plan"]]["readable"])]
     if "sample_verify" in rules:
-        why += [f"{SID_NAME.get(s, s)} 표본 재현 검증 {d['verify']}" for s, d in sorted(f.locks.items())
+        why += [("sample_verify", f"{SID_NAME.get(s, s)} 표본 재현 검증 {d['verify']}") for s, d in sorted(f.locks.items())
                 if kind_of(s) in LABELING_KINDS and d["verify"] != "ok"]
-    return (not why), why
+    return why
 
 
 # ----------------------------------------------------------------------------- 열기 감시
@@ -721,6 +734,10 @@ def _ai_files(f: Facts):
 
 def check_transition(act: Action, S: Facts, T: Facts, outcome, err, spy: Spy, world: World, oracle_rules) -> None:
     """동작 하나의 앞(S)·뒤(T) 디스크와 결과로 본다."""
+    # T0 seal.jsonl 잠금(.unseal.lock)은 동작이 끝나면(성공이든 거절이든) 남지 않는다. 남으면 다음 쓰기가 모두
+    # seal.SEAL_LOCK_TIMEOUT_S 를 기다리다 seal_busy 로 거절돼, 반례 대신 느린 탐색·감시 부모의 '멈춤' 으로만 보인다.
+    if os.path.exists(os.path.join(world.ai_dir, seal.SEAL_LOCK_FILE)):
+        raise Violation("잠금은 남지 않음", f"{act.name} 뒤에 {seal.SEAL_LOCK_FILE} 이 남았습니다")
     # T1 seal.jsonl 은 추가만, 봉인 원본·해제 결과는 지워지거나 바뀌지 않는다(되돌릴 수 없음)
     if not T.seal_raw.startswith(S.seal_raw):
         raise Violation("추가 전용", "seal.jsonl 의 앞부분이 바뀌거나 줄었습니다")
@@ -807,6 +824,15 @@ def _check_state(T: Facts, world: World, model: Model, oracle_rules) -> None:
                         f" 인데 명세 판정은 {met} ({'; '.join(why) or '조건 됨'})")
     if cond.met == bool(cond.reasons):
         raise Violation("해제 관문(06 7-1)", f"met={cond.met} 인데 사유 {len(cond.reasons)}개")
+    # G1b 계획 사유 코드(UnsealConditions.codes)가 명세와 맞음: 사유마다 코드가 하나씩 있고, 계획 코드(plan_unreadable·
+    # relabel_not_locked — 관문의 한 예외 RelabelPendingError 를 seal 이 둘로 가른다)마다 그 코드를 낳는 명세 규칙이 이 상태에서
+    # 걸렸다. 관문은 첫 오류에서 멈추므로 걸린 규칙의 일부만 코드로 나온다 — 거꾸로(걸린 규칙마다 코드)는 보지 않는다.
+    # 계획 파일이 깨진 것을 relabel_not_locked 로 적던 일(2026-10-23 이 검증에서 찾음, 해제 당일에 엉뚱한 것을 찾게 됨)을 잡는다.
+    fired = {CODE_OF_RULE[r] for r, _t in oracle_why(T, oracle_rules)}
+    stray = [c for c in cond.codes if c in PLAN_CODES and c not in fired]
+    if len(cond.codes) != len(cond.reasons) or stray:
+        raise Violation("사유 코드가 명세와 맞음", f"seal.unseal_conditions.codes={cond.codes} (사유 {len(cond.reasons)}개) "
+                        f"가운데 {stray or '개수'} 가 명세에서 걸린 규칙의 코드({sorted(fired) or '없음'})와 맞지 않습니다")
     # G2 seal.jsonl 모양
     if any(r.get("_corrupt") for r in T.recs):
         raise Violation("추가 전용", "seal.jsonl 에 깨진 줄")
@@ -1146,6 +1172,20 @@ def _m_read_before_unseal():
                   lambda recs, run_id: next((r for r in recs if r.get("run_id") == run_id), {"run_sha256": None}))
 
 
+def _m_lock_leak():
+    return _patch(seal, "_lock_release", lambda path, token: None)
+
+
+def _m_unreadable_as_pending():
+    real = seal.unseal_conditions
+
+    def f(*a, **k):
+        c = real(*a, **k)
+        c.codes = ["relabel_not_locked" if x == "plan_unreadable" else x for x in c.codes]
+        return c
+    return _patch(seal, "unseal_conditions", f)
+
+
 MUTANTS = [
     # (이름, 무엇을 깨뜨렸나, 패치, 모델, 'code' 또는 'model')
     ("unlocked_ignored", "unseal_conditions 가 잠기지 않은 라벨링 세션을 보지 않음", _m_unlocked_ignored, "gate_plans", "code"),
@@ -1156,6 +1196,9 @@ MUTANTS = [
     ("attach_reseals", "attach_pairs 가 판정을 새로 봉인함(ai.sealed 한 줄 더)", _m_attach_reseals, "seal", "code"),
     ("guard_off", "seal._guard 가 아무 자리도 막지 않음", _m_guard_off, "seal", "code"),
     ("read_before_unseal", "read_run 이 해제 기록 없이도 runs\\ 를 엶", _m_read_before_unseal, "seal", "code"),
+    ("lock_leak", "seal.jsonl 잠금(.unseal.lock)을 풀지 않음(다음 쓰기가 모두 seal_busy)", _m_lock_leak, "seal", "code"),
+    ("unreadable_as_pending", "깨진 계획 파일을 relabel_not_locked 로 적음(고치기 전 코드)", _m_unreadable_as_pending,
+     "gate_faults", "code"),
     ("oracle_no_unreadable", "틀린 모델: '읽지 못한 계획은 막는다' 규칙을 뺀 명세", None, "gate_faults", "model"),
 ]
 

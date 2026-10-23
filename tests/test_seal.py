@@ -234,6 +234,50 @@ def test_unseal_blocked_when_sample_verify_failed(proj):
     _set_lock(root, SID_A, sample_verify=[{"sample_set_id": "S-0000aaaa-d1-r1", "ok": False, "problems": 1}])
     c = seal.unseal_conditions(root)
     assert not c.met and any("재현 검증" in r for r in c.reasons)
+    assert c.codes == ["sample_verify"] and c.unreadable_plans == []
+
+
+def _torn_plan(root, plan_id):
+    """중간에 잘린 계획 파일(찢어진 쓰기) — relabel.list_plans 가 '읽지 못함(unreadable)' 으로 돌려준다."""
+    with open(relabel.plan_path(root, plan_id), "wb") as f:
+        f.write(b'{"schema": "chatcoach/relabel-plan", "plan_id": "RP-2026')
+
+
+def test_unseal_conditions_corrupt_plan_file_is_plan_unreadable(proj):
+    """계획 파일이 깨져 막히면 사유 코드는 plan_unreadable(+ 계획 ID) — '잠긴 재라벨 세션이 없는 계획'(relabel_not_locked)이
+    아니다(형식 검증 2026-10-23 에서 찾음: 해제 당일에 잠기지 않은 재라벨을 찾으러 가게 됐다). 막는 판정(met)은 그대로다."""
+    from tools import pilot_unseal_day as day
+    root = proj["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    p2 = _ready(root)
+    assert seal.unseal_conditions(root).met
+    bad = "RP-20261021-zz99"
+    _torn_plan(root, bad)                                               # 남은(취소되지 않은) 계획 하나가 깨짐
+    c = seal.unseal_conditions(root)
+    assert not c.met and c.codes == ["plan_unreadable"] and c.unreadable_plans == [bad]
+    assert len(c.reasons) == len(c.codes) and bad in c.reasons[0] and "잠긴 재라벨 세션이 없는" not in c.reasons[0]
+    assert set(c.codes) <= set(seal.UNSEAL_REASON_CODES)
+    with pytest.raises(seal.SealBlockedError) as ei:                     # 해제는 그대로 막힌다
+        seal.unseal(root, e.sha256, by="L01")
+    assert ei.value.reason_codes == ["plan_unreadable"] and ei.value.reasons == c.reasons
+    got = day.check_conditions(root)                                    # 해제 당일 도구도 같은 코드
+    assert got["reasons"] == [day.R_PLAN_UNREADABLE] and got["plans_unreadable"] == [bad] and not got["met"]
+    assert [day.reason_code(r) for r in c.reasons] == [day.R_PLAN_UNREADABLE]   # 코드 없는 옛 결과도 같은 코드
+    # 깨진 계획 옆에 정말로 잠기지 않은 계획이 있으면 둘 다 따로 적는다
+    ps = _make_plan(root, "relabel_same", "L01", "aa02")
+    c = seal.unseal_conditions(root)
+    assert sorted(c.codes) == ["plan_unreadable", "relabel_not_locked"] and c.unreadable_plans == [bad]
+    i = c.codes.index("relabel_not_locked")
+    assert ps["plan_id"] in c.reasons[i] and bad not in c.reasons[i]
+    relabel.cancel_plan(root, ps["plan_id"], reason="합성 시험 취소", cancelled_by="L01", cancelled_machine4="aaaa",
+                        app_version="0.0.1", canceller_kind=None, now=NOW + timedelta(hours=2))
+    # 잠긴 재라벨 세션(B)이 가리키는 계획 파일이 깨져도 plan_unreadable (예전 코드로는 'other')
+    os.remove(relabel.plan_path(root, bad))
+    _torn_plan(root, p2["plan_id"])
+    c = seal.unseal_conditions(root)
+    assert not c.met and "plan_unreadable" in c.codes and "other" not in c.codes
+    assert c.unreadable_plans == [p2["plan_id"]] and len(c.codes) == len(c.reasons)
+    assert day.check_conditions(root)["plans_unreadable"] == [p2["plan_id"]]
 
 
 # ============================================================================== 해제
@@ -308,6 +352,144 @@ def test_only_unseal_opens_sealed_bin():
         if callable(obj) and inspect.isfunction(obj) and name != "unseal":
             assert "builtins.open(binp" not in inspect.getsource(obj)
     assert "SEALED_DIR" not in inspect.getsource(air)
+
+
+# ============================================================================== 동시 해제 (seal.jsonl 잠금, 형식 검증 2026-10-23)
+def _unsealed_lines(proj):
+    return [r for r in _records(proj) if r["kind"] == "ai.unsealed"]
+
+
+def test_concurrent_unseal_threads_write_one_record(proj, monkeypatch):
+    """두 스레드가 같은 봉인을 함께 푼다. 둘 다 '아직 안 풂' 확인과 조건을 지난 뒤에야 쓰기 쪽으로 가게 막아(장벽) 경쟁을
+    꼭 만든다. 잠금이 없으면 ai.unsealed 가 두 줄 생겼다. 이제 한 줄 · runs 파일 하나 · 늦은 쪽은 차례로 두 번 부른 것과 같은
+    AlreadyUnsealedError 이고 봉인 파일도 열지 않는다."""
+    import threading
+    root = proj["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    _ready(root)
+    real = seal.unseal_conditions
+    gate = threading.Barrier(2, timeout=30)
+
+    def cond_then_wait(*a, **k):
+        c = real(*a, **k)
+        gate.wait()                     # 두 스레드 모두 앞쪽 확인을 지났다
+        return c
+    monkeypatch.setattr(seal, "unseal_conditions", cond_then_wait)
+    bins = _spy_open(monkeypatch, os.path.normcase(os.sep + "sealed" + os.sep))
+    done, errs = [], []
+
+    def go():
+        try:
+            done.append(seal.unseal(root, e.sha256, by="L01", now=NOW + timedelta(days=4)))
+        except Exception as x:          # noqa: BLE001 — 무엇이 나오든 아래에서 본다
+            errs.append(x)
+    ts = [threading.Thread(target=go) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(60)
+    assert len(done) == 1 and len(errs) == 1, errs
+    assert type(errs[0]) is seal.AlreadyUnsealedError and errs[0].code == "already_unsealed"
+    assert str(errs[0]) == "이미 해제한 봉인입니다"
+    assert len(_unsealed_lines(proj)) == 1
+    assert os.listdir(os.path.join(ai_dir(proj), "runs")) == [f"{SECRET_RUN}.json"]
+    assert len(bins) == 1                                   # 봉인 파일은 이긴 쪽만 한 번 열었다
+    assert not os.path.exists(os.path.join(ai_dir(proj), seal.SEAL_LOCK_FILE))
+    monkeypatch.setattr(seal, "unseal_conditions", real)
+    with pytest.raises(seal.AlreadyUnsealedError):           # 차례로 한 번 더: 같은 예외
+        seal.unseal(root, e.sha256, by="L01")
+    assert len(_unsealed_lines(proj)) == 1
+
+
+_RACE_CHILD = r'''
+import json, os, sys, time
+sys.path.insert(0, sys.argv[1])
+from app import seal
+root, sha, gate_dir = sys.argv[2:5]
+real = seal.unseal_conditions
+
+
+def cond_then_wait(*a, **k):
+    c = real(*a, **k)
+    open(os.path.join(gate_dir, "ready-%d" % os.getpid()), "w").close()
+    deadline = time.time() + 30
+    while len(os.listdir(gate_dir)) < 2 and time.time() < deadline:      # 두 프로세스가 모두 앞쪽 확인을 지날 때까지
+        time.sleep(0.01)
+    return c
+
+
+seal.unseal_conditions = cond_then_wait
+try:
+    r = seal.unseal(root, sha, by="L01")
+    print(json.dumps({"ok": True, "run_id": r.run_id}))
+except seal.SealError as e:
+    print(json.dumps({"ok": False, "code": seal.error_code(e), "type": type(e).__name__}))
+'''
+
+
+def test_concurrent_unseal_two_processes_write_one_record(proj, tmp_path):
+    """앱과 tools/ai_seal.py(또는 pilot_unseal_day --go)처럼 **두 프로세스**가 같은 봉인을 함께 푼다(둘 다 앞쪽 확인을 지난
+    뒤에 쓰기로 가게 파일로 맞춘다). ai.unsealed 한 줄 · runs\\<run_id>.json 하나 · 늦은 쪽은 already_unsealed."""
+    import subprocess
+    import sys
+    root = proj["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    _ready(root)
+    script = tmp_path / "race_child.py"
+    script.write_text(_RACE_CHILD, encoding="utf-8")
+    gate = tmp_path / "gate"
+    gate.mkdir()
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    ps = [subprocess.Popen([sys.executable, str(script), repo, root, e.sha256, str(gate)], stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, env=env, cwd=str(tmp_path)) for _ in range(2)]
+    outs = []
+    for p in ps:
+        out, err = p.communicate(timeout=120)
+        assert p.returncode == 0, err.decode("utf-8", "replace")[-2000:]
+        outs.append(json.loads(out.decode("utf-8").strip().splitlines()[-1]))
+    assert sorted(o["ok"] for o in outs) == [False, True], outs
+    lost = next(o for o in outs if not o["ok"])
+    assert lost == {"ok": False, "code": "already_unsealed", "type": "AlreadyUnsealedError"}
+    assert len(_unsealed_lines(proj)) == 1
+    assert os.listdir(os.path.join(ai_dir(proj), "runs")) == [f"{SECRET_RUN}.json"]
+    assert not os.path.exists(os.path.join(ai_dir(proj), seal.SEAL_LOCK_FILE))
+    assert seal.read_run(root, SECRET_RUN)["run_id"] == SECRET_RUN
+
+
+def test_seal_writers_wait_for_held_lock_and_break_stale_lock(proj, monkeypatch):
+    """seal.jsonl 에 쓰는 곳(unseal·attach_pairs·짝 봉인·seal_bytes)은 모두 같은 잠금을 기다린다. 다른 프로세스가 쥔(새)
+    잠금이면 기다리다 seal_busy 로 멈추고 아무것도 쓰지 않으며 남의 잠금은 건드리지 않는다. 읽기(seal_status)는 기다리지 않는다.
+    오래된 잠금(비정상 종료로 남음)은 지우고 잡는다."""
+    import time
+    root = proj["root"]
+    e = seal.seal_bytes(root, data_of(result_doc()), source="file", by="L01", now=NOW)
+    _ready(root)
+    lock = os.path.join(ai_dir(proj), seal.SEAL_LOCK_FILE)
+    with open(lock, "wb") as f:
+        f.write(b"other-process\n")
+    monkeypatch.setattr(seal, "SEAL_LOCK_TIMEOUT_S", 0.3)
+    n0 = len(_records(proj))
+    calls = {"unseal": lambda: seal.unseal(root, e.sha256, by="L01"),
+             "attach_pairs": lambda: seal.attach_pairs(root, e.sha256, _pairs(root), by="L01"),
+             "seal_topics_bytes": lambda: seal.seal_topics_bytes(root, data_of(topic_doc()), pair_sha256=e.sha256,
+                                                                 by="L01"),
+             "seal_bytes": lambda: seal.seal_bytes(root, data_of(result_doc("run-other")), source="file", by="L01")}
+    for name, fn in calls.items():
+        with pytest.raises(seal.SealError) as ei:
+            fn()
+        assert ei.value.code == "seal_busy", name
+    assert "seal_busy" in seal.SEAL_ERROR_CODES
+    assert len(_records(proj)) == n0 and not os.path.isdir(os.path.join(ai_dir(proj), "runs"))
+    assert len(os.listdir(os.path.join(ai_dir(proj), "sealed"))) == 1           # 새 봉인 원본도 쓰지 않았다
+    assert open(lock, "rb").read() == b"other-process\n"
+    assert seal.seal_status(root).sealed_count == 1                             # 읽기는 기다리지 않는다
+    old = time.time() - seal.SEAL_LOCK_STALE_S - 60
+    os.utime(lock, (old, old))
+    r = seal.attach_pairs(root, e.sha256, _pairs(root), by="L01", now=NOW + timedelta(days=1))
+    assert r.ok and r.attached == ["topics", "words", "vectors"]
+    assert seal.unseal(root, e.sha256, by="L01", now=NOW + timedelta(days=4)).conditions_met
+    assert not os.path.exists(lock) and len(_unsealed_lines(proj)) == 1
 
 
 # ============================================================================== 명령줄
@@ -906,7 +1088,8 @@ def test_attach_pairs_to_presealed_judgement_after_lock_then_unseal(proj):
     e = seal.seal_bytes(root, data_of(result_doc()), source="engine_link", by="L01", now=NOW)   # 1차 잠금 전
     _ready(root)
     n_before = len(_records(proj))
-    r = seal.attach_pairs(root, e.sha256, _pairs(root), by="L01", source="engine")
+    # now 를 고정한다 — 지금 시각이면 기록의 at(예 '…:30.664')에 '0.6' 이 우연히 들어가 아래 검사가 가끔 틀렸다
+    r = seal.attach_pairs(root, e.sha256, _pairs(root), by="L01", source="engine", now=NOW + timedelta(days=1))
     assert r.ok and r.attached == ["topics", "words", "vectors"] and r.presealed is True and r.after_primary_lock is True
     assert [x["status"] for x in r.rows] == ["attached"] * 3 and all(x["check"] == "valid" for x in r.rows)
     recs = _records(proj)

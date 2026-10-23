@@ -26,7 +26,7 @@ description: "AI 결과 봉인·해제(블라인드 보장, 06 7장)의 형식 �
 .venv\Scripts\python .claude\skills\verify-formal-seal-blind\check_seal_blind.py
 ```
 
-- `--mutants` : 변이 자가 시험(약 10초). 일부러 깨뜨린 코드 7개와 틀린 모델 1개를 모두 '잡음' 해야 한다. 검증을 고친 뒤에는 꼭 돌린다.
+- `--mutants` : 변이 자가 시험(약 15초). 일부러 깨뜨린 코드 9개와 틀린 모델 1개를 모두 '잡음' 해야 한다. 검증을 고친 뒤에는 꼭 돌린다.
 - `--model gate_plans|gate_faults|seal|rerun` : 모델 하나만. `--keep` : 임시 폴더를 남긴다(디스크를 들여다볼 때). `--no-watchdog` : 감시 부모 없이(디버깅).
 - 종료 코드 0 통과 · 1 반례(또는 못 잡은 변이) · 2 준비 실패 또는 **멈춤**. 실제 자료(`chatcoach-data\projects\pilot-*`, `…\ai\pilot-*`)는 열지 않는다.
 - 감시 부모: 검사는 자식 프로세스에서 돌고, 60초 동안 맥박이 없으면 부모가 자식을 끝내고 임시 폴더를 지운 뒤 `멈춤 …` 한 줄과 종료 2 를 낸다. 이것은 검증 결과가 아니다. 이 PC 에서는 파일을 몰아서 만들고 지우는 프로세스를 보안 프로그램(Defender·AhnLab 행위 감시로 보임)이 통째로 멈춰 세운 일이 있다(스레드 모두 `Suspended`, 2026-10-23 — 기본 네 모델에서는 여러 번 돌려 한 번도 없었다). 다시 돌리고, 되풀이되면 사용자에게 알린다. 보안 설정은 바꾸지 않는다.
@@ -71,6 +71,8 @@ description: "AI 결과 봉인·해제(블라인드 보장, 06 7장)의 형식 �
 |---|---|---|
 | 해제 관문(06 7-1) | 실제 `unseal_conditions.met` ≠ `oracle_met` | 두 사유 목록을 06 7-1 과 견준다. 설계가 oracle 편이면 코드 버그. 설계를 일부러 바꿨으면 `oracle_met` 을 고친다(아래 '바꿀 때') |
 | 해제 관문 / 조건이 되면 풀린다(완전성) | 사유 없는 `unseal` 이 조건 안 될 때 풀림 / 될 때 막힘 | 앞쪽은 가장 위험한 버그(블라인드 깨짐). 뒤쪽은 해제 당일을 막는 버그 |
+| 사유 코드가 명세와 맞음 | `unseal_conditions.codes` 가 사유 문장과 개수가 다르거나, 계획 코드(`plan_unreadable`·`relabel_not_locked`)가 그 상태에서 걸린 명세 규칙(`CODE_OF_RULE`)과 다름 | 코드 버그(해제 당일 요약이 엉뚱한 원인을 적음). 막는 판정은 맞을 수 있다 |
+| 잠금은 남지 않음 | 동작 뒤 `<ai>\<project_id>\.unseal.lock` 이 남음 | 코드 버그. 남으면 다음 쓰기가 모두 30초 기다리다 `seal_busy` — 반례 없이 '멈춤' 으로만 보이므로 이 성질로 먼저 잡는다 |
 | 해제는 한 번(멱등) · 되돌릴 수 없음 · 같은 run_id 는 한 번만 풀림 · 추가 전용 | `ai.unsealed` 가 둘, 해제 상태가 사라짐, `runs\`·`sealed\`·`seal.jsonl` 앞부분이 바뀜 | 코드 버그 |
 | 짝 보충은 다시 봉인하지 않음 · 해제 뒤 짝 없음 · 짝 보충은 사전 봉인 여부를 바꾸지 않음 | `attach_pairs`·`seal_topics_bytes` 가 판정 `ai.sealed` 를 늘림, 풀린 뒤 짝을 받음, presealed 가 바뀜 | 코드 버그 |
 | 자리 검사(06 7-3) · 해제 전에는 읽지 않음 · 봉인 원본은 unseal 만 연다 | 라벨링 자리가 seal 함수를 부름, 해제 전 `read_*` 가 `runs\` 를 엶, `unseal` 밖에서 `sealed\*.bin` 을 읽음 | 코드 버그(블라인드 깨짐) |
@@ -84,12 +86,14 @@ description: "AI 결과 봉인·해제(블라인드 보장, 06 7장)의 형식 �
 | 검사 | 덮는 코드 |
 |---|---|
 | visibility 표 | `app/core/visibility.py` `files_to_open`·`show_policy`·`can_show`·`can_reveal` (라벨링 3종 × 모든 단계) |
-| gate_plans · gate_faults (해제 관문, 상태마다 사유 없는 해제 시도) | `app/seal.py` `unseal_conditions`·`_labeling_session_ids`·`_lock_docs`·`unseal`(관문·거절 길) · `app/agreement_report.py` `comparison_gate`·`_comparison_gate`·`pending_relabel_plans`·`_locked_relabel_plan_ids`·`_read_lock_doc` · `app/relabel.py` `create_plan`·`list_plans`·`read_plan`·`is_cancelled`·`read_cancel`·`cancel_plan`·`verify_plan_on_disk`·`source_lock_info` · `app/locking.py` `write_lock_exclusive`·`lock_path`·`dump_lock` |
-| seal (봉인·짝·보충·해제 × 관문 사슬, 상태마다 자리 검사) | `app/seal.py` `seal_bytes`·`seal_topics_bytes`·`_seal_pair_bytes`·`attach_pairs`·`unseal`·`_unseal_pair`·`_append`·`_sealed_record`·`_unsealed_record`·`_pair_record`·`_entry`·`_first_primary_lock_at`·`_is_presealed`·`seal_status`·`unseal_events`·`read_run`·`read_topics`·`_read_pair`·`_unsealed_or_blind`·`_guard`(라벨링·재라벨·출처 판정·분석 자리 × 14 함수, `seal_file`·`read_words`·`read_vectors`·`seal_words_bytes`·`seal_vectors_bytes` 는 자리 검사만) |
+| gate_plans · gate_faults (해제 관문, 상태마다 사유 없는 해제 시도) | `app/seal.py` `unseal_conditions`(met 과 사유 코드 `codes`·`unreadable_plans`)·`_labeling_session_ids`·`_lock_docs`·`unseal`(관문·거절 길) · `app/agreement_report.py` `comparison_gate`·`_comparison_gate`(`PlanUnreadableError`)·`pending_relabel_plans`·`_locked_relabel_plan_ids`·`_read_lock_doc` · `app/relabel.py` `create_plan`·`list_plans`·`read_plan`·`is_cancelled`·`read_cancel`·`cancel_plan`·`verify_plan_on_disk`·`source_lock_info` · `app/locking.py` `write_lock_exclusive`·`lock_path`·`dump_lock` |
+| seal (봉인·짝·보충·해제 × 관문 사슬, 상태마다 자리 검사) | `app/seal.py` `seal_bytes`·`seal_topics_bytes`·`_seal_pair_bytes`·`attach_pairs`·`_attach_pairs_locked`·`unseal`·`_unseal_pair`·`_append`·`_seal_lock`·`_lock_acquire`·`_lock_release`(동작마다 잠금이 남지 않는지만 — 기다림·`seal_busy`·낡은 잠금 지우기는 차례로 도는 모델에 없다)·`_sealed_record`·`_unsealed_record`·`_pair_record`·`_entry`·`_first_primary_lock_at`·`_is_presealed`·`seal_status`·`unseal_events`·`read_run`·`read_topics`·`_read_pair`·`_unsealed_or_blind`·`_guard`(라벨링·재라벨·출처 판정·분석 자리 × 14 함수, `seal_file`·`read_words`·`read_vectors`·`seal_words_bytes`·`seal_vectors_bytes` 는 자리 검사만) |
 | rerun (같은 run_id 의 다른 결과) | `app/seal.py` `unseal` 의 `dup_run_id`·`already_unsealed` 길, `runs\<run_id>.json` 불변 |
 | 지나가며 돌지만 성질을 따로 보지 않음 | `app/ai_results.py` `check_bytes`·`check_doc`·`normalize`·`project_chat_ids`, `app/project.py` `open_project`·`atomic_write`, `app/jsonl.py` |
 
 동작 하나하나는 실제 함수 호출 하나다. 동작 이름과 문장은 `check_seal_blind.py` 의 `SESSION_ACTIONS`·`SEAL_ACTIONS`·`PROBES` 표에 있다.
+
+**동기 커밋 뒤 바뀐 것(2026-10-23, 아직 commit 전 — 동기 커밋은 commit 뒤에 옮긴다):** 아래 '범위와 가정' 의 알려진 것 둘을 고쳤다. `app/seal.py` 에 seal.jsonl 잠금(`_seal_lock`·`_lock_acquire`·`_lock_release`, `seal_bytes`·`_seal_pair_bytes`·`attach_pairs`→`_attach_pairs_locked`·`unseal`·`_append` 가 씀)과 사유 코드(`UnsealConditions.codes`·`unreadable_plans`, `UNSEAL_REASON_CODES`, `SealError` 코드 `seal_busy`), `app/agreement_report.py` `_comparison_gate` 가 잠긴 재라벨 세션의 계획을 못 읽으면 `PlanUnreadableError`(`SampleVerifyError` 하위). 기본 네 모델의 상태·동작 수는 그대로(잠금 파일은 동작 안에서 생겼다 없어진다)이고, 성질 '사유 코드가 명세와 맞음'·'잠금은 남지 않음' 과 변이 `unreadable_as_pending`·`lock_leak` 을 더했다.
 
 ## 범위와 가정 (통과가 덮지 않는 것)
 
@@ -98,8 +102,8 @@ description: "AI 결과 봉인·해제(블라인드 보장, 06 7장)의 형식 �
 - **추상화:** 상태는 추상 열쇠(`Facts.key`)로 합친다. 시각·엔진 칸 같은 세부가 다른 상태는 한 대표에서만 본다. 시계는 동작마다 1분씩 앞으로만 간다(PC 시계 조작은 06 7-4 대로 범위 밖).
 - **잠금 파일:** `ProjectStore.lock_session` 을 돌리지 않는다. 관문이 읽는 칸(session_id·locked_at·relabel_plan_id·sample_manifests·sample_verify)만 가진 잠금을 실제 `locking.write_lock_exclusive` 로 쓴다. 표본 재현 검증 **계산**(store 의 표본 검증, `samples\` 매니페스트, 계획 재현 τ)은 돌리지 않고 결과(ok/false/빔)만 넣는다 — `samples\` 는 비어 있어 계획 재현 검증은 늘 통과한다.
 - **차례로만:** 동작은 하나씩 끝까지 돈다. 두 프로세스가 동시에 `unseal` 하는 경쟁, 쓰다가 꺼짐(runs 는 썼는데 기록 전), `seal.jsonl` 손상은 보지 않는다.
-  - 알려진 것(2026-10-23 손으로 흉내 냄, 검증 밖): 한 프로세스가 `_unsealed_record` 로 '아직 안 풂' 을 본 뒤 `_append` 하기 전에 다른 프로세스가 같은 봉인을 끝까지 풀면 `ai.unsealed` 가 **두 줄** 생긴다(둘 다 조건이 된 뒤라 블라인드는 깨지지 않음, runs 파일 바이트는 같음). `seal.jsonl` 에 잠금이 없다. 앱 화면과 `tools/ai_seal.py`·`pilot_unseal_day.py --go` 를 같이 돌리지 않는 운영 규칙으로 막는다.
-  - 알려진 것: 읽지 못하는 계획 파일은 해제를 바르게 막지만 사유 문장이 '잠긴 재라벨 세션이 없는 계획 RP-…' 로 나와 `pilot_unseal_day.reason_code` 가 `relabel_not_locked` 로 적는다(계획 파일이 깨졌다는 뜻인데 잠기지 않은 재라벨을 찾게 된다).
+  - 고침(2026-10-23, 처음 찾을 때는 손으로 흉내 냄): 한 프로세스가 '아직 안 풂' 을 본 뒤 기록하기 전에 다른 프로세스가 같은 봉인을 끝까지 풀면 `ai.unsealed` 가 두 줄 생기던 일. 이제 seal.jsonl 에 쓰는 곳은 모두 `<ai>\<project_id>\.unseal.lock`(O_EXCL 잠금 파일)을 잡고, `unseal` 은 잠금을 얻은 뒤 기록을 다시 읽어 늦은 쪽이 `AlreadyUnsealedError` 를 낸다. **경쟁 자체는 이 검증이 아니라** `tests/test_seal.py` 의 두 스레드·두 프로세스 시험이 본다(잠금을 끄면 두 줄이 생기는 것을 확인함). 이 검증은 동작마다 잠금이 남지 않는지만 본다.
+  - 고침: 읽지 못하는 계획 파일이 '잠긴 재라벨 세션이 없는 계획 RP-…'(→ `relabel_not_locked`)로 적히던 일. 이제 사유 코드 `plan_unreadable`(계획 ID 는 `unreadable_plans`)이고, 성질 '사유 코드가 명세와 맞음' 이 모든 상태에서 본다.
 - **덮지 않는 코드:** `tools/pilot_unseal_day.py`·`tools/ai_seal.py`(이 둘이 부르는 `seal.unseal_conditions`·`seal.unseal` 은 덮는다), UI(`ui/analysis_view.py`)·store 의 열기 감시(이것은 `tests/test_blind_ai.py` 몫), 짝 words·vectors 의 봉인·해제 본체(같은 `_PairSpec` 길이지만 자리 검사만), 1차 세션 둘 이상, 조정·출처 판정 세션 잠금, 재라벨 3일 대기(`start_gate`).
 - **전사문 `derived\asr*`:** 라벨링 세션은 '절대 안 읽음' 이 아니라 '기본은 안 읽음, 켜면 `view.exposed` 를 남기고 연다'(visibility `TOGGLE`, 03 12-1)이다. 표 검사는 기본으로 열지 않는다는 것만 본다.
 
@@ -108,7 +112,7 @@ description: "AI 결과 봉인·해제(블라인드 보장, 06 7장)의 형식 �
 1. 바뀐 덮는 함수를 읽고, 바뀐 것이 06 7-1~7-3 의 규칙인지(명세가 바뀜), 새 자료·자리·동작인지(모델이 넓어져야 함), 리팩터링인지 가른다.
 2. 규칙이 바뀌었으면 설계 문서를 먼저 고치고 `oracle_met` 과 `ORACLE_RULES` 를 그 문장대로 고친다. 코드를 보고 oracle 을 맞추지 않는다 — oracle 은 설계에서 쓴다.
 3. 새 짝 종류·새 봉인 함수·새 자리 종류면 `SEAL_ACTIONS`·`blind_calls`·`BLIND_KINDS` 에 더하고, 새 세션·계획 모양이면 `SESSION_ACTIONS` 와 모델의 동작 묶음에 더한다. 함수 인자만 바뀌었으면 해당 `_create_plan`·`_lock_session`·`_seal*` 만 고친다.
-4. 기본 실행과 `--mutants` 를 돌린다. 모든 모델 통과 + 변이 8개 모두 '잡음' 이어야 한다. 새 규칙에는 그것을 빼는 변이를 `MUTANTS` 에 하나 더한다(못 잡는 검사는 증명이 아니다).
+4. 기본 실행과 `--mutants` 를 돌린다. 모든 모델 통과 + 변이 10개 모두 '잡음' 이어야 한다. 새 규칙에는 그것을 빼는 변이를 `MUTANTS` 에 하나 더한다(못 잡는 검사는 증명이 아니다).
 5. 실행 시간이 1분을 넘으면 동작을 새 모델로 나눈다(곱이 커지지 않게). 기본 실행을 느리게 두지 않는다.
 6. 위 '적용 기록' 의 동기 커밋과 표를 고친다.
 

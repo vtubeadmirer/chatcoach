@@ -348,7 +348,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if ns.cmd == "check":
             c = seal.unseal_conditions(ns.project)
-            _print({"conditions_met": c.met, "reasons": c.reasons, "warnings": c.warnings,
+            _print({"conditions_met": c.met, "reasons": c.reasons, "reason_codes": c.codes,
+                    "unreadable_plans": c.unreadable_plans, "warnings": c.warnings,
                     "labeling_sessions": len(c.labeling_sessions)})
             return 0 if c.met else 1
         if ns.cmd == "verify":
@@ -373,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
         # --all: 조건을 먼저 본다 — 안 되면(사유도 없으면) 하나도 풀지 않는다
         c = seal.unseal_conditions(ns.project)
         if not c.met and ns.early_reason is None:
-            raise seal.SealBlockedError(c.reasons)
+            raise seal.SealBlockedError(c.reasons, c.codes)
         st = seal.seal_status(ns.project, ai_root=ns.ai_root)
         todo = [e for e in st.entries if e.unsealed_at is None and e.check == "valid"]
         done, errors = [], []
@@ -387,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
                 "skipped_rejected": sum(1 for e in st.entries if e.unsealed_at is None and e.check != "valid")})
         return 0 if not errors else 1
     except seal.SealBlockedError as e:
-        _print({"error": "SealBlockedError", "code": e.code, "reasons": e.reasons})
+        _print({"error": "SealBlockedError", "code": e.code, "reasons": e.reasons, "reason_codes": e.reason_codes})
         return 1
     except seal.SealError as e:
         _print(_err(e))
