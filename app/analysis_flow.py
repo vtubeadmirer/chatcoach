@@ -139,6 +139,7 @@ class SideBySide:
     run: Mapping | None = None
     final_rows: list[dict] = field(default_factory=list)       # 점수와 같은 모집단: set=final 이고 eval.lenient 인 행
     excluded_rows: list[dict] = field(default_factory=list)    # set=final 이지만 평가에서 빠진 행(사유는 row.eval)
+    # AI 확인 큐(08 D-29 3)의 사람 쪽은 final_rows + excluded_rows(= set=final 전부, app.ai_confirm.queue_items)
     scores: dict | None = None
     warnings: list[str] = field(default_factory=list)
     choices: list[RunChoice] = field(default_factory=list)     # 최신이 맨 앞
@@ -506,6 +507,13 @@ def _chat_times_kinds(project_root: str) -> list[dict]:
     return out
 
 
+def chat_times(project_root: str | None) -> dict[str, int]:
+    """chat/messages.jsonl → {chat_id: VOD 시각 ms} (본문·닉네임은 버린다). 나란히 보기가 채팅 색인이 아직 없을 때 쓴다."""
+    if not project_root:
+        return {}
+    return {r["chat_id"]: r["t_ms"] for r in _chat_times_kinds(project_root)}
+
+
 def broadcast_summary(project_root: str, *, reader_kind: str | None, run_id: str | None = None,
                       ai_root: str | None = None, flow: TopicFlowView | None = None) -> BroadcastSummaryData:
     """방송 요약 숫자 (17 6-1 2번): 주제 덩어리별 채팅 수·분당 채팅·반응 수·반응률·질문·놓친 질문.
@@ -566,4 +574,4 @@ __all__ = ["ANALYSIS_MENU_KINDS", "SEAL_KINDS", "VIEW_KINDS", "menu_block_reason
            "short", "RunChoice", "run_choices", "RunLoader", "agreement_gate", "TopicFlowView", "topic_flow",
            "BroadcastSummaryData", "broadcast_summary", "run_versions", "run_order", "default_run_id",
            "order_by_version", "version_key", "version_text", "clean_version", "sealed_text", "VERSION_UNKNOWN_KO",
-           "ENGINE_VERSION_MAX"]
+           "ENGINE_VERSION_MAX", "chat_times"]

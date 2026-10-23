@@ -15,7 +15,16 @@
 - 위: 타임라인(app.ui.timeline.Timeline 의 마커 트랙 두 개 — 위 '엔진', 아래 '사람 최종'). 같은 채팅은 같은 시각(채팅 시각)에
   위아래로 찍는다. 색 = 비교 결과(같음·등급 다름·엔진만·사람만), 속이 빈 표시 = 그쪽 판정이 '반응 미확인'.
 - 왼쪽: 목록(시각 · 엔진 · 사람 · 결과). 필터: 전체 · 다름만(같음 아닌 것) · 놓침만(사람만 = 사람은 반응을 찾았는데 엔진은
-  못 찾거나 평가하지 않음). [이전 다른 곳] [다음 다른 곳] — 단축키 N / Shift+N.
+  못 찾거나 평가하지 않음) · AI 확인 큐(아래). [이전 다른 곳] [다음 다른 곳] — 단축키 N / Shift+N(한글 입력 상태에서도).
+- AI 확인 큐 (FILTER_CONFIRM, 08 D-29 3, 06 6-4 E3): 엔진 direct·likely 인데 사람 최종 세트에 없거나 반응 미확인인 채팅만
+  (규칙은 app.ai_confirm.queue_items 한 곳 — 보고서 e3_confirm 과 같다). 줄에는 시각·엔진 등급·판정(대기/맞음/아님/모름)만.
+  고른 건 아래 [반응 맞음 1] [아님 2] [모름 3] 와 '진행 n / 전체 · 맞음 a · 아님 b · 모름 c'. 단추(또는 숫자 키 — 한글 입력
+  상태에서도 키 위치로 받는다)를 누르면 confirm_writer 로 저장하고 다음 대기 건으로 옮겨 그 건을 고른다. 큐에서 건을 고르면
+  seekRequested 다음에 loopRequested(시작, 끝) — 채팅 시각 − 5초 ~ 발화 끝 + 3초(QueueItem.play_window) — 를 보낸다.
+  담은 창이 그 범위를 반복 재생한다(클릭 0, D-16). 다시 누르면 새 줄(마지막 줄이 이김 — 되돌리기). 판정 읽기·쓰기는 받은
+  confirm_loader(run_id)·confirm_writer(run_id, chat_id, verdict)로만 한다(app.ai_confirm.ConfirmStore — 이 화면은 파일을
+  열지 않는다). 큐의 사람 쪽은 confirm_rows(최종 세트 set = final 행 전부, 평가에서 빠진 행 포함), 없으면 final_rows.
+  판끼리 견주는 중에 이 필터를 고르면 사람 최종과 견주기로 돌아간다.
 - 오른쪽 위: 고른 채팅의 두 판정(등급·확신도·반응 시각·근거)과 증거 7종(엔진: 연결 후보의 present·at_ms, 사람: 연결 발화의
   강·중·약 목록).
 - 오른쪽 아래: 합계 표(비교 결과 건수, 엔진 × 사람 등급 혼동표)와 ai_compare 점수 표.
@@ -49,15 +58,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from dataclasses import replace as _dc_replace
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
                                QPushButton, QScrollArea, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
 from .. import ai_compare
+from .. import ai_confirm as acf
 from .. import analysis_flow as af
 from ..core.rules import EVIDENCE_KEYS, V0_1_STRENGTH
 from ..core.timecode import fmt_display
@@ -77,8 +88,18 @@ STATUS_KO = {SAME: "같음", GRADE_DIFF: "등급 다름", ENGINE_ONLY: "엔진�
 FILTER_ALL = "all"
 FILTER_DIFF = "diff"         # 같음이 아닌 것
 FILTER_MISSED = "missed"     # 사람만 (엔진이 놓친 것)
-FILTERS = (FILTER_ALL, FILTER_DIFF, FILTER_MISSED)
-FILTER_KO = {FILTER_ALL: "전체", FILTER_DIFF: "다름만", FILTER_MISSED: "놓침만"}
+FILTER_CONFIRM = "confirm"   # AI 확인 큐 (사람 라벨 없는 엔진 양성, 08 D-29 3)
+FILTERS = (FILTER_ALL, FILTER_DIFF, FILTER_MISSED, FILTER_CONFIRM)
+FILTER_KO = {FILTER_ALL: "전체", FILTER_DIFF: "다름만", FILTER_MISSED: "놓침만", FILTER_CONFIRM: "AI 확인 큐"}
+
+# AI 확인 큐 판정 단추·키 (app.ai_confirm.VERDICTS)
+CONFIRM_BUTTONS = ((acf.YES, "반응 맞음 1", "1"), (acf.NO, "아님 2", "2"), (acf.UNSURE, "모름 3", "3"))
+CONFIRM_KEYS = {Qt.Key_1: acf.YES, Qt.Key_2: acf.NO, Qt.Key_3: acf.UNSURE}
+CONFIRM_VKEYS = {0x31: acf.YES, 0x32: acf.NO, 0x33: acf.UNSURE,          # 위 숫자 줄
+                 0x61: acf.YES, 0x62: acf.NO, 0x63: acf.UNSURE}          # 숫자 패드
+VERDICT_KO = acf.VERDICT_KO
+VERDICT_COLORS = {None: QColor(255, 213, 79), acf.YES: QColor(102, 187, 106), acf.NO: QColor(239, 83, 80),
+                  acf.UNSURE: QColor(144, 164, 174)}
 
 # 판정 값: 등급 4개 · 'unconfirmed'(반응 미확인) · 'graded'(등급 없이 graded — 가져오기 검사가 막지만 표시는 한다) · 'absent'(없음)
 UNCONFIRMED = "unconfirmed"
@@ -384,11 +405,24 @@ def compare(run: Mapping | None, final_rows: Iterable[Mapping] | None,
     return Comparison(items, summary, conf)
 
 
-def filter_items(items: Sequence[CompareItem], mode: str) -> list[CompareItem]:
+def filter_items(items: Sequence[CompareItem], mode: str,
+                 queue: Sequence[acf.QueueItem] | None = None) -> list[CompareItem]:
+    """필터. FILTER_CONFIRM 이면 queue(app.ai_confirm.queue_items) 차례대로 그 chat_id 의 비교 항목만 — 비교 항목이 없는
+    큐 건(사람 쪽 행이 평가에서 빠져 나란히 보기에는 없는 것 등)은 엔진만(사람 없음) 항목을 만들어 넣는다."""
     if mode == FILTER_DIFF:
         return [it for it in items if it.status != SAME]
     if mode == FILTER_MISSED:
         return [it for it in items if it.status == HUMAN_ONLY]
+    if mode == FILTER_CONFIRM:
+        by = {it.chat_id: it for it in items}
+        out = []
+        for q in queue or ():
+            it = by.get(q.chat_id)
+            if it is None:
+                it = CompareItem(q.chat_id, q.t_ms, ENGINE_ONLY,
+                                 Side(present=True, value=q.grade, reaction_time_ms=q.reaction_time_ms), Side())
+            out.append(it)
+        return out
     return list(items)
 
 
@@ -565,12 +599,17 @@ class AnalysisView(QWidget):
     seekRequested = Signal(int)      # 고른 채팅의 VOD 시각 (플레이어를 옮길 때)
     runChanged = Signal(str, str)    # (판 A run_id, 견줄 것: run_id 또는 '' = 사람 최종)
     titleChanged = Signal(str)       # 창 제목 글이 바뀜 (window_title())
+    loopRequested = Signal(int, int)  # AI 확인 큐에서 고른 건의 반복 재생 범위 (VOD ms, 채팅 − 5초 ~ 발화 끝 + 3초)
+    verdictSaved = Signal(str, str)  # AI 확인 큐 판정을 저장함 (chat_id, yes·no·unsure)
 
     def __init__(self, parent=None, *, run: Mapping | None = None, final_rows: Iterable[Mapping] | None = None,
                  sealed_count: int = 0, scores: Mapping | None = None, chat_times: Mapping[str, int] | None = None,
                  duration_ms: int | None = None, runs: Sequence | None = None,
                  run_loader: Callable[[str], Mapping] | None = None, run_id: str | None = None,
-                 pick_default: bool = True, title_base: str | None = None):
+                 pick_default: bool = True, title_base: str | None = None,
+                 confirm_rows: Iterable[Mapping] | None = None,
+                 confirm_loader: Callable[[str], Mapping] | None = None,
+                 confirm_writer: Callable[[str, str, str], Any] | None = None):
         super().__init__(parent)
         self._title_base: str | None = title_base if isinstance(title_base, str) and title_base else None
         self._title = ""
@@ -589,11 +628,18 @@ class AnalysisView(QWidget):
         self._final_rows: list = []
         self._chat_times: Mapping[str, int] | None = None
         self._duration: int | None = None
+        # AI 확인 큐 (08 D-29 3)
+        self._confirm_rows: list | None = None      # 큐의 사람 쪽(최종 세트 set = final 행 전부). None 이면 final_rows
+        self._confirm_loader: Callable[[str], Mapping] | None = None
+        self._confirm_writer: Callable[[str, str, str], Any] | None = None
+        self._verdicts: dict[str, dict[str, str]] = {}   # run_id → {chat_id: 판정} (읽은 것 + 이 화면에서 저장한 것)
+        self._queue: list[acf.QueueItem] = []
         self._build()
         self._install_shortcuts()
         self.set_data(run=run, final_rows=final_rows, sealed_count=sealed_count, scores=scores,
                       chat_times=chat_times, duration_ms=duration_ms, runs=runs, run_loader=run_loader, run_id=run_id,
-                      pick_default=pick_default)
+                      pick_default=pick_default, confirm_rows=confirm_rows, confirm_loader=confirm_loader,
+                      confirm_writer=confirm_writer)
 
     # ------------------------------------------------------------------ 만들기
     def _build(self) -> None:
@@ -699,6 +745,29 @@ class AnalysisView(QWidget):
         self.detail = QGridLayout()
         self.detail.setHorizontalSpacing(12)
         rl.addLayout(self.detail)
+        # AI 확인 큐 판정 (08 D-29 3) — 'AI 확인 큐' 필터에서만 보인다
+        self.confirm_box = QFrame()
+        self.confirm_box.setFrameShape(QFrame.StyledPanel)
+        cbl = QVBoxLayout(self.confirm_box)
+        cbl.setContentsMargins(6, 4, 6, 4)
+        brow = QHBoxLayout()
+        self.confirm_buttons: dict[str, QPushButton] = {}
+        for verdict, label, _key in CONFIRM_BUTTONS:
+            b = QPushButton(tr(label))
+            b.setMinimumHeight(32)
+            self.confirm_buttons[verdict] = b
+            brow.addWidget(b)
+        self.confirm_buttons[acf.YES].clicked.connect(self._on_yes_clicked)
+        self.confirm_buttons[acf.NO].clicked.connect(self._on_no_clicked)
+        self.confirm_buttons[acf.UNSURE].clicked.connect(self._on_unsure_clicked)
+        cbl.addLayout(brow)
+        self.confirm_progress = QLabel()
+        cbl.addWidget(self.confirm_progress)
+        self.confirm_msg = QLabel()
+        self.confirm_msg.setWordWrap(True)
+        cbl.addWidget(self.confirm_msg)
+        self.confirm_box.setVisible(False)
+        rl.addWidget(self.confirm_box)
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         rl.addWidget(line)
@@ -744,31 +813,83 @@ class AnalysisView(QWidget):
         self.next_diff()
 
     def _install_shortcuts(self) -> None:
-        """N / Shift+N. 작업대·큐·출처 화면이 쓰지 않는 키다. 이 화면 안에 초점이 있을 때만 동작한다."""
+        """N / Shift+N. 작업대·큐·출처 화면이 쓰지 않는 키다. 이 화면 안에 초점이 있을 때만 동작한다.
+        AI 확인 큐의 1·2·3 은 confirm_shortcuts(그 필터에서만 켜짐). 한글 입력 상태에서 글자 키가 'ㅜ' 처럼 들어오거나
+        단축키로 잡히지 않은 키는 이 화면과 자식 칸에 건 eventFilter 가 실제 키 위치(nativeVirtualKey)로 되살린다
+        (app/ui/workbench.py 의 eventFilter 와 같은 방식 — 앱 전체가 아니라 이 화면 안의 칸에만 건다)."""
         self.shortcuts: dict[str, QShortcut] = {}
         for key, fn in (("N", self.next_diff), ("Shift+N", self.prev_diff)):
             s = QShortcut(QKeySequence(key), self)
             s.setContext(Qt.WidgetWithChildrenShortcut)
             s.activated.connect(fn)
             self.shortcuts[key] = s
+        self.confirm_shortcuts: dict[str, QShortcut] = {}
+        for (verdict, _label, key), fn in zip(CONFIRM_BUTTONS, (self._on_yes_clicked, self._on_no_clicked,
+                                                               self._on_unsure_clicked)):
+            s = QShortcut(QKeySequence(key), self)
+            s.setContext(Qt.WidgetWithChildrenShortcut)
+            s.activated.connect(fn)
+            s.setEnabled(False)
+            self.confirm_shortcuts[key] = s
+        self.installEventFilter(self)
+        for w in self.findChildren(QWidget):
+            if w.focusPolicy() != Qt.NoFocus:
+                w.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):  # noqa: N802
+        """단축키로 잡히지 않은 키 누름: 한글 입력 상태의 N(ㅜ)·Shift+N 과 AI 확인 큐의 1·2·3(숫자 줄·숫자 패드)."""
+        try:
+            if ev.type() != QEvent.Type.KeyPress or self._sealed:
+                return False
+            if ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier):
+                return False
+            vk = int(ev.nativeVirtualKey())
+            txt = ev.text()
+            if self.is_confirm_mode():
+                verdict = CONFIRM_KEYS.get(ev.key()) or CONFIRM_VKEYS.get(vk) or \
+                    {"1": acf.YES, "2": acf.NO, "3": acf.UNSURE}.get(txt)
+                if verdict is not None:
+                    self.judge(verdict)
+                    return True
+            if txt and "ㄱ" <= txt[0] <= "ㆎ" and vk == 0x4E:
+                (self.prev_diff if ev.modifiers() & Qt.ShiftModifier else self.next_diff)()
+                return True
+        except Exception:  # noqa: BLE001 — 키 하나 때문에 화면을 멈추지 않는다
+            return False
+        return False
+
+    def _on_yes_clicked(self, _checked: bool = False) -> None:
+        self.judge(acf.YES)
+
+    def _on_no_clicked(self, _checked: bool = False) -> None:
+        self.judge(acf.NO)
+
+    def _on_unsure_clicked(self, _checked: bool = False) -> None:
+        self.judge(acf.UNSURE)
 
     # ------------------------------------------------------------------ 자료
     def set_data(self, *, run: Mapping | None = None, final_rows: Iterable[Mapping] | None = None,
                  sealed_count: int = 0, scores: Mapping | None = None, chat_times: Mapping[str, int] | None = None,
                  duration_ms: int | None = None, runs: Sequence | None = None,
                  run_loader: Callable[[str], Mapping] | None = None, run_id: str | None = None,
-                 pick_default: bool = True) -> None:
+                 pick_default: bool = True, confirm_rows: Iterable[Mapping] | None = None,
+                 confirm_loader: Callable[[str], Mapping] | None = None,
+                 confirm_writer: Callable[[str, str, str], Any] | None = None) -> None:
         """자료를 바꾼다. run 이 None 이면 봉인 상태 — 최종 세트도 계산하지 않고 '봉인됨 n건' 만 보인다.
 
         runs: 해제된 run 고르기 목록(최신 먼저. str · {run_id, label, engine_version} · RunChoice — engine_version
         속성이 있으면 읽는다). run_loader(run_id) → {run, scores} — 다른 판을 고를 때만 부른다. run_id: 넘긴 run 의
         ID(없으면 run['run_id']). pick_default: 고를 수 있으면(run 2개 이상 + run_loader) 판 A 를 default_run_id(판이
         가장 높은 run)로 연다 — 넘긴 run 과 다르면 run_loader 로 한 번 읽고, 못 읽으면 넘긴 run 으로 두고 까닭을 보인다.
-        False 면 넘긴 run 이 판 A 다."""
+        False 면 넘긴 run 이 판 A 다.
+        confirm_rows · confirm_loader(run_id) → {chat_id: 판정} · confirm_writer(run_id, chat_id, verdict): AI 확인 큐
+        (모듈 설명). 없으면 큐는 보이되 판정은 읽지도 저장하지도 않는다."""
         self._current = None
         self._sealed_count = max(0, int(sealed_count)) if _is_int(sealed_count) else 0
         self._loaded = {}
         self._against = None
+        self._verdicts = {}
+        self._queue = []
         if run is None:
             self._sealed = True
             self._cmp = Comparison([], {}, {})
@@ -776,8 +897,10 @@ class AnalysisView(QWidget):
             self._runs, self._loader, self._run_id = [], None, None
             self._versions = {}
             self._final_rows, self._chat_times, self._duration = [], None, None
+            self._confirm_rows, self._confirm_loader, self._confirm_writer = None, None, None
             self._clear_content()
             self._fill_run_bar()
+            self._sync_confirm_box()
             self.sealed_label.setText(tr("봉인됨 {n}건").format(n=self._sealed_count))
             self.stack.setCurrentWidget(self.sealed_page)
             self._sync_title()
@@ -785,6 +908,8 @@ class AnalysisView(QWidget):
             return
         self._sealed = False
         self._final_rows = list(final_rows or [])
+        self._confirm_rows = list(confirm_rows) if confirm_rows is not None else None
+        self._confirm_loader, self._confirm_writer = confirm_loader, confirm_writer
         self._chat_times = chat_times
         self._duration = duration_ms if _is_int(duration_ms) and duration_ms > 0 else None
         rid = run_id if isinstance(run_id, str) and run_id else run.get("run_id") if isinstance(run.get("run_id"), str) else "?"
@@ -1020,6 +1145,7 @@ class AnalysisView(QWidget):
             rid = run.get("run_id") if isinstance(run.get("run_id"), str) else "?"
             self.header.setText(tr("엔진 실행 {rid} · {name} {ver} · 사람 = 최종 세트").format(
                 rid=rid, name=eng.get("name", "?"), ver=eng.get("version", "?")))
+        self._rebuild_queue(None if b is not None else run)
         times = [it.t_ms for it in self._cmp.items if it.t_ms is not None]
         self.timeline.set_duration(self._duration or (max(times, default=0) + 10_000))
         self._fill_legend()
@@ -1114,8 +1240,12 @@ class AnalysisView(QWidget):
 
     # ------------------------------------------------------------------ 필터·목록
     def set_filter(self, mode: str) -> None:
+        """필터를 바꾼다. FILTER_CONFIRM 이면 판끼리 견주던 것을 사람 최종과 견주기로 돌리고, 고른 건이 큐에 없으면
+        첫 대기 건을 골라 그 범위를 반복 재생하게 한다(loopRequested, D-16 클릭 0)."""
         if mode not in FILTERS:
             raise ValueError(f"모르는 필터 {mode!r}")
+        if mode == FILTER_CONFIRM and self.is_runs_mode():
+            self.compare_with(None)
         self._filter = mode
         self._filter_auto = False
         i = self.filter_box.findData(mode)
@@ -1124,17 +1254,31 @@ class AnalysisView(QWidget):
             self.filter_box.setCurrentIndex(i)
             self.filter_box.blockSignals(False)
         self._apply_filter()
+        if self.is_confirm_mode():
+            self.list.setFocus(Qt.OtherFocusReason)        # 숫자 키가 바로 이 화면으로 오게
+
+    def _queue_text(self, it: CompareItem, q: acf.QueueItem) -> str:
+        """큐 줄: 시각 · 엔진 등급 · 판정(대기/맞음/아님/모름)만."""
+        return f"{_t(it.t_ms)}  {tr('엔진')} {tr(VAL_KO.get(q.grade, q.grade))}  [{tr(VERDICT_KO[q.verdict])}]"
 
     def _apply_filter(self) -> None:
         if self._sealed:
             return
         keep = self._current
-        self._visible = filter_items(self._cmp.items, self._filter)
+        confirm = self.is_confirm_mode()
+        self._visible = filter_items(self._cmp.items, self._filter, self._queue if confirm else None)
         self.list.blockSignals(True)
         self.list.clear()
         runs = self.is_runs_mode()
         a, b = (tr("A"), tr("B")) if runs else (tr("엔진"), tr("사람"))
-        for it in self._visible:
+        for i, it in enumerate(self._visible):
+            if confirm:
+                q = self._queue[i]
+                li = QListWidgetItem(self._queue_text(it, q))
+                li.setData(Qt.UserRole, it.chat_id)
+                li.setForeground(VERDICT_COLORS[q.verdict])
+                self.list.addItem(li)
+                continue
             text = f"{_t(it.t_ms)}  {a} {tr(VAL_KO.get(it.engine.value, it.engine.value))} · " \
                    f"{b} {tr(VAL_KO.get(it.human.value, it.human.value))}  [{self.status_ko(it.status)}]"
             if runs and it.ref is not None and it.ref.present:
@@ -1146,11 +1290,129 @@ class AnalysisView(QWidget):
         self.list.blockSignals(False)
         self._fill_timeline()
         self._current = None
+        self._confirm_say("")
         if keep is not None and keep in self._visible:
             self.select_index(self._visible.index(keep))
+        elif confirm and self._queue:
+            j = acf.next_pending_index(self._queue, None)
+            if j is not None:
+                self.select_index(j)                    # 첫 대기 건 → seek·반복 재생
+            else:
+                self._clear_detail()
+                self._confirm_say(tr("모두 판정했습니다 — 고치려면 줄을 고르고 다시 누르세요(새 줄로 남습니다)"))
         else:
             self._clear_detail()
+            if confirm:
+                self._confirm_say(tr("확인할 건이 없습니다 — 엔진 양성이 모두 사람 라벨과 겹칩니다"))
         self.nav_msg.setText(tr("{n}건 보임").format(n=len(self._visible)))
+        self._sync_confirm_box()
+
+    # ------------------------------------------------------------------ AI 확인 큐 (08 D-29 3)
+    def is_confirm_mode(self) -> bool:
+        """'AI 확인 큐' 필터로 사람 최종과 견주는 중인가."""
+        return not self._sealed and self._against is None and self._filter == FILTER_CONFIRM
+
+    def confirm_queue(self) -> list[acf.QueueItem]:
+        """지금 판 A 의 큐(판정 포함, 시각 순). 판끼리 견주는 중이거나 봉인이면 빈 목록."""
+        return list(self._queue)
+
+    def confirm_counts(self) -> dict[str, int]:
+        return acf.counts(self._queue)
+
+    def confirm_progress_text(self) -> str:
+        return self.confirm_progress.text()
+
+    def _rebuild_queue(self, run: Mapping | None) -> None:
+        """AI 확인 큐를 판 A 로 다시 만든다(run None = 판끼리 견주는 중 → 비움). 판정은 confirm_loader 로 판마다 한 번 읽는다."""
+        self._confirm_note = ""
+        if run is None or self._sealed:
+            self._queue = []
+            return
+        rid = self._run_id or ""
+        verdicts = self._verdicts.get(rid)
+        if verdicts is None:
+            verdicts = {}
+            if self._confirm_loader is not None:
+                try:
+                    got = self._confirm_loader(rid)
+                    verdicts = {c: v for c, v in (got or {}).items() if isinstance(c, str) and v in acf.VERDICTS}
+                except Exception as ex:  # noqa: BLE001 — 판정 기록 문제는 까닭만 보이고 큐는 '대기' 로 보인다
+                    code = getattr(ex, "code", None) or type(ex).__name__
+                    self._confirm_note = tr("판정 기록을 읽지 못했습니다 ({0}) — 모두 대기로 보입니다").format(code)
+                    LOG.info("AI 확인 큐: 판정 기록 읽기 실패 (%s)", code)
+            self._verdicts[rid] = verdicts
+        rows = self._confirm_rows if self._confirm_rows is not None else self._final_rows
+        self._queue = acf.queue_items(run, rows, verdicts, self._chat_times)
+
+    _confirm_note = ""
+
+    def _confirm_say(self, text: str) -> None:
+        self.confirm_msg.setText(text or self._confirm_note)
+
+    def _queue_index(self, chat_id: str | None) -> int | None:
+        for i, q in enumerate(self._queue):
+            if q.chat_id == chat_id:
+                return i
+        return None
+
+    def _sync_confirm_box(self) -> None:
+        """판정 칸·숫자 키를 'AI 확인 큐' 에서만 켠다. 진행 줄 = '진행 n / 전체 · 맞음 a · 아님 b · 모름 c'."""
+        on = self.is_confirm_mode()
+        self.confirm_box.setVisible(on)
+        for s in self.confirm_shortcuts.values():
+            s.setEnabled(on)
+        if not on:
+            self.confirm_progress.clear()
+            self.confirm_msg.clear()
+            return
+        self.confirm_progress.setText(acf.progress_text(self._queue))
+        cur = self._queue_index(self._current.chat_id) if self._current is not None else None
+        can = self._confirm_writer is not None and cur is not None
+        for b in self.confirm_buttons.values():
+            b.setEnabled(can)
+        if self._confirm_writer is None and not self.confirm_msg.text():
+            self.confirm_msg.setText(tr("판정을 저장할 수 없습니다 — 분석 세션의 나란히 보기에서 여세요"))
+
+    def judge(self, verdict: str) -> bool:
+        """고른 큐 건에 판정을 저장하고(confirm_writer — 다시 누르면 새 줄) 다음 대기 건으로 옮긴다. 저장했으면 True."""
+        if verdict not in acf.VERDICTS:
+            raise ValueError(f"모르는 판정 {verdict!r}")
+        if not self.is_confirm_mode():
+            return False
+        i = self._queue_index(self._current.chat_id) if self._current is not None else None
+        if i is None:
+            self._confirm_say(tr("판정할 건을 목록에서 고르세요"))
+            return False
+        if self._confirm_writer is None:
+            self._confirm_say(tr("판정을 저장할 수 없습니다 — 분석 세션의 나란히 보기에서 여세요"))
+            return False
+        q = self._queue[i]
+        rid = self._run_id or ""
+        try:
+            self._confirm_writer(rid, q.chat_id, verdict)
+        except Exception as ex:  # noqa: BLE001 — 저장 실패는 까닭만 보이고 그 건에 머문다
+            code = getattr(ex, "code", None) or type(ex).__name__
+            self._confirm_say(tr("판정을 저장하지 못했습니다 ({0})").format(code))
+            LOG.info("AI 확인 큐: 판정 저장 실패 (%s)", code)
+            return False
+        self._verdicts.setdefault(rid, {})[q.chat_id] = verdict
+        self._queue[i] = _dc_replace(q, verdict=verdict)
+        li = self.list.item(i)
+        if li is not None and i < len(self._visible):
+            li.setText(self._queue_text(self._visible[i], self._queue[i]))
+            li.setForeground(VERDICT_COLORS[verdict])
+        c = acf.counts(self._queue)
+        LOG.info("AI 확인 큐: 판정 저장 (%s) · 진행 %d/%d", verdict, c["done"], c["total"])
+        self.verdictSaved.emit(q.chat_id, verdict)
+        j = acf.next_pending_index(self._queue, i)
+        if j is None:
+            self._fill_detail(self._current)
+            self._sync_confirm_box()
+            self._confirm_say(tr("모두 판정했습니다 — 고치려면 줄을 고르고 다시 누르세요(새 줄로 남습니다)"))
+            return True
+        self.select_index(j)
+        self._confirm_say(tr("저장했습니다: {0}").format(tr(VERDICT_KO[verdict])))
+        return True
 
     def _fill_timeline(self) -> None:
         e_marks, h_marks = [], []
@@ -1196,6 +1458,12 @@ class AnalysisView(QWidget):
         self.chatSelected.emit(it.chat_id)
         if it.t_ms is not None:
             self.seekRequested.emit(it.t_ms)
+        if self.is_confirm_mode():
+            qi = self._queue_index(it.chat_id)
+            w = self._queue[qi].play_window() if qi is not None else None
+            if w is not None:
+                self.loopRequested.emit(w[0], w[1])     # 채팅 − 5초 ~ 발화 끝 + 3초 반복 (D-16 클릭 0)
+            self._sync_confirm_box()
 
     def _cur_index(self) -> int | None:
         if self._current is None or self._current not in self._visible:
@@ -1300,7 +1568,10 @@ class AnalysisView(QWidget):
 
     def _fill_detail(self, it: CompareItem) -> None:
         self._take_detail()
-        self.detail_title.setText(f"{_t(it.t_ms)} · {it.chat_id} · {self.status_ko(it.status)}")
+        qi = self._queue_index(it.chat_id) if self.is_confirm_mode() else None
+        tail = tr("AI 확인 큐 · {0}").format(tr(VERDICT_KO[self._queue[qi].verdict])) if qi is not None \
+            else self.status_ko(it.status)
+        self.detail_title.setText(f"{_t(it.t_ms)} · {it.chat_id} · {tail}")
         heads = ("",) + self._side_names() + ((tr("사람 최종"),) if self.is_runs_mode() else ())
         for c, text in enumerate(heads):
             lab = QLabel(f"<b>{text}</b>")

@@ -101,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
                   f"정밀도 {_num(m['binary']['precision'])}  재현율 {_num(m['binary']['recall'])}  F1 {_num(m['binary']['f1'])}  "
                   f"κ {_num(m['binary']['kappa'])}  ({m['status']})")
         print(f"E2 참고 n {r['e2']['lenient']['n']} 재현율 {_num(r['e2']['lenient']['recall'])}  E3 {r['e3']['count']}건")
+        from app import ai_confirm
+        print(ai_confirm.summary_line(r.get("e3_confirm")))
     seg = r.get("segments") or {}
     if seg.get("status") != ac.STATUS_NOT_PROVIDED:
         m = seg["lenient"]

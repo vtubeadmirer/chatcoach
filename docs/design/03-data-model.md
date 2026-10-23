@@ -927,6 +927,8 @@ H-5 품질 관문(20 7장, [25](25-progress-2026-10-23-h3-prep.md) 6-2, 08 D-24 
 
 관문 시작값(20 7-3): 생성 40줄 이상 + 실제 40줄 이상, 방송 2편 이상에서 가짜 탐지율 **0.65 이하** 이고 κ **0.4 이하** 면 통과. 실제 측정은 시범 뒤(D-22 3) 사용자가 판정한다(채팅마다 1클릭).
 
+**AI 확인 큐 판정 — `<ai 루트>\<project_id>\confirm\<run_id>.jsonl`** ([스키마](../../schemas/ai-confirm.schema.json), `app/ai_confirm.py`, 08 D-29 3, [06](06-evaluation-and-agreement.md) 6-4 E3): 해제된 `runs\<run_id>.json` 옆(프로젝트 밖). 한 줄 = `{"v":1,"chat_id","run_id","verdict":"yes"|"no"|"unsure","by":<labeler_id>,"at","app_version","seq"}` — 같은 chat_id 는 마지막 줄이 이긴다. 해제 기록(`ai.unsealed`)이 없는 run 에는 쓰지도 읽지도 않고(파일을 열기 전에 막음), 본문·닉네임·근거 글 칸이 없다. 쓰기는 세션 밖·분석 세션, 읽기는 그 둘과 조정 세션.
+
 ---
 
 ## 7. 저장 형식 결정 — 왜 JSONL 이 원본이고 SQLite 는 파생인가
@@ -1594,6 +1596,7 @@ MVP 에는 4단계(`missed_candidate`) 입력 화면이 없다(v1). 그래서 �
 | [`schemas/scenario.schema.json`](../../schemas/scenario.schema.json) | `scenarios/SC-*.jsonl` 가상 채팅 시나리오 (H-1, [20](20-plan-virtual-chat.md) 3장) |
 | [`schemas/viewer-event.schema.json`](../../schemas/viewer-event.schema.json) | `viewer/<session_id>.jsonl` 한 줄 (6-18, 08 D-20 4) |
 | [`schemas/discern-event.schema.json`](../../schemas/discern-event.schema.json) | `discern/<session_id>.jsonl` 한 줄 — 가상 채팅 가려내기 기록 (6-19, 08 D-24 7 가) |
+| [`schemas/ai-confirm.schema.json`](../../schemas/ai-confirm.schema.json) | `<ai 루트>\<project_id>\confirm\<run_id>.jsonl` 한 줄 — AI 확인 큐 판정 (6장 끝, 08 D-29 3) |
 
 **아직 없는 스키마** — 만들 때 이 묶음에 넣는다. 파일 이름은 가칭이다. (D-12 1: 위 세 스키마는 이미 있어 이 표에서 옮겼다.)
 

@@ -24,7 +24,13 @@
 - [분석 → 봉인 해제…] 같은 자리: 06 7-1 조건을 안내하고, 안 되면 거부(사유를 적으면 앞당겨 열기, conditions_met=false).
   짝 주제 흐름은 같은 해제에서 같이 풀린다.
 - [분석 → 엔진과 나란히 보기] 분석 세션에서만, 해제된 run 이 있을 때만(D-15 7). app/ui/analysis_view 를 모달 아닌 창으로.
-  해제된 run 이 둘 이상이면 판 고르기·판끼리 견주기(17 6-1 4번).
+  해제된 run 이 둘 이상이면 판 고르기·판끼리 견주기(17 6-1 4번). 필터 'AI 확인 큐'(08 D-29 3)의 판정은
+  app.ai_confirm.ConfirmStore 로 <ai 루트>\\<project_id>\\confirm\\<run_id>.jsonl 에 쓰고, 고른 건은 작업대의 확인 재생기로
+  채팅 − 5초 ~ 발화 끝 + 3초를 반복한다(Workbench.loop_range, 창을 닫으면 끔).
+- 한 번에 열기(D-16): main.py --project <폴더> --analysis [--confirm] → open_analysis: 시범 프로젝트는
+  reference_set.pilot_sessions_locked 가 True 일 때만(아니면 상태 줄에 까닭 한 줄, 프로젝트를 열지 않음), 마지막 라벨러의
+  이어 쓸 분석 세션(없으면 새로)으로 열고, 작업대 일이 끝나면 나란히 보기(--confirm 이면 'AI 확인 큐' 필터 · 기본 run ·
+  첫 대기 건 재생). 마지막 라벨러를 모르면 세션 화면을 띄운다.
 - [분석 → 방송 요약] 같은 자리·같은 조건: 주제 덩어리별 채팅·반응률·놓친 질문(app/ui/summary_view, D-01·D-17 8).
   분석 세션 작업대에는 타임라인 위 주제 트랙(app/ui/topic_track)이 같이 보인다(해제 전에는 '봉인됨').
 - [보고 → AI 비교 보고서…] 세션 밖·조정 세션: 해제된 run 으로 app.ai_compare 보고서(프로젝트 밖).
@@ -302,6 +308,14 @@ class MainWindow(QMainWindow):
             return
         if self.maybe_suggest_rollback():
             return                                   # 되돌리기 교체가 시작됨 — 앱이 곧 끝난다
+        if self.start_request:
+            # main.py --project … [--analysis] [--confirm]: 이어서 열기 대신 그 프로젝트를 연다(D-16 한 번에)
+            req, self.start_request = self.start_request, None
+            try:
+                self.run_start_request(req)
+            except Exception:  # noqa: BLE001 — 실패해도 프로젝트 화면은 그대로 쓴다
+                LOG.exception("시작 인자로 프로젝트 열기 실패")
+            return
         if self.resume_on_start and not self.flags:
             try:
                 self.auto_resume()
@@ -680,6 +694,11 @@ class MainWindow(QMainWindow):
         self.m_analysis.aboutToShow.connect(self.update_analysis_actions)
         self.side_view_dialog = None
         self.summary_dialog = None
+        # 한 번에 열기(main.py --project … --analysis [--confirm], D-16): 시작 알림 뒤 open_analysis 가 쓴다
+        self.start_request: dict | None = None
+        self._pending_session = None          # choose_session 이 세션 화면 없이 돌려줄 SessionContext(한 번)
+        self._pending_side: dict | None = None  # 작업대 일이 끝나면 열 나란히 보기 {confirm, show}
+        self.last_open_block: str | None = None  # open_analysis 가 막은 까닭(시험·상태 줄)
 
     # ------------------------------------------------------------------ 훈련 메뉴 (F, 08 D-01·D-16·D-18 6·7·8, 18 6-2)
     def _build_training_menu(self) -> None:
@@ -1886,9 +1905,10 @@ class MainWindow(QMainWindow):
             res.run_id, tr("사전 봉인") if res.presealed else tr("사전 봉인 아님")), 8000)
         return res
 
-    def side_by_side_view(self, *, show: bool = True):
+    def side_by_side_view(self, *, show: bool = True, confirm: bool = False):
         """'분석 → 엔진과 나란히 보기' (08 D-01 방송 분석 모드, 16 8-1 5번). 분석 세션에서 해제된 run 만 연다.
-        해제 전이면 열지 않는다(D-15 7 — 상태 줄에 '봉인됨 n건'). AnalysisView 를 담은 창(모달 아님) 또는 None."""
+        해제 전이면 열지 않는다(D-15 7 — 상태 줄에 '봉인됨 n건'). AnalysisView 를 담은 창(모달 아님) 또는 None.
+        confirm: 필터를 'AI 확인 큐' 로 두고 연다(기본 run · 첫 대기 건 반복 재생, 08 D-29 3)."""
         title = tr("엔진과 나란히 보기")
         why = self.analysis_block_reasons(read_seal=True)["view"]
         if why:
@@ -1918,6 +1938,13 @@ class MainWindow(QMainWindow):
                     if isinstance(c, str)])
             except Exception:  # noqa: BLE001 — 시각이 없으면 최종 세트 행의 시각을 쓴다
                 chat_times = None
+        if chat_times is None:
+            # 채팅 색인이 아직 없으면(작업대가 막 열림) chat/messages.jsonl 의 시각만 — AI 확인 큐의 사람 라벨 없는 건도
+            # 채팅 시각으로 재생하게(본문·닉네임은 버린다)
+            try:
+                chat_times = af.chat_times(self._ai_project_root()) or None
+            except Exception:  # noqa: BLE001
+                chat_times = None
         dur = None
         tl = getattr(wb, "timeline", None)
         if tl is not None and getattr(tl, "duration", 0):
@@ -1930,12 +1957,20 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle(tr("{0} — run {1}").format(title, data.run_id))
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(0, 0, 0, 0)
+        # AI 확인 큐 판정(08 D-29 3): 읽기·쓰기는 ai_confirm 이 한다(해제 기록을 먼저 본다) — 화면은 파일을 열지 않는다
+        from .. import ai_confirm
+        store = ai_confirm.ConfirmStore(self._ai_project_root(), reader_kind=self._reader_kind(),
+                                        by=getattr(wb, "labeler_id", None), app_version=__version__)
         view = AnalysisView(dlg, run=data.run, final_rows=data.final_rows, sealed_count=data.sealed_count,
                             scores=data.scores, chat_times=chat_times, duration_ms=dur,
-                            runs=data.choices, run_loader=data.load_run, run_id=data.run_id, title_base=title)
+                            runs=data.choices, run_loader=data.load_run, run_id=data.run_id, title_base=title,
+                            confirm_rows=list(data.final_rows) + list(data.excluded_rows),
+                            confirm_loader=store.load, confirm_writer=store.save)
         lay.addWidget(view)
         if wb is not None:
             view.seekRequested.connect(wb.seek_vod)
+        view.loopRequested.connect(self._on_confirm_loop)
+        dlg.finished.connect(self._on_side_view_finished)
         avail = self.screen().availableGeometry() if self.screen() is not None else None
         w, h = 1200, 700
         if avail is not None and avail.width() > 0:
@@ -1943,11 +1978,144 @@ class MainWindow(QMainWindow):
         dlg.resize(w, h)
         dlg.view = view
         self.side_view_dialog = dlg
+        if confirm:
+            from .analysis_view import FILTER_CONFIRM
+            view.set_filter(FILTER_CONFIRM)          # 기본 run(판이 가장 높은 run) · 첫 대기 건 → 반복 재생
         if show:
             dlg.show()
+            if confirm:
+                view.list.setFocus()
         if data.warnings:
             self.statusBar().showMessage(tr("나란히 보기: 경고 {0}개 (보고서에서 확인)").format(len(data.warnings)), 6000)
+        elif confirm:
+            self.statusBar().showMessage(tr("AI 확인 큐: {0}").format(view.confirm_progress_text()), 8000)
         return dlg
+
+    def _on_confirm_loop(self, start_ms: int, end_ms: int) -> None:
+        """AI 확인 큐에서 고른 건: 작업대 확인 재생기로 그 범위를 반복한다(영상이 없으면 시작 위치로만, D-16 클릭 0)."""
+        wb = self.workbench
+        if wb is None:
+            return
+        try:
+            wb.loop_range(int(start_ms), int(end_ms))
+        except Exception:  # noqa: BLE001 — 재생 실패로 판정 화면을 막지 않는다
+            LOG.exception("AI 확인 큐 범위 재생 실패")
+
+    def _on_side_view_finished(self, _code: int = 0) -> None:
+        """나란히 보기 창을 닫으면 AI 확인 큐가 건 반복을 끈다."""
+        wb = self.workbench
+        if wb is not None and hasattr(wb, "stop_range_loop"):
+            try:
+                wb.stop_range_loop()
+            except Exception:  # noqa: BLE001
+                LOG.exception("반복 끄기 실패")
+
+    # ---------------------------------------------------------------- 한 번에 열기 (main.py --project … --analysis --confirm)
+    def run_start_request(self, req: dict) -> str | None:
+        """main.py 시작 인자: {project, analysis, confirm}. analysis(또는 confirm)이면 open_analysis, 아니면 보통 열기
+        (세션 화면). 막혔으면 까닭 한 줄."""
+        path = req.get("project")
+        if not isinstance(path, str) or not path:
+            return None
+        if req.get("analysis") or req.get("confirm"):
+            return self.open_analysis(path, confirm=bool(req.get("confirm")))
+        self.project_view.open_path(os.path.abspath(path))
+        return None
+
+    def _block_open(self, why: str) -> str:
+        self.last_open_block = why
+        self.statusBar().showMessage(why, 15_000)
+        LOG.info("한 번에 열기: 막음 (%s)", why[:60])
+        return why
+
+    def analysis_session_for(self, root: str, data: dict | None):
+        """open_analysis 가 쓸 분석 세션: 마지막 라벨러(이 PC 명부에 있어야 함)의 이어 쓸(잠기지 않은) 분석 세션, 없으면 새
+        분석 세션. (SessionContext 또는 None, 까닭). None·까닭 None 이면 라벨러를 몰라 세션 화면으로 간다."""
+        from .. import session as sess
+        last = self.settings.value(LAST_LABELER_KEY, "")
+        if not isinstance(last, str) or not last:
+            return None, None
+        try:
+            sess.check_labeler_id(last)
+            if sess.load_labelers(self.data_root).get(last) is None:
+                return None, None
+            mid = sess.machine_id(self.data_root)
+            sv = sess.survey_project(root, data)
+            mine = sess.existing_sessions(root, last, sv, sess.machine4(mid))
+            open_an = [e for e in mine if e.session_kind == "analysis" and e.resumable]
+            if open_an:
+                return sess.resume_session(open_an[-1].session_id, machine_id_value=mid), None
+            ch = {c.kind: c for c in sess.kind_choices(sv, last, mine, this_machine4=sess.machine4(mid))}
+            an = ch.get("analysis")
+            if an is not None and not an.enabled:
+                return None, tr("분석 세션을 열 수 없습니다: {0}").format(an.reason)
+            return sess.new_session(last, "analysis", data_root=self.data_root, machine_id_value=mid), None
+        except (OSError, ValueError) as ex:
+            return None, tr("분석 세션을 고르지 못했습니다 ({0})").format(type(ex).__name__)
+
+    def open_analysis(self, path: str, *, confirm: bool = False, show: bool = True) -> str | None:
+        """프로젝트를 분석 세션으로 열고(세션 화면 없이), 작업대 일이 끝나면 나란히 보기를 연다 — confirm 이면 'AI 확인 큐'
+        필터(08 D-29 3, D-16 클릭 한 번). 시범 프로젝트는 reference_set.pilot_sessions_locked 가 True(D-27 3: 조건 채운 해제
+        기록이 있으면 True)일 때만 — 아니면 상태 줄에 까닭 한 줄을 보이고 프로젝트를 열지 않는다. 막은 까닭 또는 None."""
+        from .. import reference_set as rs
+        self.last_open_block = None
+        root = os.path.abspath(path)
+        if os.path.basename(root).lower() == "project.json":
+            root = os.path.dirname(root)
+        if not os.path.isfile(os.path.join(root, "project.json")):
+            return self._block_open(tr("AI 확인 큐: 프로젝트 폴더가 아닙니다 (project.json 없음)"))
+        if rs.is_pilot_project(root):
+            ok, _why = rs.pilot_sessions_locked(root)
+            if not ok:
+                return self._block_open(tr("AI 확인 큐: 시범 세션이 모두 잠기고 조건을 채운 해제 기록이 있어야 엽니다 "
+                                           "(08 D-27 3) — 프로젝트를 열지 않았습니다"))
+        from ..project import open_project
+        try:
+            data = open_project(root).data
+        except Exception:  # noqa: BLE001
+            data = None
+        ctx, why = self.analysis_session_for(root, data)
+        if why:
+            return self._block_open(why)
+        self._pending_session = ctx                  # None 이면 세션 화면(라벨러를 모름)
+        self._pending_side = {"confirm": bool(confirm), "show": bool(show)}
+        try:
+            outcome = self.project_view.open_path(root)
+        finally:
+            self._pending_session = None
+        wb = self.workbench
+        if outcome is None or not getattr(outcome, "ok", False) or wb is None:
+            self._pending_side = None
+            return self._block_open(tr("AI 확인 큐: 프로젝트를 열지 못했습니다"))
+        if self._reader_kind() != "analysis":
+            self._pending_side = None
+            return self._block_open(tr("AI 확인 큐는 분석 세션에서 엽니다 — 세션 화면에서 '분석 보기' 를 고르세요"))
+        if wb.jobs_busy():
+            wb.jobsBusyChanged.connect(self._on_jobs_for_side)
+        else:
+            self._open_pending_side()
+        return None
+
+    def _on_jobs_for_side(self, busy: bool) -> None:
+        if busy:
+            return
+        wb = self.workbench
+        if wb is not None:
+            try:
+                wb.jobsBusyChanged.disconnect(self._on_jobs_for_side)
+            except (RuntimeError, TypeError):
+                pass
+        self._open_pending_side()
+
+    def _open_pending_side(self) -> None:
+        req, self._pending_side = self._pending_side, None
+        if req is None or self.workbench is None:
+            return
+        self.update_session_actions()
+        self.update_analysis_actions()
+        dlg = self.side_by_side_view(show=req["show"], confirm=req["confirm"])
+        if dlg is None:
+            self.last_open_block = self.statusBar().currentMessage() or tr("나란히 보기를 열지 못했습니다")
 
     def ai_compare_dialog(self, *, run_id: str | None = None, out_root: str | None = None, gate=None):
         """'보고 → AI 비교 보고서…' (06 6-3~6-7). 세션 밖·조정 세션에서 해제된 run 하나로 보고서를 프로젝트 밖에 쓴다
@@ -2272,6 +2440,10 @@ class MainWindow(QMainWindow):
         '보기 전용으로 다시 열고 훈련'(D-19 3) 중이면 묻지 않고 보기 전용(None)."""
         if getattr(self, "_reopen_view_only", False):
             return None
+        pending, self._pending_session = getattr(self, "_pending_session", None), None
+        if pending is not None:                      # open_analysis 가 고른 분석 세션(세션 화면 없이, D-16)
+            self.settings.setValue(LAST_LABELER_KEY, pending.labeler_id)
+            return pending
         if self._auto_resume:
             ctx = self.auto_resume_session(outcome)
             if ctx is not None:

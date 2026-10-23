@@ -14,9 +14,12 @@ STARTUP_FLAGS = ("--updated", "--update-failed", "--update-blocked", "--rolled-b
 
 
 def parse_args(argv: list[str]) -> dict:
-    """아주 작은 인자 파서. argparse 는 Qt 인자와 섞이면 불편하다."""
+    """아주 작은 인자 파서. argparse 는 Qt 인자와 섞이면 불편하다.
+
+    한 번에 열기(08 D-16·D-29 3): --project <폴더> 는 그 프로젝트를 연다(마지막 작업 이어서 열기 대신). --analysis 는 분석
+    세션으로 열고 나란히 보기를 띄운다. --confirm 은 거기에 'AI 확인 큐' 필터까지(--analysis 를 뜻한다). 없으면 메뉴 길 그대로."""
     a: dict = {"selftest": None, "expect_version": None, "expect_channel": None, "data_dir": None,
-               "update_base_url": None, "flags": set()}
+               "update_base_url": None, "flags": set(), "project": None, "analysis": False, "confirm": False}
     i = 0
     while i < len(argv):
         x = argv[i]
@@ -25,14 +28,27 @@ def parse_args(argv: list[str]) -> dict:
             a["selftest"] = nxt or "selftest.json"
             i += 2 if nxt else 1
             continue
-        if x in ("--expect-version", "--expect-channel", "--data-dir", "--update-base-url") and nxt is not None:
+        if x in ("--expect-version", "--expect-channel", "--data-dir", "--update-base-url", "--project") \
+                and nxt is not None:
             a[x[2:].replace("-", "_")] = nxt
             i += 2
             continue
+        if x in ("--analysis", "--confirm"):
+            a[x[2:]] = True
         if x in STARTUP_FLAGS:
             a["flags"].add(x)
         i += 1
+    if a["confirm"]:
+        a["analysis"] = True
     return a
+
+
+def start_request(args: dict) -> dict | None:
+    """parse_args 결과 → MainWindow.start_request ({project, analysis, confirm}) 또는 None(--project 없음 = 메뉴 길)."""
+    if not args.get("project"):
+        return None
+    return {"project": os.path.abspath(args["project"]), "analysis": bool(args.get("analysis")),
+            "confirm": bool(args.get("confirm"))}
 
 
 def _clean_qt_env(code_dir: str) -> None:
@@ -167,7 +183,10 @@ def main() -> int:
     install_error_dialog(win)
     win.session_backup = True
     # 인자 없이 켠 실행(바탕 화면 바로 가기)만: 마지막 프로젝트·세션을 이어서 연다(설정으로 끌 수 있음, 08 D-16 메모)
-    win.resume_on_start = not args["flags"]
+    req = start_request(args)
+    win.resume_on_start = not args["flags"] and req is None
+    # --project … [--analysis] [--confirm]: 시작 알림 뒤 그 프로젝트를 연다(분석 세션 · AI 확인 큐, 08 D-29 3)
+    win.start_request = req
     win.show()
     LOG.info("창 표시: 시작 후 %.0f ms", (time.perf_counter() - _T0) * 1000)
     win.start_background_backups()

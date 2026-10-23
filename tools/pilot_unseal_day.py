@@ -437,6 +437,15 @@ def report_numbers(rep: Mapping) -> dict:
     e2 = (rep.get("e2") or {}).get("lenient") or {}
     out["e2_lenient"] = {"n": _num(e2.get("n")), "recall": _num(e2.get("recall"))}
     out["e3"] = _num((rep.get("e3") or {}).get("count"))
+    # AI 확인 큐 판정(08 D-29 3, app.ai_confirm.summarize) — 숫자만. 판정 파일이 없으면 verdict_file False('판정 없음')
+    cf = rep.get("e3_confirm") or {}
+    out["e3_confirm"] = {"verdict_file": cf.get("verdict_file") is True, "queue": _num(cf.get("queue")),
+                         "pending": _num(cf.get("pending")), "yes": _num(cf.get("yes")), "no": _num(cf.get("no")),
+                         "unsure": _num(cf.get("unsure")), "human_true": _num(cf.get("human_true")),
+                         "engine_positive": _num(cf.get("engine_positive")),
+                         "precision_confirmed": _num(cf.get("precision_confirmed"))}
+    if cf.get("status") is not None:
+        out["e3_confirm"]["status"] = cf.get("status")
     seg = rep.get("segments") or {}
     sl = seg.get("lenient") or {}
     out["segments"] = {"status": seg.get("status"), "cells": _num(sl.get("cells")),
@@ -626,15 +635,17 @@ def render_markdown(s: Mapping) -> str:
                          f"{' · 오류 ' + ', '.join(cm['agreement_errors']) if cm.get('agreement_errors') else ''}")
         L += ["",
               "| 프로젝트 | 판 | run | 보고서 | 사전 봉인 | E1 참고 n | 정확 | κ_w | 정밀도 | 재현율 | F1 | κ | E1 엄격 n | κ_w | F1 |"
-              " E2 재현율 | E3 | 구간 일치 | 구간 κ |",
-              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+              " E2 재현율 | E3 | 확인 큐 대기·맞음·아님·모름 | 정밀도(확인 뒤) | 구간 일치 | 구간 κ |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        from app import ai_confirm
         for p in s["projects"]:
             for r in (p.get("compare") or {}).get("runs") or ():
                 le, st = r["e1_lenient"], r["e1_strict"]
+                q_cell, prec_cell = ai_confirm.summary_cells(r.get("e3_confirm"))
                 L.append(f"| {p['name']} | {r['label']} | {r['run_id']} | {r['report_id']} | {r['pre_sealed']} | "
                          f"{_f(le['n'])} | {_f(le['exact'])} | {_f(le['kappa_w'])} | {_f(le['precision'])} | "
                          f"{_f(le['recall'])} | {_f(le['f1'])} | {_f(le['kappa'])} | {_f(st['n'])} | {_f(st['kappa_w'])} | "
-                         f"{_f(st['f1'])} | {_f(r['e2_lenient']['recall'])} | {_f(r['e3'])} | "
+                         f"{_f(st['f1'])} | {_f(r['e2_lenient']['recall'])} | {_f(r['e3'])} | {q_cell} | {prec_cell} | "
                          f"{_f(r['segments']['time_agreement'])} | {_f(r['segments']['kappa'])} |")
         L += ["", "## 4. 엔진 판끼리 (다른 곳만, 사람 = 최종 세트)", "",
               "| 프로젝트 | A | B | 둘 다 | 같음 | 등급 다름 | A만 | B만 | 사람이 A | 사람이 B | 둘 다 아님 | 사람 없음 |",

@@ -17,6 +17,10 @@
 - E1 표본: 최종 세트의 반응 가운데 표본 판정(sample_ref 가 있거나 entry = from_sample). 대표 점수.
 - E2 2단계: entry = from_utterance 이고 최종 값이 '반응 있음'(직접·높음). AI 재현율만.
 - E3 미검증: AI 는 반응 있음인데 E1·E2 어디에도 없는 채팅. 건수만(엄격·참고 어디에도 넣지 않음).
+- AI 확인 큐 판정(e3_confirm, 08 D-29 3): 해제 뒤 사람이 앱의 'AI 확인 큐'(나란히 보기 필터)로 판정한 기록
+  (<ai 루트>\\<project_id>\\confirm\\<run_id>.jsonl, app/ai_confirm.py). 큐 = 엔진 direct·likely 인데 사람 최종 세트에 없거나
+  반응 미확인. 대기 p · 맞음 a · 아님 b · 모름 c 와 정밀도(확인 뒤) = (사람 확인된 참 + 맞음) / (엔진 양성 − 모름 − 대기).
+  판정 파일이 없으면 '판정 없음'. 판정은 AI 판정을 본 뒤라 블라인드가 아니다 — 엄격·참고 점수에는 넣지 않는다(06 6-4).
 
 제외 계단표 (06 6-6) — 처음 걸린 사유 하나로만 센다. 행 사유는 최종 세트 행의 eval.excluded_reasons 를 그대로 쓰고,
 보고서 사유 ai_unevaluated(6번)·adjudicated_ambiguous(조정 '모호함으로 남김')·adjudicated_disagreement(두 번 달라 조정 값으로
@@ -39,6 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Sequence
 
+from . import ai_confirm
 from .core import agreement as ag
 from .core import visibility as vis
 from .core.ids import CHAT_ID_RE
@@ -348,13 +353,15 @@ def _human_positive(row: Mapping) -> bool:
 
 
 def compare(run: Mapping, final, *, settings: Mapping | None = None, human_gate=None,
-            strata: Sequence[Mapping] | None = None) -> dict:
+            strata: Sequence[Mapping] | None = None, confirm_verdicts: Mapping | None = None) -> dict:
     """봉인 해제된 run + 최종 세트 → 지표 dict (파일을 열지 않는다).
 
     final: export.build_final_set 결과(FinalSetExport) 또는 같은 모양의 dict {items, segment_items, conflicts}.
     human_gate: 사람 일치도 기준(06 5장) 통과 여부. True·False·None(모름) 또는 {"reaction": …, "segment": …}.
       False 면 그 종류의 엄격 점수는 '보류', None 이면 내되 경고.
     strata: 방송 전체 가중(06 6-4) [{chat_ids: [...], eligible: E_s}]. 주면 n_s = chat_ids 수, 가중치 E_s/n_s.
+    confirm_verdicts: AI 확인 큐 판정 {chat_id: yes·no·unsure}(app.ai_confirm.read_verdicts). None = 판정 파일 없음.
+      결과의 e3_confirm(ai_confirm.summarize — 사람 최종 세트는 set = final 행)에 쓴다.
     """
     info = check_run(run)
     result = run["result"]
@@ -419,6 +426,7 @@ def compare(run: Mapping, final, *, settings: Mapping | None = None, human_gate=
     if not has_rx:
         out["e1"] = out["e2"] = {"status": STATUS_NOT_PROVIDED}
         out["e3"] = {"status": STATUS_NOT_PROVIDED}
+        out["e3_confirm"] = {"status": STATUS_NOT_PROVIDED}
     else:
         ev1 = evaluate(e1, e1_conf)
         p_len, p_str = pairs_of(ev1["lenient"]), pairs_of(ev1["strict"])
@@ -467,6 +475,8 @@ def compare(run: Mapping, final, *, settings: Mapping | None = None, human_gate=
                      "no_human_label": sum(1 for c in e3 if c not in labeled), "ai_positive_total": len(ai_pos)}
         out["ai_reactions"] = {"total": len(ai), "duplicates": dup,
                                "not_in_final_set": sum(1 for c in ai if c not in labeled)}
+        # AI 확인 큐 판정 (08 D-29 3) — 큐·정밀도(확인 뒤) 규칙은 app.ai_confirm 한 곳(앱 화면의 큐와 같다)
+        out["e3_confirm"] = ai_confirm.summarize(result, items, confirm_verdicts)
 
     if "segments" in result:
         a = st["agreement"]
@@ -696,8 +706,19 @@ def build_report(project_root: str, run: Mapping, *, final=None, eval_settings: 
                                        origin_session_ids=origin_session_ids,
                                        reader_kind=reader_kind, ai_root=ai_root)
     fi = final.info if hasattr(final, "info") else dict(final.get("info") or {})
-    body = compare(run, final, settings=eval_settings, human_gate=human_gate, strata=strata)
+    # AI 확인 큐 판정(08 D-29 3): confirm\<run_id>.jsonl — 해제 기록(seal.jsonl)을 먼저 보고 연다. 파일이 없으면 '판정 없음'
+    confirm_warn = None
+    try:
+        verdicts = ai_confirm.read_verdicts(root, info["run_id"], ai_root=ai_root, reader_kind=reader_kind)
+    except (ai_confirm.ConfirmError, OSError) as e:
+        verdicts = None
+        code = getattr(e, "code", None) or type(e).__name__
+        if code != "not_unsealed":             # 해제 기록이 seal.jsonl 에 없는 run(합성 dict) — 판정 파일도 없다
+            confirm_warn = f"AI 확인 큐 판정 파일을 읽지 못했습니다 ({code}) — '판정 없음' 으로 냈습니다"
+    body = compare(run, final, settings=eval_settings, human_gate=human_gate, strata=strata, confirm_verdicts=verdicts)
     warnings = list(fi.get("warnings") or []) + list(body.pop("warnings"))
+    if confirm_warn:
+        warnings.append(confirm_warn)
 
     tgt = result.get("target") or {}
     msha = fi.get("messages_sha256")
@@ -824,6 +845,12 @@ def render_tables(rep: Mapping) -> dict[str, bytes]:
         t["e1_disagreements.csv"] = _csv([["chat_id", "chat_t_ms", "human", "ai", "strict"]]
                                          + [[d["chat_id"], d["chat_t_ms"], d["human"], d["ai"], d["strict"]]
                                             for d in e1["disagreements"]])
+    cf = rep.get("e3_confirm") or {}
+    if cf and cf.get("status") != STATUS_NOT_PROVIDED:
+        # AI 확인 큐 판정 요약 한 줄 (08 D-29 3) — 숫자만
+        keys = ("verdict_file", "engine_positive", "human_true", "human_other", "queue", "pending", "yes", "no",
+                "unsure", "outside_queue", "precision_lower", "precision_confirmed")
+        t["e3_confirm.csv"] = _csv([list(keys), [cf.get(k) for k in keys]])
     seg = rep.get("segments") or {}
     for kind in ("lenient", "strict"):
         cf = (seg.get(kind) or {}).get("confusion")
@@ -940,7 +967,16 @@ def render_markdown(rep: Mapping) -> str:
               + (f" · 재현율 {_f(e2['strict'].get('recall'))}" if e2['strict']['status'] != STATUS_WITHHELD else ""), "",
               "## E3 미검증 (건수만, 'AI 확인 큐')", "",
               f"- AI 반응 있음 가운데 E1·E2 에 없는 채팅 {e3['count']}건 (다른 사람 라벨 있음 {e3['with_other_human_label']}, "
-              f"없음 {e3['no_human_label']})", ""]
+              f"없음 {e3['no_human_label']})"]
+        cf = rep.get("e3_confirm") or {}
+        if cf and cf.get("status") != STATUS_NOT_PROVIDED:
+            L += [f"- {ai_confirm.summary_line(cf)}",
+                  f"- 큐 {cf['queue']}건 (사람 라벨 없음 {cf['queue_no_human_label']} · 사람 반응 미확인 "
+                  f"{cf['queue_human_unconfirmed']}) · 엔진 양성 {cf['engine_positive']} 가운데 사람 확인된 참 "
+                  f"{cf['human_true']} · 사람이 다른 등급 {cf['human_other']} · 정밀도 하한 {_f(cf['precision_lower'])}"
+                  + (f" · 큐 밖 판정 {cf['outside_queue']}건(세지 않음)" if cf.get("outside_queue") else "")
+                  + " — 판정은 AI 판정을 본 뒤라 점수에 넣지 않는다"]
+        L.append("")
     seg = rep.get("segments") or {}
     if seg.get("status") == STATUS_NOT_PROVIDED:
         L += ["## 활동 구간", "", "엔진이 구간을 내지 않았다.", ""]

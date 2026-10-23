@@ -2307,6 +2307,23 @@ class Workbench(QWidget):
         if hasattr(self.timeline, "set_loop_range"):
             self.timeline.set_loop_range(*(w if w else (None, None)))
 
+    def loop_range(self, start_vod_ms: int, end_vod_ms: int) -> bool:
+        """[start, end) VOD 범위를 확인 재생기(ReviewPlayer)로 A-B 반복한다 — 나란히 보기의 AI 확인 큐(08 D-29 3)가
+        고른 건을 클릭 없이 재생할 때. 영상이 없으면 시작 위치로만 옮기고 False."""
+        if self._closed:
+            return False
+        if not self.media_path:
+            self.seek_vod(int(start_vod_ms))
+            return False
+        rv = self._ensure_review()
+        rv.set_window(int(start_vod_ms), int(end_vod_ms))
+        return bool(rv.start_loop())
+
+    def stop_range_loop(self) -> None:
+        """loop_range 로 건 반복을 끈다(나란히 보기 창을 닫을 때). 반복이 꺼져 있으면 아무것도 하지 않는다."""
+        if self.review is not None and self.review.loop_on():
+            self.review.stop_loop()
+
     def speed_up(self) -> None:
         self._ensure_review().speed_up()
         self._say(tr("속도 x{0:g}").format(self.review.speed()))

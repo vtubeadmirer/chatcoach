@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vtubeadmirer/chatcoach/blob/main/schemas/ai-confirm.schema.json",
+  "title": "AI 확인 큐 판정 한 줄 (<ai 루트>\\<project_id>\\confirm\\<run_id>.jsonl)",
+  "description": "06 6-4 E3 'AI 확인 큐'(08 D-29 3): 사람 라벨 없는 엔진 양성(엔진 등급 direct·likely 인데 사람 최종 세트에 없거나 반응 미확인)을 사람이 해제 뒤에 한 건씩 판정한 기록. 파일은 해제된 runs\\<run_id>.json 옆 confirm\\ 아래(시범 프로젝트 폴더 밖), 추가만 하는 JSON Lines(UTF-8, BOM 없음, LF), 한 줄 = 판정 1건. 같은 chat_id 를 다시 판정하면 새 줄을 더하고 마지막 줄이 이긴다. 해제되지 않은 run 에는 쓰지 않는다(app/ai_confirm.py 가 seal.unseal_events 로 먼저 본다). 채팅 본문·닉네임·근거 글은 칸이 없다 — chat_id·run_id·판정·라벨러 ID·시각·판 번호·순번만. 같은 규칙을 app/ai_confirm.py 가 이 스키마로 검사한다(store.LabelSchema 해석기).",
+  "type": "object",
+  "required": ["v", "chat_id", "run_id", "verdict", "by", "at", "app_version", "seq"],
+  "additionalProperties": false,
+  "properties": {
+    "v": {"const": 1, "description": "판정 기록 형식 버전."},
+    "chat_id": {"$ref": "#/$defs/chatId"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", "description": "판정한 엔진 실행(해제된 run). 파일 이름의 run_id 와 같다."},
+    "verdict": {"enum": ["yes", "no", "unsure"], "description": "yes = 반응 맞음(엔진 양성이 참), no = 아님(거짓 양성), unsure = 모름(정밀도 분모에서 뺀다)."},
+    "by": {"$ref": "#/$defs/labelerId", "description": "판정한 사람(분석 세션의 라벨러 ID)."},
+    "at": {"$ref": "#/$defs/datetime", "description": "판정한 벽시계 시각(OS 시간대 오프셋 포함)."},
+    "app_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?$"},
+    "seq": {"type": "integer", "minimum": 1, "description": "파일 안 순번. 1부터 1씩 늘어난다(기록용 — 같은 chat_id 는 파일에서 뒤에 있는 줄이 유효하다)."}
+  },
+  "$defs": {
+    "chatId": {"type": "string", "pattern": "^c[0-9a-f]{20}(_[0-9]+)?$"},
+    "labelerId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]{1,7}$"},
+    "datetime": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?([+-][0-9]{2}:[0-9]{2}|Z)$"}
+  }
+}
