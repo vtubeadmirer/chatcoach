@@ -50,11 +50,16 @@ tools/ai_seal.py·pilot_unseal_day --go 가 같은 봉인을 함께 풀어도 ai
 - 06 7-1 조건: 라벨링 세션(1차·재라벨)이 모두 잠김, 1차마다 재라벨 계획이 있음, 계획된 재라벨이 모두 잠김,
   표본·계획 재현 검증 통과 — 뒤 둘은 app.agreement_report.comparison_gate 가 본다(잠금·계획·매니페스트만 열고
   라벨 파일은 열지 않는다).
+- 재라벨 없이 해제(08 D-26): 명시 플래그 allow_no_relabel 을 줄 때만, relabel\\ 에 계획 파일이 하나도 없으면 사유
+  'no_relabel_plan' 하나를 막지 않는다(UnsealConditions.waived). 1차 없음·잠기지 않음·깨진 계획·표본 검증 실패·남은 재라벨은
+  플래그가 있어도 막는다. 플래그를 준 해제 기록에는 allow_no_relabel = true · relabel('none'|'planned') 칸이 더해진다.
+  명령줄은 tools/pilot_unseal_day.py --allow-no-relabel 하나다(앱 화면에는 없다 — 실수로 앞당겨 풀지 않게).
 - 조건 전에 열려면 사유(early_reason)가 있어야 하고, 기록에 conditions_met = false 와 사유가 남는다(03 6-14).
 - 기록 ai.unsealed: run_id, 그 시점의 잠금 해시 목록 locks[](session_id·잠금 파일 sha256·locked_at), conditions_met,
   reason, 사전 봉인 여부, 보정 판(media_ms 였을 때), 경고 코드, 뺀 chat_id 건수, runs 파일 sha256,
   **engine_version**(해제한 결과의 engine.version — 분석 화면 '판 A 기본' 이 읽는다, 23 5-2 의 10),
-  **pairs**[](짝마다 kind·sha256·file_sha256·error — 짝이 없으면 빈 목록), 짝이 있을 때만 topics·words·vectors 칸.
+  **pairs**[](짝마다 kind·sha256·file_sha256·error — 짝이 없으면 빈 목록), 짝이 있을 때만 topics·words·vectors 칸,
+  allow_no_relabel 을 줬을 때만 allow_no_relabel·relabel 칸.
   seal.jsonl 형식은 하위 호환이다(RECORD_V 1 그대로, 칸만 더함): 옛 기록은 engine_version 없음 = '판 모름', pairs 없음.
 
 해제 전 읽기: read_run·read_topics·read_words·read_vectors 는 ai.unsealed 기록이 없으면 파일을 열기 전에
@@ -274,6 +279,8 @@ class UnsealConditions:
     labeling_sessions: list[str]                 # 본 라벨링 세션 ID
     codes: list[str] = field(default_factory=list)              # reasons 와 같은 차례의 사유 코드(UNSEAL_REASON_CODES)
     unreadable_plans: list[str] = field(default_factory=list)   # 해제를 막은 읽지 못한 계획 ID(plan_unreadable 의 대상)
+    waived: list[str] = field(default_factory=list)             # allow_no_relabel 로 막지 않은 사유 코드(no_relabel_plan 뿐, D-26)
+    plan_files: int = 0                          # relabel\ 의 계획 파일 수(취소·읽지 못함 포함) — 0 이면 재라벨 계획이 아예 없음
 
 
 @dataclass
@@ -1128,10 +1135,16 @@ def _labeling_session_ids(project_root: str, locks) -> list[str]:
 
 
 def unseal_conditions(project_root: str, project_data: Mapping | None = None, *,
-                      reader_kind: str | None = None) -> UnsealConditions:
+                      reader_kind: str | None = None, allow_no_relabel: bool = False) -> UnsealConditions:
     """06 7-1 해제 조건. 잠금·계획·표본 매니페스트만 연다(라벨 파일·봉인 파일은 열지 않는다).
     사유마다 codes 에 코드(UNSEAL_REASON_CODES)를 같은 차례로 둔다. 계획 파일이 깨진 것(plan_unreadable, ID 는
-    unreadable_plans)은 '잠긴 재라벨 세션이 없음'(relabel_not_locked)과 따로 적는다 — 막는 판정(met)은 그대로다."""
+    unreadable_plans)은 '잠긴 재라벨 세션이 없음'(relabel_not_locked)과 따로 적는다 — 막는 판정(met)은 그대로다.
+
+    allow_no_relabel (08 D-26 2·3, 명시 플래그 — 기본 False 면 동작은 전과 같다): relabel\\ 에 계획 파일이 **하나도 없을 때**
+    (취소·읽지 못한 것도 없음) 'no_relabel_plan' 하나만 막지 않는다(waived 에 적는다 — '계획이 없으면 기다릴 재라벨이 없다').
+    그 밖의 사유(unlocked_sessions·no_primary·plan_unreadable·relabel_not_locked·sample_verify·other)는 플래그가 있어도
+    그대로 막는다. 계획 파일이 하나라도 있으면(다른 1차의 계획·깨진 파일·취소된 계획) 풀지 않는다 — 반쯤 계획된 상태는
+    D-26 이 다루지 않으므로 전처럼 막는다."""
     _guard(reader_kind, unseal=True)
     from . import agreement_report as ar
     from . import relabel as relabel_io
@@ -1144,6 +1157,7 @@ def unseal_conditions(project_root: str, project_data: Mapping | None = None, *,
     codes: list[str] = []
     warnings: list[str] = []
     unreadable_plans: list[str] = []
+    waived: list[str] = []
 
     def unmet(code: str, text: str) -> None:
         codes.append(code)
@@ -1158,7 +1172,10 @@ def unseal_conditions(project_root: str, project_data: Mapping | None = None, *,
     planned = {p.source_session_id for p in plans if p.source_session_id}
     no_plan = [s for s in primaries if s not in planned]
     if no_plan:
-        unmet("no_relabel_plan", "재라벨 계획이 없는 1차 세션 " + ", ".join(no_plan))
+        if allow_no_relabel and not plans:
+            waived.append("no_relabel_plan")          # D-26: 계획이 아예 없으면 기다릴 재라벨이 없다(이 사유 하나만)
+        else:
+            unmet("no_relabel_plan", "재라벨 계획이 없는 1차 세션 " + ", ".join(no_plan))
     locked_sids = [s for s in sids if s in locked]
     if locked_sids:
         try:
@@ -1181,18 +1198,21 @@ def unseal_conditions(project_root: str, project_data: Mapping | None = None, *,
         except ar.ReportError as e:
             unmet("other", str(e))
     return UnsealConditions(met=not reasons, reasons=reasons, warnings=warnings, labeling_sessions=sids, codes=codes,
-                            unreadable_plans=unreadable_plans)
+                            unreadable_plans=unreadable_plans, waived=waived, plan_files=len(plans))
 
 
 # ----------------------------------------------------------------------------- 해제 (봉인 파일을 여는 유일한 곳)
 def unseal(project_root: str, sha256: str, *, by: str, now: datetime | None = None, ai_root: str | None = None,
            early_reason: str | None = None, app_version: str | None = None,
-           reader_kind: str | None = None) -> UnsealResult:
+           reader_kind: str | None = None, allow_no_relabel: bool = False) -> UnsealResult:
     """봉인 하나를 푼다. 06 7-1 조건이 되지 않으면 SealBlockedError — early_reason(사유)을 주면 conditions_met=false 로
     기록하고 연다. 순서: 자리 검사 → 기록 확인 → 조건 → **seal.jsonl 잠금 → 기록 다시 확인**(그 사이 다른 프로세스가 풀었으면
     AlreadyUnsealedError — 차례로 두 번 부른 것과 같다) → 봉인 파일 열기(sha256 대조) → 다시 검사(채팅 ID 대조) →
     정규화 → runs\\<run_id>.json 쓰기 → 짝(주제 흐름·전사 낱말·주제 벡터)을 한 번에 풀기 → ai.unsealed 기록
-    (engine_version·pairs 포함) → 잠금 풀기. 조건(오래 걸릴 수 있음)은 잠금 밖에서 본다."""
+    (engine_version·pairs 포함) → 잠금 풀기. 조건(오래 걸릴 수 있음)은 잠금 밖에서 본다.
+    allow_no_relabel: unseal_conditions 에 그대로 넘긴다(D-26 — 계획 파일이 하나도 없으면 no_relabel_plan 만 막지 않음).
+    줄 때만 기록에 allow_no_relabel = true 와 relabel('none' = 계획 파일 0개, 'planned' = 있음)을 더한다. 주지 않으면 기록
+    모양도 전과 같다."""
     _guard(reader_kind, unseal=True)
     if not isinstance(sha256, str) or not SHA256_RE.match(sha256):
         raise SealError("sha256 형식이 아닙니다", code="sha_format")
@@ -1215,7 +1235,9 @@ def unseal(project_root: str, sha256: str, *, by: str, now: datetime | None = No
     if srec.get("check") != "valid":
         raise SealError("받을 때 거부된 결과는 해제하지 않습니다: " + ",".join(srec.get("reject_reasons") or []),
                         code="rejected_at_seal")
-    cond = unseal_conditions(root, proj.data, reader_kind=reader_kind)
+    cond = unseal_conditions(root, proj.data, reader_kind=reader_kind, allow_no_relabel=bool(allow_no_relabel))
+    flag_fields = ({"allow_no_relabel": True, "relabel": "none" if cond.plan_files == 0 else "planned"}
+                   if allow_no_relabel else {})
     if not cond.met and early_reason is None:
         raise SealBlockedError(cond.reasons, cond.codes)
     # 채팅 ID 대조가 안 되면(채팅 파일이 없거나 한 줄도 읽지 못함) 정규화가 판정을 모두 '없는 chat_id' 로 빼고,
@@ -1289,7 +1311,7 @@ def unseal(project_root: str, sha256: str, *, by: str, now: datetime | None = No
             "warnings": list(chk.warnings), "gate_warnings": len(cond.warnings),
             "dropped_unknown": info.dropped_unknown, "dropped_duplicate": info.dropped_duplicate,
             "run_sha256": hashlib.sha256(run_bytes).hexdigest(), "engine_version": engine_version, "pairs": pairs,
-            **extra,
+            **flag_fields, **extra,
         })
     return UnsealResult(sha256=sha256, run_id=run_id, run_path=run_path, conditions_met=cond.met,
                         presealed=presealed, record=rec)

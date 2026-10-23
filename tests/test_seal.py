@@ -323,6 +323,112 @@ def test_unseal_early_needs_reason_and_records_conditions_not_met(proj):
     assert r.conditions_met is False and r.record["reason"] == "합성 시험 사유" and r.record["unmet"]
 
 
+# ============================================================================== 재라벨 없이 해제 (08 D-26)
+def _primary_only(proj):
+    """합성 프로젝트에서 재라벨 세션 B 의 라벨 파일을 지워 1차 A 하나만 남긴다(D-26 의 '1편 · 1인 · 재라벨 없음' 모양)."""
+    root = proj["root"]
+    os.remove(os.path.join(root, "labels", f"{SID_B}.{project.machine4_of(MID_1)}.jsonl"))
+    return root
+
+
+def test_unseal_conditions_allow_no_relabel_waives_only_no_relabel_plan(proj):
+    """플래그는 '계획 파일이 하나도 없을 때의 no_relabel_plan' 하나만 막지 않는다. 1차 없음·잠기지 않음·표본 검증 실패·
+    깨진 계획·남은 재라벨은 플래그가 있어도 막는다. 플래그가 없으면 전과 같다."""
+    root = _primary_only(proj)
+    a_name = f"{SID_A}.{project.machine4_of(MID_1)}.jsonl"
+    a_path = os.path.join(root, "labels", a_name)
+    with open(a_path, "rb") as f:
+        a_bytes = f.read()
+    # 1차 없음: 플래그로 풀리지 않는다
+    os.remove(a_path)
+    for flag in (False, True):
+        c = seal.unseal_conditions(root, allow_no_relabel=flag)
+        assert not c.met and c.codes == ["no_primary"] and c.waived == [] and c.plan_files == 0
+    with open(a_path, "wb") as f:
+        f.write(a_bytes)
+    # 1차가 잠기지 않음: 플래그가 있어도 unlocked_sessions 로 막는다(no_relabel_plan 만 빠진다)
+    c0 = seal.unseal_conditions(root)
+    assert not c0.met and c0.codes == ["unlocked_sessions", "no_relabel_plan"] and c0.waived == []
+    c1 = seal.unseal_conditions(root, allow_no_relabel=True)
+    assert not c1.met and c1.codes == ["unlocked_sessions"] and c1.waived == ["no_relabel_plan"]
+    assert len(c1.reasons) == len(c1.codes) and SID_A in c1.reasons[0]
+    # 1차 잠김 · 계획 없음: 플래그 없으면 전처럼 no_relabel_plan, 있으면 조건 충족
+    _lock(root, SID_A, MID_1)
+    c0 = seal.unseal_conditions(root)
+    assert not c0.met and c0.codes == ["no_relabel_plan"] and c0.waived == [] and c0.plan_files == 0
+    c1 = seal.unseal_conditions(root, allow_no_relabel=True)
+    assert c1.met and c1.codes == [] and c1.reasons == [] and c1.waived == ["no_relabel_plan"] and c1.plan_files == 0
+    assert c1.labeling_sessions == [SID_A]
+    # 표본 재현 검증 실패는 플래그가 있어도 막는다
+    _set_lock(root, SID_A, sample_verify=[{"sample_set_id": "S-0000aaaa-d1-r1", "ok": False, "problems": 1}])
+    c1 = seal.unseal_conditions(root, allow_no_relabel=True)
+    assert not c1.met and c1.codes == ["sample_verify"] and c1.waived == ["no_relabel_plan"]
+    _set_lock(root, SID_A, sample_verify=[])
+    # 깨진 계획 파일이 하나라도 있으면 '계획이 아예 없음' 이 아니다 — 아무것도 풀지 않는다
+    bad = "RP-20261021-zz99"
+    os.makedirs(os.path.dirname(relabel.plan_path(root, bad)), exist_ok=True)
+    _torn_plan(root, bad)
+    c1 = seal.unseal_conditions(root, allow_no_relabel=True)
+    assert not c1.met and c1.waived == [] and c1.plan_files == 1
+    assert sorted(c1.codes) == ["no_relabel_plan", "plan_unreadable"] and c1.unreadable_plans == [bad]
+    os.remove(relabel.plan_path(root, bad))
+    # 계획이 있는데 재라벨이 잠기지 않음(남은 재라벨)도 그대로 막는다
+    ps = _make_plan(root, "relabel_same", "L01", "aa02")
+    for flag in (False, True):
+        c = seal.unseal_conditions(root, allow_no_relabel=flag)
+        assert not c.met and c.codes == ["relabel_not_locked"] and c.waived == [] and c.plan_files == 1
+        assert ps["plan_id"] in c.reasons[0]
+    # 취소된 계획만 남아도 계획 파일은 있다 — 이때는 플래그 없이도 조건이 된다(전과 같음, 플래그가 바꾸지 않음)
+    relabel.cancel_plan(root, ps["plan_id"], reason="합성 시험 취소", cancelled_by="L01", cancelled_machine4="aaaa",
+                        app_version="0.0.1", canceller_kind=None, now=NOW + timedelta(hours=2))
+    for flag in (False, True):
+        c = seal.unseal_conditions(root, allow_no_relabel=flag)
+        assert c.met and c.waived == [] and c.plan_files == 1
+
+
+def test_unseal_allow_no_relabel_records_relabel_none_and_flagless_unchanged(proj):
+    root = _primary_only(proj)
+    e1 = seal.seal_bytes(root, data_of(result_doc("run-noflag-1")), source="engine_link", by="L01", now=NOW)
+    e2 = seal.seal_bytes(root, data_of(result_doc("run-noflag-2")), source="engine_link", by="L01", now=NOW)
+    # 1차가 잠기기 전: 플래그가 있어도 막는다(사유 코드에 no_relabel_plan 은 없음)
+    with pytest.raises(seal.SealBlockedError) as ei:
+        seal.unseal(root, e1.sha256, by="L01", allow_no_relabel=True)
+    assert ei.value.reason_codes == ["unlocked_sessions"]
+    _lock(root, SID_A, MID_1)
+    # 플래그 없이는 전처럼 막는다 — 봉인 파일도 열지 않고 아무것도 쓰지 않는다
+    sj = os.path.join(ai_dir(proj), "seal.jsonl")
+    before = open(sj, "rb").read()
+    with pytest.raises(seal.SealBlockedError) as ei:
+        seal.unseal(root, e1.sha256, by="L01")
+    assert ei.value.reason_codes == ["no_relabel_plan"] and open(sj, "rb").read() == before
+    assert seal.seal_status(root).unsealed_count == 0
+    # 플래그를 주면 풀리고 기록에 relabel = none · allow_no_relabel = true
+    r = seal.unseal(root, e1.sha256, by="L01", now=NOW + timedelta(days=1), allow_no_relabel=True)
+    rec = r.record
+    assert r.conditions_met is True and rec["conditions_met"] is True and rec["reason"] is None and rec["unmet"] == []
+    assert rec["allow_no_relabel"] is True and rec["relabel"] == "none"
+    assert [x["session_id"] for x in rec["locks"]] == [SID_A] and rec["presealed"] is True
+    line = json.loads(open(sj, encoding="utf-8").read().splitlines()[-1])
+    assert line["kind"] == "ai.unsealed" and line["relabel"] == "none" and line["allow_no_relabel"] is True
+    assert seal.read_run(root, "run-noflag-1")["run_id"] == "run-noflag-1"
+    # 두 번째 봉인은 플래그 없이 여전히 막힌다(플래그는 한 번 준 것이 남지 않는다)
+    with pytest.raises(seal.SealBlockedError):
+        seal.unseal(root, e2.sha256, by="L01")
+
+
+def test_unseal_flag_on_planned_project_records_planned_and_flagless_record_shape_unchanged(proj):
+    root = proj["root"]
+    e1 = seal.seal_bytes(root, data_of(result_doc("run-planned-1")), source="file", by="L01", now=NOW)
+    e2 = seal.seal_bytes(root, data_of(result_doc("run-planned-2")), source="file", by="L01", now=NOW)
+    _ready(root)
+    r1 = seal.unseal(root, e1.sha256, by="L01", now=NOW + timedelta(days=4))
+    assert "allow_no_relabel" not in r1.record and "relabel" not in r1.record        # 플래그 없음 = 기록 모양 그대로
+    c = seal.unseal_conditions(root, allow_no_relabel=True)
+    assert c.met and c.waived == [] and c.plan_files == 1                           # 계획이 있으면 플래그는 할 일이 없다
+    r2 = seal.unseal(root, e2.sha256, by="L01", now=NOW + timedelta(days=4), allow_no_relabel=True)
+    assert r2.record["allow_no_relabel"] is True and r2.record["relabel"] == "planned" and r2.conditions_met
+
+
 def test_unseal_detects_tampered_bin_and_run_id_clash(proj):
     root = proj["root"]
     _ready(root)

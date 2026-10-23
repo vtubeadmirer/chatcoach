@@ -24,6 +24,18 @@
   7. 요약: <보고서 폴더>\\pilot-unseal-<YYYYMMDD>\\ 에 summary.md · summary.json(**숫자·코드·ID 만**), calib-*.json,
      ai-compare\\<project_id>\\<report_id>\\(AI 비교 보고서 — 06 6-7 규칙).
 
+재라벨 없이 해제 (08 D-26 — 시범은 1편, 재라벨 없음)
+  --allow-no-relabel: 조건 확인·해제에 seal.unseal_conditions(allow_no_relabel=True)·seal.unseal(allow_no_relabel=True) 를 쓴다.
+    relabel\\ 에 계획 파일이 하나도 없는 편은 사유 no_relabel_plan 하나만 막지 않는다('계획이 없으면 기다릴 재라벨이 없다').
+    1차 없음·잠기지 않음·깨진 계획·표본 검증 실패·남은 재라벨은 전처럼 막는다. 플래그가 없으면 전과 똑같다(no_relabel_plan
+    이면 종료 3). 해제 기록에 allow_no_relabel = true · relabel = 'none' 이 남고, 요약 머리에 '사람 일치도 없음(1인·재라벨
+    없음)' 을 적는다. 재라벨 세션이 없는 편은 4 의 일치도 보고서를 만들지 않고 건너뛴다(오류 아님 — agreement
+    'skipped_no_relabel', comparison_gate 를 일치도 보고서 쪽으로는 부르지 않음). AI 비교·판끼리·보정은 1차 세션 하나의
+    최종 세트로 그대로 한다.
+  --only <폴더 이름>(여러 번): 그 시범 프로젝트만 본다. 이름이 시범 프로젝트에 없으면 아무것도 열기 전에 종료 2. 고르지 않은
+    편은 조건도 보지 않고 풀지도 않으며(열기 감시가 그 폴더 열기를 막는다), 표준 출력·summary.md 에 'skipped (not selected)'
+    로 적는다. --only 를 주고 --expect 를 주지 않으면 기대 수 = 고른 수. 주지 않으면 전과 같다(기대 3).
+
 기본은 dry-run 이다: --go 를 주지 않으면 1·2 만 하고 아무것도 풀지도 쓰지도 않는다(--dry-run 은 그 뜻을 밝혀 적는 것).
   되돌릴 수 없는 실제 해제는 --go 를 줄 때만 — 해제 당일 차례는 'dry-run → 사용자 세션의 시작 확인 → --go'(D-17 4).
 실제 데이터 폴더(chatcoach-data\\…)를 가리키려면 --real 이 있어야 한다. 기본 폴더는 없다: --projects-root·--project
@@ -43,10 +55,13 @@
   python tools/pilot_unseal_day.py --projects-root <합성 data\\projects> --go         (리허설 해제)
   python tools/pilot_unseal_day.py --real                  (해제 당일: 세션이 모두 잠긴 뒤 조건만 — dry-run)
   python tools/pilot_unseal_day.py --real --go             (해제 당일: 사용자 세션이 '시작' 을 확인한 뒤)
-  그 밖: [--project <폴더> ...] [--expect 3] [--ai-root <폴더>] [--out-root <data\\reports>] [--by L01]
-         [--date YYYYMMDD] [--quick] [--json] [--freeze <freeze.json>]
+  python tools/pilot_unseal_day.py --real --allow-no-relabel --only <pilot 폴더 이름>        (D-26: 1편·재라벨 없음, dry-run)
+  python tools/pilot_unseal_day.py --real --allow-no-relabel --only <pilot 폴더 이름> --go   (D-26: '시작' 확인 뒤)
+  그 밖: [--project <폴더> ...] [--only <이름> ...] [--expect 3] [--ai-root <폴더>] [--out-root <data\\reports>] [--by L01]
+         [--date YYYYMMDD] [--quick] [--json] [--freeze <freeze.json>] [--allow-no-relabel]
 종료 코드: 0 정상(dry-run 이면 조건 충족) · 3 조건 미충족(아무것도 풀지 않음) · 1 실패(감시 위반·해제 실패·단계 오류 —
-           요약은 남김) · 2 입력 오류(실제 폴더인데 --real 없음 · 폴더를 안 줌 · --go 와 --dry-run 을 같이 줌)
+           요약은 남김) · 2 입력 오류(실제 폴더인데 --real 없음 · 폴더를 안 줌 · --go 와 --dry-run 을 같이 줌 ·
+           --only 이름이 시범 프로젝트에 없음)
 """
 from __future__ import annotations
 
@@ -99,6 +114,10 @@ R_PLAN_UNREADABLE = "plan_unreadable"     # 계획 파일이 깨짐 — 잠기�
 R_SAMPLE_VERIFY = "sample_verify"
 R_OTHER = "other"
 R_WATCH = "open_watch"
+#: --allow-no-relabel 일 때 요약 머리의 줄(08 D-26 2) — 사람끼리 일치도는 재지 못했다는 것을 숫자보다 먼저 밝힌다
+NO_HUMAN_AGREEMENT = "사람 일치도 없음(1인·재라벨 없음)"
+SKIPPED_TEXT = "skipped (not selected)"      # --only 로 고르지 않은 편(조건도 보지 않고 풀지도 않음)
+AGREE_SKIPPED = "skipped_no_relabel"         # 재라벨 세션이 없어 일치도 보고서를 만들지 않음(오류 아님)
 
 
 class DayError(RuntimeError):
@@ -247,15 +266,31 @@ def reason_code(text: str) -> str:
     return R_OTHER
 
 
-def check_conditions(root: str) -> dict:
+def select_pilots(roots: Sequence[str], only: Sequence[str] | None) -> tuple[list[str], list[str]]:
+    """--only 이름(폴더 이름, 대소문자 무시)으로 고른다 → (고른 폴더, 고르지 않은 폴더). only 가 없으면 (모두, []).
+    시범 프로젝트에 없는 이름이 있으면 DayError(2) — 글자만 견준다(아무것도 열지 않음)."""
+    roots = [os.path.abspath(r) for r in roots]
+    if not only:
+        return roots, []
+    want = {os.path.normcase(n.strip()): n.strip() for n in only if n and n.strip()}
+    have = {os.path.normcase(os.path.basename(r)): r for r in roots}
+    missing = sorted(v for k, v in want.items() if k not in have)
+    if missing or not want:
+        raise DayError("--only 에 준 이름이 시범 프로젝트(pilot-*)에 없습니다: " + (", ".join(missing) or "(빈 이름)"))
+    sel = [r for r in roots if os.path.normcase(os.path.basename(r)) in want]
+    return sel, [r for r in roots if r not in sel]
+
+
+def check_conditions(root: str, *, allow_no_relabel: bool = False) -> dict:
     """프로젝트 하나의 06 7-1 조건 → {name, labeling_sessions, locked, met, reasons[코드], plans_unreadable[계획 ID],
-    gate_warnings}. 잠금·계획·매니페스트·project.json 만 연다(seal.unseal_conditions). 라벨 파일·AI 결과 폴더는 열지 않는다.
-    plans_unreadable: 사유 plan_unreadable 의 대상(깨진 계획 파일 relabel\\<ID>.json — 해제 당일에 볼 파일)."""
+    waived[코드], gate_warnings}. 잠금·계획·매니페스트·project.json 만 연다(seal.unseal_conditions). 라벨 파일·AI 결과 폴더는
+    열지 않는다. plans_unreadable: 사유 plan_unreadable 의 대상(깨진 계획 파일 relabel\\<ID>.json — 해제 당일에 볼 파일).
+    allow_no_relabel(D-26): 계획 파일이 하나도 없으면 no_relabel_plan 만 막지 않고 waived 에 적는다(그 밖의 사유는 그대로)."""
     from app import seal
     out = {"name": os.path.basename(root), "labeling_sessions": 0, "locked": 0, "met": False, "reasons": [],
-           "plans_unreadable": [], "gate_warnings": 0}
+           "plans_unreadable": [], "waived": [], "gate_warnings": 0}
     try:
-        cond = seal.unseal_conditions(root)
+        cond = seal.unseal_conditions(root, allow_no_relabel=allow_no_relabel)
     except WatchViolation as e:
         out["reasons"] = [R_WATCH]
         out["watch"] = str(e)
@@ -272,6 +307,7 @@ def check_conditions(root: str) -> dict:
         codes = [reason_code(r) for r in cond.reasons]
     out["reasons"] = sorted(set(codes))
     out["plans_unreadable"] = sorted(set(getattr(cond, "unreadable_plans", None) or ()))
+    out["waived"] = sorted(set(getattr(cond, "waived", None) or ()))
     out["gate_warnings"] = len(cond.warnings)
     return out
 
@@ -291,8 +327,8 @@ def freeze_state(freeze_path: str | None) -> dict:
     return {"state": "ok" if not diffs else "diff", "diffs": len(diffs)}
 
 
-def conditions(roots: Sequence[str], *, expect: int | None) -> dict:
-    per = [check_conditions(r) for r in roots]
+def conditions(roots: Sequence[str], *, expect: int | None, allow_no_relabel: bool = False) -> dict:
+    per = [check_conditions(r, allow_no_relabel=allow_no_relabel) for r in roots]
     glob = []
     if expect is not None and len(roots) != expect:
         glob.append(R_PILOT_COUNT)
@@ -301,17 +337,18 @@ def conditions(roots: Sequence[str], *, expect: int | None) -> dict:
     met = bool(roots) and not glob and all(p["met"] for p in per)
     kinds = sorted(set(glob) | {c for p in per for c in p["reasons"]})
     return {"met": met, "projects": per, "global_reasons": sorted(set(glob)), "reason_kinds": kinds,
+            "waived_kinds": sorted({c for p in per for c in p.get("waived") or ()}),
             "labeling_sessions": sum(p["labeling_sessions"] for p in per), "locked": sum(p["locked"] for p in per)}
 
 
 # ───────────────────────────────────────────────────────────── 3. 해제
 
-def unseal_project(root: str, *, by: str, ai_root: str | None = None) -> dict:
-    """봉인(검사 valid, 아직 안 푼 것)을 모두 푼다. 숫자·코드만 돌려준다."""
+def unseal_project(root: str, *, by: str, ai_root: str | None = None, allow_no_relabel: bool = False) -> dict:
+    """봉인(검사 valid, 아직 안 푼 것)을 모두 푼다. 숫자·코드만 돌려준다. allow_no_relabel 은 seal.unseal 에 그대로(D-26)."""
     from app import seal
     st = seal.seal_status(root, ai_root=ai_root)
     out = {"sealed_valid": 0, "rejected": 0, "already": 0, "unsealed_now": 0, "failed": [], "presealed": 0,
-           "topics": 0, "words": 0, "vectors": 0, "pair_errors": [], "seal_problems": len(st.problems)}
+           "topics": 0, "words": 0, "vectors": 0, "pair_errors": [], "seal_problems": len(st.problems), "relabel_none": 0}
     for e in st.entries:
         if e.check != "valid":
             out["rejected"] += 1
@@ -321,13 +358,14 @@ def unseal_project(root: str, *, by: str, ai_root: str | None = None) -> dict:
             out["already"] += 1
             continue
         try:
-            r = seal.unseal(root, e.sha256, by=by, ai_root=ai_root)
+            r = seal.unseal(root, e.sha256, by=by, ai_root=ai_root, allow_no_relabel=allow_no_relabel)
         except seal.SealError as x:
             out["failed"].append(seal.error_code(x))          # 원인 코드(seal.SEAL_ERROR_CODES, 예: dup_run_id)
             continue
         out["unsealed_now"] += 1
         out["presealed"] += int(bool(r.presealed))
         rec = r.record
+        out["relabel_none"] += int(rec.get("relabel") == "none")     # 해제 기록 relabel = 'none'(D-26) 건수
         for k in seal.PAIR_KINDS:
             if isinstance(rec.get(k), Mapping):
                 out[k] += 1
@@ -425,21 +463,31 @@ def agreement_reports(root: str, info: Mapping, *, out_dir: str, by: str) -> tup
 
 
 def compare_project(root: str, *, out_dir: str, by: str, ai_root: str | None = None):
-    """(최종 세트, 숫자 dict). 해제된 run 마다 보고서, 엔진 판 이웃끼리 견주기."""
+    """(최종 세트, 숫자 dict). 해제된 run 마다 보고서, 엔진 판 이웃끼리 견주기.
+    재라벨 세션이 없으면(D-26 — 1인·재라벨 없음) 일치도 보고서 쪽은 건너뛴다: 보고서를 찾지도 만들지도 않고(그쪽으로
+    comparison_gate 를 부르지 않음) agreement = 'skipped_no_relabel', 사람 기준은 '미확인'. 최종 세트는 잠긴 1차 세션
+    하나로 만들고(export.build_final_set — 그 1차의 06 7-1 관문만 본다) AI 비교·판끼리는 그대로 한다."""
     from app import ai_compare as ac
     from app import analysis_flow as af
     from app import export, seal
     fx = export.build_final_set(root, ai_root=ai_root)
-    gate, gate_id = af.agreement_gate(root, fx.info, reader_kind=None)
+    relabels = [s for s in fx.info.get("relabel_session_ids") or () if isinstance(s, str)]
     made, agree_err = 0, []
-    if gate_id is None:
-        # 사람 일치도 보고서가 없으면 여기서 만든다(사람 클릭 0) — 요약 폴더 agreement\\ 아래, 기준은 거기서 읽는다
-        made, agree_err = agreement_reports(root, fx.info, out_dir=os.path.join(out_dir, "agreement"), by=by)
-        if made:
-            gate, gate_id = af.agreement_gate(root, fx.info, reader_kind=None,
-                                              reports_root=os.path.join(out_dir, "agreement"))
+    if not relabels:
+        gate, gate_id, agreement = None, None, AGREE_SKIPPED
+    else:
+        gate, gate_id = af.agreement_gate(root, fx.info, reader_kind=None)
+        agreement = "found" if gate_id is not None else "missing"
+        if gate_id is None:
+            # 사람 일치도 보고서가 없으면 여기서 만든다(사람 클릭 0) — 요약 폴더 agreement\\ 아래, 기준은 거기서 읽는다
+            made, agree_err = agreement_reports(root, fx.info, out_dir=os.path.join(out_dir, "agreement"), by=by)
+            if made:
+                gate, gate_id = af.agreement_gate(root, fx.info, reader_kind=None,
+                                                  reports_root=os.path.join(out_dir, "agreement"))
+                agreement = "made"
     runs = af.unsealed_run_ids(seal.seal_status(root, ai_root=ai_root))
     out = {"runs": [], "pairs": [], "human_gate": gate, "gate_report_id": gate_id, "errors": [],
+           "agreement": agreement, "relabel_sessions": len(relabels),
            "agreement_made": made, "agreement_errors": agree_err,       # 막지 않는다 — 기준 미확인으로 남음
            "final_set": {"items": len(fx.items), "segment_items": len(fx.segment_items),
                          "conflicts": len(fx.conflicts), "warnings": len(fx.info.get("warnings") or ())}}
@@ -472,9 +520,9 @@ def compare_project(root: str, *, out_dir: str, by: str, ai_root: str | None = N
 
 # ───────────────────────────────────────────────────────────── 6. 보정
 
-def calib_project(root: str, fx, *, ai_root: str | None, quick: bool) -> dict:
+def calib_project(root: str, fx, *, ai_root: str | None, quick: bool, allow_no_relabel: bool = False) -> dict:
     from tools import viewer_score_calib as cal
-    return cal.calibrate(root, final_set=fx, ai_root=ai_root, quick=quick)
+    return cal.calibrate(root, final_set=fx, ai_root=ai_root, quick=quick, allow_no_relabel=allow_no_relabel)
 
 
 def calib_numbers(rep: Mapping) -> dict:
@@ -532,16 +580,27 @@ def verify_text(v: Mapping | None) -> str:
 
 def render_markdown(s: Mapping) -> str:
     """요약 → markdown(숫자·코드·ID 만)."""
-    L = [f"# 시범 해제 당일 요약 — {s['date']}", "",
-         f"도구 {s['tool']} {s['tool_version']} · 사람 클릭 **{s['user_clicks']}** · 걸린 시간 {_f(s.get('elapsed_s'), 1)}초"
-         f" · 라벨 형식 고정 {s['freeze']['state']}(다른 곳 {s['freeze']['diffs']})", ""]
+    L = [f"# 시범 해제 당일 요약 — {s['date']}", ""]
+    if s.get("allow_no_relabel"):
+        L += [f"**{NO_HUMAN_AGREEMENT}** — `--allow-no-relabel`(08 D-26): 재라벨 계획 파일이 하나도 없는 편은 사유 "
+              "no_relabel_plan 하나만 막지 않았다(해제 기록 relabel = none). 사람끼리 일치도 보고서는 만들지 않았고 사람 기준은 "
+              "'미확인' 이다. 아래 엔진 성적은 잠긴 1차 세션 하나의 최종 세트와 견준 것이다.", ""]
+    L += [f"도구 {s['tool']} {s['tool_version']} · 사람 클릭 **{s['user_clicks']}** · 걸린 시간 {_f(s.get('elapsed_s'), 1)}초"
+          f" · 라벨 형식 고정 {s['freeze']['state']}(다른 곳 {s['freeze']['diffs']})", ""]
     c = s["conditions"]
     L += ["## 1. 조건 (06 7-1)", "", f"충족 **{c['met']}** · 라벨링 세션 {c['labeling_sessions']} · 잠김 {c['locked']}"
-          f" · 사유 {', '.join(c['reason_kinds']) or '없음'}", "",
-          "| 프로젝트 | 라벨링 세션 | 잠김 | 충족 | 사유 |", "|---|---|---|---|---|"]
+          f" · 사유 {', '.join(c['reason_kinds']) or '없음'}"
+          + (f" · 플래그로 막지 않은 사유 {', '.join(c['waived_kinds'])}" if c.get("waived_kinds") else ""), "",
+          "| 프로젝트 | 라벨링 세션 | 잠김 | 충족 | 사유 | 플래그로 막지 않음 |", "|---|---|---|---|---|---|"]
     for p in c["projects"]:
-        L.append(f"| {p['name']} | {p['labeling_sessions']} | {p['locked']} | {p['met']} | {', '.join(p['reasons']) or '-'} |")
+        L.append(f"| {p['name']} | {p['labeling_sessions']} | {p['locked']} | {p['met']} | {', '.join(p['reasons']) or '-'} |"
+                 f" {', '.join(p.get('waived') or ()) or '-'} |")
+    for name in (s.get("selection") or {}).get("skipped") or ():
+        L.append(f"| {name} | - | - | - | {SKIPPED_TEXT} | - |")
     L.append("")
+    skipped = (s.get("selection") or {}).get("skipped") or ()
+    if skipped:
+        L += [f"- 건너뜀 {SKIPPED_TEXT}: {', '.join(skipped)} — `--only` 로 고르지 않아 조건도 보지 않고 풀지도 않았다", ""]
     if s.get("projects"):
         L += ["## 2. 해제", "", "| 프로젝트 | 봉인(유효) | 이번에 해제 | 이미 | 거부 | 실패 | 사전 봉인 | 주제 흐름 | 전사 낱말 | 벡터 |"
               " 대조(ai_seal verify) | 엔진 판 |",
@@ -556,7 +615,10 @@ def render_markdown(s: Mapping) -> str:
         L += ["", "## 3. AI 비교 (E1 = 표본, 참고/엄격)", ""]
         for p in s["projects"]:
             cm = p.get("compare") or {}
-            if cm:
+            if cm and cm.get("agreement") == AGREE_SKIPPED:
+                L.append(f"- {p['name']}: 사람 일치도 기준 미확인 — 재라벨 세션 0 이라 일치도 보고서를 건너뜀"
+                         f"({AGREE_SKIPPED}, 오류 아님)")
+            elif cm:
                 g = cm.get("human_gate")
                 L.append(f"- {p['name']}: 사람 일치도 기준 {cm.get('gate_report_id') or '미확인'}"
                          f" (반응 {(g or {}).get('reaction', '-')} · 구간 {(g or {}).get('segment', '-')})"
@@ -649,10 +711,14 @@ def unseal_errors(u: Mapping) -> list[str]:
 
 def run_day(roots: Sequence[str], *, out_root: str, by: str = "L01", ai_root: str | None = None,
             expect: int | None = DEFAULT_EXPECT, dry_run: bool = False, date: str | None = None,
-            freeze_path: str | None = None, quick: bool = False, allow_real: bool = False) -> tuple[int, dict]:
+            freeze_path: str | None = None, quick: bool = False, allow_real: bool = False,
+            allow_no_relabel: bool = False, skipped: Sequence[str] = (), only: bool = False) -> tuple[int, dict]:
     """(종료 코드, 요약 dict). dry_run 이면 조건만 보고 아무것도 쓰지 않는다.
     allow_real=False 면 roots·ai_root·out_root·freeze_path 가운데 실제 데이터 폴더 아래가 있을 때 **아무것도 열기 전에**
-    DayError(2) — 리허설·시험이 실제 시범 폴더를 건드리지 않게(사용자가 라벨링 중일 수 있다)."""
+    DayError(2) — 리허설·시험이 실제 시범 폴더를 건드리지 않게(사용자가 라벨링 중일 수 있다).
+    allow_no_relabel: D-26 — 조건·해제에 그대로 넘기고 요약 머리에 NO_HUMAN_AGREEMENT 를 적는다.
+    skipped: --only 로 고르지 않은 시범 폴더(경로). 요약에 이름만 'skipped (not selected)' 로 적고, 두 열기 감시가 그 폴더를
+    여는 것을 막는다(deny — 조건도 보지 않고 풀지도 않는다). only: --only 로 골랐는가(요약 selection.only 에 고른 이름)."""
     from app import seal
     t0 = time.perf_counter()
     if not LABELER_RE.match(by or ""):
@@ -660,16 +726,22 @@ def run_day(roots: Sequence[str], *, out_root: str, by: str = "L01", ai_root: st
     date = date or datetime.now().strftime("%Y%m%d")
     if not DATE_RE.match(date):
         raise DayError("--date 는 YYYYMMDD")
-    if not allow_real and touches_real_data([*roots, ai_root, out_root, freeze_path]):
+    if not allow_real and touches_real_data([*roots, *skipped, ai_root, out_root, freeze_path]):
         raise DayError("실제 데이터 폴더(chatcoach-data)를 가리킵니다 — 해제 당일에만 --real 을 주세요(리허설은 합성 폴더로)")
     roots = [os.path.abspath(r) for r in roots]
+    skipped = [os.path.abspath(r) for r in skipped]
     ai_roots = sorted({os.path.abspath(ai_root or seal.default_ai_root(r)) for r in roots})
     summary: dict = {"tool": TOOL, "tool_version": TOOL_VERSION, "date": date, "dry_run": dry_run,
-                     "user_clicks": USER_CLICKS, "projects": [], "errors": []}
+                     "user_clicks": USER_CLICKS, "projects": [], "errors": [],
+                     "allow_no_relabel": bool(allow_no_relabel),
+                     "human_agreement": "none" if allow_no_relabel else "required",
+                     "selection": {"only": [os.path.basename(r) for r in roots] if (only or skipped) else [],
+                                   "skipped": [os.path.basename(r) for r in skipped]}}
     summary["freeze"] = freeze_state(freeze_path)
-    cond_watch = OpenWatch(roots, conditions_only=True, deny=ai_roots + [os.path.abspath(out_root)], write_ok=None)
+    cond_watch = OpenWatch(roots, conditions_only=True, deny=ai_roots + [os.path.abspath(out_root)] + skipped,
+                           write_ok=None)
     with cond_watch:
-        summary["conditions"] = conditions(roots, expect=expect)
+        summary["conditions"] = conditions(roots, expect=expect, allow_no_relabel=allow_no_relabel)
     summary["watch"] = cond_watch.summary()
     if cond_watch.violations:
         summary["elapsed_s"] = round(time.perf_counter() - t0, 2)
@@ -685,7 +757,7 @@ def run_day(roots: Sequence[str], *, out_root: str, by: str = "L01", ai_root: st
         ar.check_out_root(out_dir, r)
     summary["out_dir_name"] = os.path.basename(out_dir)
     os.makedirs(out_dir, exist_ok=False)
-    watch = OpenWatch(roots, conditions_only=False, write_ok=ai_roots + [out_dir])
+    watch = OpenWatch(roots, conditions_only=False, deny=skipped, write_ok=ai_roots + [out_dir])
     calibs = []
     code = 0
     with watch:
@@ -695,7 +767,7 @@ def run_day(roots: Sequence[str], *, out_root: str, by: str = "L01", ai_root: st
             summary["projects"].append(p)
             ts = time.perf_counter()
             try:
-                p["unseal"] = unseal_project(r, by=by, ai_root=ai_root)
+                p["unseal"] = unseal_project(r, by=by, ai_root=ai_root, allow_no_relabel=allow_no_relabel)
             except Exception as e:  # noqa: BLE001
                 from app import seal as _seal
                 p["errors"].append(f"unseal:{_seal.error_code(e)}")
@@ -715,7 +787,7 @@ def run_day(roots: Sequence[str], *, out_root: str, by: str = "L01", ai_root: st
             p["compare_s"] = round(time.perf_counter() - ts, 2)
             ts = time.perf_counter()
             try:
-                rep = calib_project(r, fx, ai_root=ai_root, quick=quick)
+                rep = calib_project(r, fx, ai_root=ai_root, quick=quick, allow_no_relabel=allow_no_relabel)
             except Exception as e:  # noqa: BLE001
                 p["errors"].append(f"calib:{type(e).__name__}")
                 continue
@@ -744,13 +816,18 @@ def run_day(roots: Sequence[str], *, out_root: str, by: str = "L01", ai_root: st
 
 def _print(summary: Mapping) -> None:
     c = summary["conditions"]
+    if summary.get("allow_no_relabel"):
+        print(f"{NO_HUMAN_AGREEMENT} — --allow-no-relabel(D-26): 계획 파일이 없는 편은 no_relabel_plan 만 막지 않습니다")
     print(f"시범 {len(c['projects'])}편 · 라벨링 세션 {c['labeling_sessions']} · 잠김 {c['locked']} · 조건 충족 {c['met']}"
           f" · 사유 {', '.join(c['reason_kinds']) or '없음'} · 사람 클릭 {summary['user_clicks']}")
     for p in c["projects"]:
         bad = p.get("plans_unreadable") or ()
         print(f"  {p['name']}: 라벨링 세션 {p['labeling_sessions']} · 잠김 {p['locked']} · 충족 {p['met']}"
               f" · 사유 {', '.join(p['reasons']) or '-'}"
+              + (f" · 플래그로 막지 않음 {', '.join(p['waived'])}" if p.get("waived") else "")
               + (f" · 읽지 못한 계획 파일 {', '.join(f'relabel/{x}.json' for x in bad)}" if bad else ""))
+    for name in (summary.get("selection") or {}).get("skipped") or ():
+        print(f"  {name}: 건너뜀 — {SKIPPED_TEXT} (조건도 보지 않고 풀지도 않음)")
     w = summary.get("watch") or {}
     print(f"열기 감시(조건): 시범 폴더 읽기 {w.get('guarded_reads')} · 쓰기 {w.get('writes')} · 위반 {w.get('violations')}"
           f" · 라벨 형식 고정 {summary['freeze']['state']}")
@@ -765,10 +842,12 @@ def _print(summary: Mapping) -> None:
         runs = (p.get("compare") or {}).get("runs") or ()
         ver = u.get("verify") or {}
         errs = list(p.get("errors") or ())
+        agree = (p.get("compare") or {}).get("agreement")
         print(f"  {p['name']}: 해제 {u.get('unsealed_now')}(이미 {u.get('already')}) · 실패 {len(u.get('failed') or ())}"
               f" · 대조 {verify_text(ver)} · 보고서 {len(runs)} · "
               f"판끼리 {len((p.get('compare') or {}).get('pairs') or ())} · 보정 {'됨' if p.get('calib') else '안 됨'}"
-              f" · 오류 {len(errs)}{' (' + ', '.join(sorted(set(errs))) + ')' if errs else ''}")
+              + (f" · 일치도 보고서 건너뜀({AGREE_SKIPPED})" if agree == AGREE_SKIPPED else "")
+              + f" · 오류 {len(errs)}{' (' + ', '.join(sorted(set(errs))) + ')' if errs else ''}")
     if summary.get("errors"):
         print(f"  묶음 오류: {', '.join(summary['errors'])}")
     wr = summary.get("watch_run") or {}
@@ -785,7 +864,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--go", action="store_true",
                     help="되돌릴 수 없는 실제 해제를 한다(사용자 세션의 시작 확인 뒤). 없으면 dry-run")
     ap.add_argument("--project", action="append", default=None, help="시범 프로젝트 폴더(여러 번). 주면 찾지 않는다")
-    ap.add_argument("--expect", type=int, default=DEFAULT_EXPECT, help="기대하는 시범 편 수(0 = 보지 않음)")
+    ap.add_argument("--only", action="append", default=None, metavar="NAME",
+                    help="이 시범 프로젝트 폴더 이름만(여러 번). 고르지 않은 편은 조건도 보지 않고 풀지도 않는다"
+                         "('skipped (not selected)'). --expect 를 주지 않으면 기대 수 = 고른 수")
+    ap.add_argument("--allow-no-relabel", action="store_true",
+                    help="재라벨 계획 파일이 하나도 없는 편은 no_relabel_plan 하나만 막지 않는다(08 D-26). "
+                         "그 밖의 사유는 그대로 막는다. 해제 기록에 relabel=none, 요약 머리에 '사람 일치도 없음'")
+    ap.add_argument("--expect", type=int, default=None,
+                    help=f"기대하는 시범 편 수(0 = 보지 않음, 기본 {DEFAULT_EXPECT} — --only 면 고른 수)")
     ap.add_argument("--ai-root", default=None, help="AI 결과 폴더(기본 app.seal 규칙)")
     ap.add_argument("--out-root", default=None, help="요약 폴더를 만들 보고서 폴더(기본 projects 옆 reports)")
     ap.add_argument("--by", default="L01", help="해제 기록·보고서의 라벨러 ID")
@@ -808,17 +894,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not a.real and touches_real_data([projects_root, *(a.project or ()), a.ai_root, a.out_root, a.freeze]):
             raise DayError("실제 데이터 폴더(chatcoach-data)를 가리킵니다 — 해제 당일에만 --real 을 주세요"
                            "(리허설은 합성 pilot-* 폴더로)")
-        roots = [os.path.abspath(p) for p in a.project] if a.project else find_pilots(projects_root)
-        base = os.path.dirname(roots[0]) if a.project and roots else projects_root
+        found = [os.path.abspath(p) for p in a.project] if a.project else find_pilots(projects_root)
+        roots, skipped = select_pilots(found, a.only)        # --only: 이름만 견준다(고르지 않은 편은 열지 않음)
+        base = os.path.dirname(found[0]) if a.project and found else projects_root
         data = os.path.dirname(os.path.abspath(base))
         out_root = a.out_root or os.path.join(data, "reports")
         freeze = a.freeze or os.path.join(data, "pilot", "freeze.json")
+        expect = a.expect if a.expect is not None else (len(roots) if a.only else DEFAULT_EXPECT)
         if a.go:
             print("되돌릴 수 없는 해제를 시작합니다(--go) · 조건이 모두 맞을 때만 풉니다",
                   file=sys.stderr if a.json else sys.stdout)
         code, summary = run_day(roots, out_root=out_root, by=a.by, ai_root=a.ai_root,
-                                expect=a.expect or None, dry_run=not a.go, date=a.date, freeze_path=freeze,
-                                quick=a.quick, allow_real=a.real)
+                                expect=expect or None, dry_run=not a.go, date=a.date, freeze_path=freeze,
+                                quick=a.quick, allow_real=a.real, allow_no_relabel=a.allow_no_relabel,
+                                skipped=skipped, only=bool(a.only))
     except DayError as e:
         print(f"입력 오류: {e}", file=sys.stderr)
         return e.code
@@ -832,7 +921,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = ["OpenWatch", "WatchViolation", "DayError", "find_pilots", "reason_code", "check_conditions", "conditions",
            "freeze_state", "unseal_project", "verify_unsealed", "compare_project", "calib_numbers", "report_numbers", "engine_version",
            "version_key", "version_label", "render_markdown", "run_day", "main", "USER_CLICKS", "CONDITION_READS",
-           "touches_real_data", "unseal_errors", "verify_text", "LINK_RULES_VERSION"]
+           "touches_real_data", "unseal_errors", "verify_text", "LINK_RULES_VERSION", "select_pilots",
+           "NO_HUMAN_AGREEMENT", "SKIPPED_TEXT", "AGREE_SKIPPED"]
 
 if __name__ == "__main__":
     raise SystemExit(main())

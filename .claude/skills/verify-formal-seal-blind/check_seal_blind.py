@@ -8,12 +8,17 @@
   동작마다·새 상태마다 성질을 본다. 06 7-1 해제 조건은 이 파일의 oracle_met(설계 문장에서 따로 쓴 판정)과
   실제 seal.unseal_conditions 를 모든 상태에서 견준다.
 
-모델 넷 (모두 끝까지 훑는다 — 깊이 제한 없음, 동작 묶음이 유한해서 상태가 닫힌다. 곱이 커지지 않게 나눴다)
+모델 다섯 (모두 끝까지 훑는다 — 깊이 제한 없음, 동작 묶음이 유한해서 상태가 닫힌다. 곱이 커지지 않게 나눴다)
   gate_plans  : A·B·RS 열기·잠그기, 계획 pR2·pRS 만들기·취소. R1(유효)·Rbad(받을 때 거부)은 처음부터 봉인돼 있고,
-                상태마다 seal.unseal(R1)·seal.unseal(Rbad) 를 사유 없이 시도해 본다(시도는 되돌리고 이어 가지 않는다).
+                상태마다 seal.unseal(R1)·seal.unseal(Rbad)·seal.unseal(R1, allow_no_relabel=True) 를 사유 없이 시도해
+                본다(시도는 되돌리고 이어 가지 않는다).
   gate_faults : 표본 재현 검증 실패·검증 없는 매니페스트·읽지 못하는 계획 파일 pX(와 그 취소)·계획 ID 없는 옛 잠금. 시도는 같다.
   seal        : 1차 A → 계획 pR2 → 재라벨 B 잠금 사슬 × 봉인·짝 봉인·짝 보충·해제(사유 없음/앞당김). 상태마다 자리 검사.
   rerun       : 사슬이 다 된 상태에서 R1 과 R1b(run_id 가 같은 다른 결과 — 엔진을 다시 돌림)의 봉인·해제.
+  flag        : 같은 사슬 × R1 봉인 × 해제 셋(사유 없음·앞당김·allow_no_relabel=True, 08 D-26). 플래그로 푼 뒤도 이어 간다.
+  재라벨 없이 해제(D-26): 모든 모델·모든 상태에서 플래그를 준 seal.unseal_conditions 도 플래그 명세
+  (oracle_why(allow_no_relabel=True) — 계획 파일이 하나도 없을 때 'no_plan' 규칙 하나만 뺌)와 견주고, 플래그가 빼는 사유가
+  no_relabel_plan 하나뿐인지(FLAG_WAIVABLE) 본다.
 
 실행 (저장소 루트, 앱 .venv — 표준 라이브러리만 쓴다)
   .venv\\Scripts\\python .claude\\skills\\verify-formal-seal-blind\\check_seal_blind.py
@@ -297,7 +302,7 @@ class Facts:
                 return ("sealed", n, r.get("check"))
             if k == seal.K_UNSEALED:
                 return ("unsealed", n, r.get("run_id"), r.get("conditions_met"), r.get("reason") is not None,
-                        isinstance(r.get("topics"), dict))
+                        isinstance(r.get("topics"), dict), r.get("relabel"))
             return (k, n, SHA_NAME.get(r.get("pair"), r.get("pair")), r.get("check"), bool(r.get("attached")))
         return (tuple(sorted(self.labels)),
                 tuple(sorted((s, pname(d["plan"]), d["verify"]) for s, d in self.locks.items())),
@@ -386,18 +391,24 @@ CODE_OF_RULE = {"unlocked": "unlocked_sessions", "no_primary": "no_primary", "no
                 "plan_unreadable": "plan_unreadable", "session_plan_unreadable": "plan_unreadable",
                 "plan_pending": "relabel_not_locked", "sample_verify": "sample_verify"}
 PLAN_CODES = ("plan_unreadable", "relabel_not_locked")      # G1b 가 명세와 견주는 코드
+#: allow_no_relabel(08 D-26)이 막지 않아도 되는 사유는 이것 하나뿐이다. 나머지(unlocked_sessions·no_primary·plan_unreadable·
+#: relabel_not_locked·sample_verify·other)는 플래그가 있어도 그대로 막는다
+FLAG_WAIVABLE = ("no_relabel_plan",)
+PROP_FLAG = "재라벨 없이 해제가 푸는 것은 no_relabel_plan 하나(D-26)"
 
 
-def oracle_met(f: Facts, rules=None) -> tuple[bool, list[str]]:
+def oracle_met(f: Facts, rules=None, *, allow_no_relabel: bool = False) -> tuple[bool, list[str]]:
     """(조건이 되는가, 안 된 사유 문장). 규칙 이름까지 보려면 oracle_why."""
-    why = oracle_why(f, rules)
+    why = oracle_why(f, rules, allow_no_relabel=allow_no_relabel)
     return (not why), [t for _r, t in why]
 
 
-def oracle_why(f: Facts, rules=None) -> list[tuple[str, str]]:
+def oracle_why(f: Facts, rules=None, *, allow_no_relabel: bool = False) -> list[tuple[str, str]]:
     """06 7-1 과 seal 머리말·comparison_gate 문서에서 따로 쓴 판정. 코드를 부르지 않는다.
     - 라벨링 세션(1차·재라벨: labels/ 파일 이름이나 locks/ 에 있는 것)이 모두 잠김
     - 1차 세션이 하나 이상, 1차마다 그것을 원 세션으로 하는 (읽을 수 있는) 계획이 하나 이상(취소된 계획도 '계획 있음')
+      — 단 allow_no_relabel(08 D-26 2·3: 명시 플래그, '계획이 없으면 기다릴 재라벨이 없다')이면 relabel/ 에 계획 파일이
+      **하나도 없을 때**(읽지 못하는 것·취소된 것도 없음) 이 규칙 하나만 보지 않는다. 다른 규칙은 플래그와 무관하다.
     - 취소되지 않은 계획마다: 읽을 수 있어야 하고(읽지 못하면 막음), 원 세션이 1차면 그 계획 ID 를 잠금에 적은 잠긴
       재라벨 세션이 있어야 함(취소된 계획은 세지 않음)
     - 잠긴 재라벨 세션이 적은 계획은 (취소됐어도) 읽을 수 있어야 함
@@ -412,7 +423,7 @@ def oracle_why(f: Facts, rules=None) -> list[tuple[str, str]]:
     if "no_primary" in rules and not primaries:
         why.append(("no_primary", "1차 세션 없음"))
     readable = {p: d for p, d in f.plans.items() if d["readable"]}
-    if "no_plan" in rules:
+    if "no_plan" in rules and not (allow_no_relabel and not f.plans):
         why += [("no_plan", f"재라벨 계획이 없는 1차 {SID_NAME.get(p, p)}") for p in primaries
                 if not any(d["source"] == p for d in readable.values())]
     refs = {d["plan"] for s, d in f.locks.items() if kind_of(s) in RELABEL_KINDS and isinstance(d["plan"], str)}
@@ -538,6 +549,7 @@ class Action:
     expand: bool = True             # False = 시도만 하고 되돌림(그 상태를 이어 가지 않는다)
     early: bool = False
     target: str | None = None       # 봉인 이름(R1·R1b·Rbad)
+    flag: bool = False              # seal.unseal(allow_no_relabel=True) — 재라벨 없이 해제(08 D-26)
 
 
 def _open_session(name):
@@ -627,8 +639,10 @@ def _attach(c: Ctx):
     return r
 
 
-def _unseal(name, early=False):
+def _unseal(name, early=False, flag=False):
     def fn(c: Ctx):
+        if flag:
+            return seal.unseal(c.world.root, SHA[name], by="L01", now=c.now, allow_no_relabel=True)
         return seal.unseal(c.world.root, SHA[name], by="L01", now=c.now,
                            early_reason="합성 앞당김 사유" if early else None)
     return fn
@@ -668,6 +682,8 @@ SEAL_ACTIONS = {
     "unseal_R1": A("unseal_R1", "seal.unseal(R1) — 사유 없이", _unseal("R1"), "unseal", target="R1"),
     "unseal_R1_early": A("unseal_R1_early", "seal.unseal(R1, early_reason=…) — 앞당겨 열기", _unseal("R1", True), "unseal",
                          early=True, target="R1"),
+    "unseal_R1_flag": A("unseal_R1_flag", "seal.unseal(R1, allow_no_relabel=True) — 재라벨 없이 해제(D-26), 사유 없음",
+                        _unseal("R1", flag=True), "unseal", target="R1", flag=True),
     "unseal_R1b": A("unseal_R1b", "seal.unseal(R1b) — 사유 없이", _unseal("R1b"), "unseal", target="R1b"),
     "unseal_R1b_early": A("unseal_R1b_early", "seal.unseal(R1b, early_reason=…)", _unseal("R1b", True), "unseal",
                           early=True, target="R1b"),
@@ -677,6 +693,8 @@ PROBES = {
                          expand=False, target="R1"),
     "probe_unseal_Rbad": A("probe_unseal_Rbad", "seal.unseal(Rbad — 받을 때 거부된 결과) (시도만)", _unseal("Rbad"),
                            "unseal", expand=False, target="Rbad"),
+    "probe_unseal_R1_flag": A("probe_unseal_R1_flag", "seal.unseal(R1, allow_no_relabel=True) — 재라벨 없이 (시도만)",
+                              _unseal("R1", flag=True), "unseal", expand=False, target="R1", flag=True),
 }
 
 EXPECTED_SESSION_ERRORS = (ValueError, FileExistsError, FileNotFoundError, locking.AlreadyLockedError)
@@ -709,15 +727,19 @@ MODELS = {
     # 봉인·짝 봉인·짝 보충·해제(사유 없음/앞당김) × 관문 사슬(A 열기·잠그기 → pR2 → B 열기·잠그기). 상태마다 자리 검사도 한다.
     "seal": Model("seal", _acts(*CHAIN_NAMES, "seal_R1", "seal_T1", "attach_T2", "unseal_R1", "unseal_R1_early"),
                   seed=[], blind_checks=True),
+    # 재라벨 없이 해제(08 D-26): 관문 사슬 × R1 봉인 × 해제 셋(사유 없음·앞당김·allow_no_relabel). 플래그로 푼 뒤의 상태
+    # (계획·재라벨을 나중에 만듦 포함)까지 이어 간다. seal 모델에 넣으면 곱이 커져(상태 129→177) 따로 둔다.
+    "flag": Model("flag", _acts(*CHAIN_NAMES, "seal_R1", "unseal_R1", "unseal_R1_early", "unseal_R1_flag"),
+                  seed=[], blind_checks=False),
     # 같은 run_id 의 다른 결과(R1b, 엔진 재실행): 해제한 결과 파일은 바뀌지 않고 run_id 하나는 한 번만 풀린다.
     # 관문 사슬은 처음부터 다 된 상태(사유 없는 해제도 되는 상태)에서 시작한다.
     "rerun": Model("rerun", _acts("seal_R1", "seal_R1b", "unseal_R1", "unseal_R1_early", "unseal_R1b", "unseal_R1b_early"),
                    seed=[SESSION_ACTIONS[n].fn for n in CHAIN_NAMES], blind_checks=False),
 }
-DEFAULT_MODELS = ("gate_plans", "gate_faults", "seal", "rerun")
+DEFAULT_MODELS = ("gate_plans", "gate_faults", "seal", "rerun", "flag")
 _GATE_SEED_TEXT = "합성 프로젝트, seal.seal_bytes 로 R1(유효)·Rbad(받을 때 거부)을 먼저 봉인해 둠"
 SEED_TEXT = {"gate_plans": _GATE_SEED_TEXT, "gate_faults": _GATE_SEED_TEXT,
-             "seal": "빈 합성 프로젝트(세션·봉인 없음)",
+             "seal": "빈 합성 프로젝트(세션·봉인 없음)", "flag": "빈 합성 프로젝트(세션·봉인 없음)",
              "rerun": "합성 프로젝트, A 열기·잠그기 → pR2 → B 열기·잠그기까지 다 됨(사유 없는 해제도 되는 상태)"}
 
 
@@ -774,7 +796,7 @@ def check_transition(act: Action, S: Facts, T: Facts, outcome, err, spy: Spy, wo
             raise Violation("봉인은 한 번", f"이미 봉인된 {act.target} 을 다시 받자 seal.jsonl 에 줄이 생겼습니다")
     if act.group == "unseal":
         name = act.target
-        met, why = oracle_met(S, oracle_rules)
+        met, why = oracle_met(S, oracle_rules, allow_no_relabel=act.flag)   # 플래그 해제는 플래그 명세로 견준다
         if err is None:
             u_new = [r for r in T.unsealed(name) if r not in S.unsealed(name)]
             if not S.sealed(name) or S.sealed(name)[0].get("check") != "valid":
@@ -785,12 +807,24 @@ def check_transition(act: Action, S: Facts, T: Facts, outcome, err, spy: Spy, wo
                 raise Violation("해제 기록", f"{name} 해제 뒤 ai.unsealed 새 줄이 {len(u_new)}개입니다")
             rec = u_new[0]
             if not act.early and not met:
-                raise Violation("해제 관문(06 7-1)", f"사유 없이 {name} 이 풀렸지만 조건이 안 됨: {'; '.join(why)}")
+                raise Violation(PROP_FLAG if act.flag else "해제 관문(06 7-1)",
+                                f"사유 없이 {name} 이 풀렸지만 조건이 안 됨{' (플래그 명세)' if act.flag else ''}: "
+                                f"{'; '.join(why)}")
             if rec.get("conditions_met") is not met:
                 raise Violation("해제 기록이 조건을 바르게 적음",
                                 f"conditions_met={rec.get('conditions_met')} 이지만 명세 판정은 {met} ({'; '.join(why)})")
             if (rec.get("reason") is None) != met:
                 raise Violation("앞당긴 해제는 사유를 남김", f"conditions_met={met} 인데 reason={rec.get('reason')!r}")
+            # D-26: 플래그를 준 해제만 allow_no_relabel·relabel 칸을 남기고(relabel = 계획 파일이 없으면 none), 플래그 없는
+            # 해제 기록은 전과 같은 모양이다
+            if act.flag:
+                want = "none" if not S.plans else "planned"
+                if rec.get("allow_no_relabel") is not True or rec.get("relabel") != want:
+                    raise Violation("재라벨 없이 해제는 기록에 남김",
+                                    f"allow_no_relabel={rec.get('allow_no_relabel')!r} relabel={rec.get('relabel')!r} "
+                                    f"(계획 파일 {len(S.plans)}개 — relabel 은 {want} 여야 함)")
+            elif "allow_no_relabel" in rec or "relabel" in rec:
+                raise Violation("플래그 없는 해제 기록은 그대로", f"{act.name} 의 기록에 allow_no_relabel·relabel 칸이 있습니다")
             others = [r for r in S.recs if r.get("kind") == seal.K_UNSEALED and r.get("run_id") == rec.get("run_id")]
             if others:
                 raise Violation("같은 run_id 는 한 번만 풀림", f"run_id {rec.get('run_id')} 의 다른 결과가 이미 풀려 있었습니다")
@@ -833,6 +867,22 @@ def _check_state(T: Facts, world: World, model: Model, oracle_rules) -> None:
     if len(cond.codes) != len(cond.reasons) or stray:
         raise Violation("사유 코드가 명세와 맞음", f"seal.unseal_conditions.codes={cond.codes} (사유 {len(cond.reasons)}개) "
                         f"가운데 {stray or '개수'} 가 명세에서 걸린 규칙의 코드({sorted(fired) or '없음'})와 맞지 않습니다")
+    # G1f 재라벨 없이 해제(08 D-26, allow_no_relabel=True): (가) 실제 met == 플래그 명세, (나) 플래그가 빼는 사유는
+    # FLAG_WAIVABLE(no_relabel_plan) 하나뿐이고 그것도 계획 파일이 하나도 없을 때만 — 그 밖의 사유 코드·문장은 플래그 없는
+    # 판정과 같은 차례로 그대로 남는다(unlocked_sessions·no_primary·plan_unreadable·sample_verify 를 넘지 못한다).
+    condf = seal.unseal_conditions(root, allow_no_relabel=True)
+    metf, whyf = oracle_met(T, oracle_rules, allow_no_relabel=True)
+    dropped = [c for c in cond.codes if c not in condf.codes]
+    keep = [(c, r) for c, r in zip(cond.codes, cond.reasons) if not (condf.waived and c in FLAG_WAIVABLE)]
+    bad = sorted(set(dropped) - set(FLAG_WAIVABLE)) + sorted(set(condf.waived) - set(FLAG_WAIVABLE))
+    if bad or (condf.waived and T.plans) or list(zip(condf.codes, condf.reasons)) != keep \
+            or condf.met != (not condf.reasons) or (condf.met and set(cond.codes) - set(FLAG_WAIVABLE)):
+        raise Violation(PROP_FLAG, f"플래그 없이 codes={cond.codes}, 플래그로 codes={condf.codes} waived={condf.waived} "
+                        f"met={condf.met} (계획 파일 {len(T.plans)}개) — 플래그가 {bad or '다른 것'} 을 넘었습니다")
+    if condf.met != metf:
+        raise Violation(PROP_FLAG, f"seal.unseal_conditions(allow_no_relabel=True).met={condf.met} "
+                        f"(사유: {'; '.join(condf.reasons) or '없음'}) 인데 플래그 명세 판정은 {metf} "
+                        f"({'; '.join(whyf) or '조건 됨'})")
     # G2 seal.jsonl 모양
     if any(r.get("_corrupt") for r in T.recs):
         raise Violation("추가 전용", "seal.jsonl 에 깨진 줄")
@@ -901,7 +951,9 @@ def blind_calls(root: str):
         ("seal_status", lambda k: seal.seal_status(root, reader_kind=k)),
         ("unseal_events", lambda k: seal.unseal_events(root, reader_kind=k)),
         ("unseal_conditions", lambda k: seal.unseal_conditions(root, reader_kind=k)),
+        ("unseal_conditions_flag", lambda k: seal.unseal_conditions(root, reader_kind=k, allow_no_relabel=True)),
         ("unseal", lambda k: seal.unseal(root, SHA["R1"], by="L01", early_reason="x", reader_kind=k)),
+        ("unseal_flag", lambda k: seal.unseal(root, SHA["R1"], by="L01", reader_kind=k, allow_no_relabel=True)),
         ("read_run", lambda k: seal.read_run(root, RUN_ID, reader_kind=k)),
         ("read_topics", lambda k: seal.read_topics(root, RUN_ID, reader_kind=k)),
         ("read_words", lambda k: seal.read_words(root, RUN_ID, reader_kind=k)),
@@ -1186,6 +1238,20 @@ def _m_unreadable_as_pending():
     return _patch(seal, "unseal_conditions", f)
 
 
+def _m_flag_bypasses_unlocked():
+    """allow_no_relabel 길이 no_relabel_plan 뿐 아니라 '잠기지 않은 라벨링 세션' 도 말없이 빼는 코드(waived 에도 적지 않음)."""
+    real = seal.unseal_conditions
+
+    def f(*a, allow_no_relabel=False, **k):
+        c = real(*a, allow_no_relabel=allow_no_relabel, **k)
+        if allow_no_relabel:
+            keep = [(x, r) for x, r in zip(c.codes, c.reasons) if x != "unlocked_sessions"]
+            c.codes, c.reasons = [x for x, _r in keep], [r for _x, r in keep]
+            c.met = not c.reasons
+        return c
+    return _patch(seal, "unseal_conditions", f)
+
+
 MUTANTS = [
     # (이름, 무엇을 깨뜨렸나, 패치, 모델, 'code' 또는 'model')
     ("unlocked_ignored", "unseal_conditions 가 잠기지 않은 라벨링 세션을 보지 않음", _m_unlocked_ignored, "gate_plans", "code"),
@@ -1199,6 +1265,8 @@ MUTANTS = [
     ("lock_leak", "seal.jsonl 잠금(.unseal.lock)을 풀지 않음(다음 쓰기가 모두 seal_busy)", _m_lock_leak, "seal", "code"),
     ("unreadable_as_pending", "깨진 계획 파일을 relabel_not_locked 로 적음(고치기 전 코드)", _m_unreadable_as_pending,
      "gate_faults", "code"),
+    ("flag_bypasses_unlocked", "allow_no_relabel(D-26)이 잠기지 않은 라벨링 세션(unlocked_sessions)도 넘음",
+     _m_flag_bypasses_unlocked, "gate_plans", "code"),
     ("oracle_no_unreadable", "틀린 모델: '읽지 못한 계획은 막는다' 규칙을 뺀 명세", None, "gate_faults", "model"),
 ]
 

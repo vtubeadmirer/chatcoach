@@ -693,3 +693,168 @@ def test_rehearsal_with_sample_manifest_lock(tmp_path, capsys):
     assert all(p["errors"] == [] for p in s["projects"])
     p1 = s["projects"][0]
     assert p1["unseal"]["unsealed_now"] == 2 and p1["compare"]["agreement_made"] == 1
+
+
+# ───────────────────────────────────────────────────────────── D-26: 1편 · 재라벨 없이 해제 (--allow-no-relabel · --only)
+
+def _single_primary_pilot(projects, idx=1, **kw):
+    """합성 시범 하나: 1차 세션만 잠김, 재라벨 계획 없음(relabel\\ 도 없음) — D-26 의 '1편 · 1인 · 재라벨 없음' 모양."""
+    pj = build_pilot(projects, idx, **kw)
+    lock_primary(pj["root"], pj["sample_id"])
+    assert not os.path.exists(os.path.join(pj["root"], "relabel"))
+    return pj
+
+
+def _dry(projects, base, *extra):
+    return day.main(["--projects-root", str(projects), "--out-root", str(base / "reports"), "--dry-run",
+                     "--freeze", str(base / "pilot" / "freeze.json"), *extra])
+
+
+def test_allow_no_relabel_dry_run_single_primary_and_only_skips(tmp_path, capsys, monkeypatch):
+    """1차 하나만 잠긴 합성 시범: 플래그 없으면 전처럼 종료 3(no_relabel_plan), --allow-no-relabel --only 면 종료 0.
+    고르지 않은 편은 'skipped (not selected)' 로 적고 열지 않는다. dry-run 이라 아무것도 쓰지 않는다."""
+    base, projects = _data(tmp_path)
+    a = _single_primary_pilot(projects, 1)
+    b = build_pilot(projects, 2)                       # 1차가 잠기지 않음(고르지 않음)
+    c = ready_pilot(projects, 3)                       # 다 됨(고르지 않음 — 풀리면 안 된다)
+    na, nb, nc = (os.path.basename(p["root"]) for p in (a, b, c))
+    before = tree(base)
+    # 플래그 없음: 전과 같다 — 사유 no_relabel_plan, 종료 3
+    assert _dry(projects, base, "--only", na) == 3
+    out = capsys.readouterr().out
+    line = next(x for x in out.splitlines() if x.strip().startswith(na + ":"))
+    assert "사유 no_relabel_plan" in line and day.NO_HUMAN_AGREEMENT not in out
+    assert f"{nb}: 건너뜀" in out and day.SKIPPED_TEXT in out
+    # 플래그 있음 + --only: 종료 0, 머리에 '사람 일치도 없음', 고르지 않은 두 편은 건너뜀
+    seen = []
+    real = builtins.open
+
+    def spy(file, *aa, **kw):
+        if not isinstance(file, int):
+            seen.append(os.path.normcase(os.path.abspath(os.fspath(file))))
+        return real(file, *aa, **kw)
+    monkeypatch.setattr(builtins, "open", spy)
+    code = _dry(projects, base, "--allow-no-relabel", "--only", na)
+    monkeypatch.undo()
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert out.splitlines()[0].startswith(day.NO_HUMAN_AGREEMENT)
+    line = next(x for x in out.splitlines() if x.strip().startswith(na + ":"))
+    assert "충족 True" in line and "사유 -" in line and "플래그로 막지 않음 no_relabel_plan" in line
+    for n in (nb, nc):
+        assert f"  {n}: 건너뜀 — {day.SKIPPED_TEXT}" in out
+    assert "시범 1편" in out and "dry-run" in out
+    for skipped_root in (b["root"], c["root"]):                  # 고르지 않은 편은 한 번도 열지 않았다
+        sk = os.path.normcase(skipped_root) + os.sep
+        assert not [p for p in seen if p.startswith(sk)]
+    assert tree(base) == before and not (base / "reports").exists()
+    # run_day 로 보면: 요약에 고른 것·건너뛴 것·플래그가 숫자·이름만으로
+    roots, skipped = day.select_pilots(day.find_pilots(str(projects)), [na.upper()])     # 이름은 대소문자 무시
+    assert roots == [a["root"]] and skipped == [b["root"], c["root"]]
+    code, s = day.run_day(roots, out_root=str(base / "reports"), expect=1, dry_run=True, freeze_path=None,
+                          allow_no_relabel=True, skipped=skipped, only=True)
+    assert code == 0 and s["conditions"]["met"] and s["allow_no_relabel"] is True and s["human_agreement"] == "none"
+    assert s["selection"] == {"only": [na], "skipped": [nb, nc]}
+    (p,) = s["conditions"]["projects"]
+    assert p["name"] == na and p["reasons"] == [] and p["waived"] == [day.R_NO_PLAN] and p["locked"] == 1
+    assert s["conditions"]["waived_kinds"] == [day.R_NO_PLAN] and s["watch"]["violations"] == 0
+    assert s["watch"]["writes"] == 0 and s["projects"] == []
+    # 플래그가 있어도 다른 사유는 그대로 막는다: --only 없이 3편이면 b 가 unlocked_sessions(no_relabel_plan 은 빠짐)
+    code, s = day.run_day(day.find_pilots(str(projects)), out_root=str(base / "reports"), dry_run=True,
+                          freeze_path=None, allow_no_relabel=True)
+    per = {x["name"]: x for x in s["conditions"]["projects"]}
+    assert code == 3 and per[na]["met"] and per[nc]["met"] and per[nc]["waived"] == []
+    assert per[nb]["reasons"] == [day.R_UNLOCKED] and per[nb]["waived"] == [day.R_NO_PLAN] and not per[nb]["met"]
+    # --only 이름이 없으면 아무것도 열기 전에 종료 2
+    assert _dry(projects, base, "--allow-no-relabel", "--only", "pilot-99999999") == 2
+    assert "--only" in capsys.readouterr().err
+    assert tree(base) == before
+    for blob in (out, json.dumps(s, ensure_ascii=False)):
+        assert P_ID not in blob and RS_ID not in blob and SECRET_TEXT not in blob
+
+
+def test_calib_single_primary_pilot_needs_allow_no_relabel(tmp_path):
+    """보정의 '시범 세션이 모두 잠긴 뒤' 관문: 1차만 잠기고 계획이 없으면 플래그 없이는 전처럼 거부, 플래그(해제 당일 도구가
+    --allow-no-relabel 일 때만 넘김)면 연다. 1차가 잠기지 않았으면 플래그가 있어도 거부."""
+    base, projects = _data(tmp_path)
+    pj = build_pilot(projects, 1, seal_results=False)
+    for flag in (False, True):
+        with pytest.raises(cal.CalibError) as ei:
+            cal.calibrate(pj["root"], final_set="auto", allow_no_relabel=flag)
+        assert ei.value.code == 1 and "잠기기 전" in str(ei.value)
+    lock_primary(pj["root"])
+    with pytest.raises(cal.CalibError) as ei:
+        cal.calibrate(pj["root"], final_set="auto")
+    assert ei.value.code == 1 and "잠기기 전" in str(ei.value)
+    rep = cal.calibrate(pj["root"], final_set="auto", quick=True, allow_no_relabel=True)
+    assert rep["input"]["pilot"] and rep["input"]["groups"]["reacted"] == 5
+    assert rep["input"]["final_set"]["relabel_sessions"] == 0
+
+
+def test_allow_no_relabel_go_single_pilot_compare_calib_summary(tmp_path, capsys):
+    """--go --allow-no-relabel --only <1편>: 1차 하나의 최종 세트로 해제 → AI 비교 2판 → 판끼리 → 보정 → 요약. 일치도 보고서는
+    건너뛴다(오류 아님). 고르지 않은 편(다 된 편 포함)은 풀지 않는다. 플래그 없이 --go 면 전처럼 종료 3 · 아무것도 풀지 않음."""
+    base, projects = _data(tmp_path)
+    a = _single_primary_pilot(projects, 1)
+    c = ready_pilot(projects, 3)                       # 다 됐지만 고르지 않음 — 풀리면 안 된다
+    na, nc = os.path.basename(a["root"]), os.path.basename(c["root"])
+    out_root = base / "reports"
+    # 플래그 없이 --go: 전과 같다(no_relabel_plan · 종료 3 · 요약 폴더도 없음)
+    code, printed = _go(projects, out_root, capsys, "--only", na)
+    assert code == 3, printed
+    assert "사유 no_relabel_plan" in printed and "조건이 되지 않아 아무것도 풀지 않았습니다" in printed
+    assert not out_root.exists() and seal.seal_status(a["root"]).unsealed_count == 0
+    before_a, before_c = tree(a["root"]), tree(c["root"])
+    c_ai = seal.project_ai_dir(c["root"], c["pid"])
+    before_c_ai = tree(c_ai)
+    code, printed = _go(projects, out_root, capsys, "--allow-no-relabel", "--only", na)
+    assert code == 0, printed
+    assert printed.splitlines()[1].startswith(day.NO_HUMAN_AGREEMENT)           # 0번 줄은 '되돌릴 수 없는 해제…'
+    assert f"  {nc}: 건너뜀 — {day.SKIPPED_TEXT}" in printed
+    line = next(x for x in printed.splitlines() if x.startswith(f"  {na}: 해제"))
+    assert "해제 2(이미 0)" in line and "실패 0" in line and "대조 ok 2건" in line and "보고서 2" in line
+    assert "판끼리 1" in line and "보정 됨" in line and f"일치도 보고서 건너뜀({day.AGREE_SKIPPED})" in line
+    assert "오류 0" in line
+    d = out_root / "pilot-unseal-20261102"
+    names = sorted(os.listdir(d))
+    assert names == sorted(["ai-compare", "summary.json", "summary.md", "calib-pooled.json", f"calib-{na}.json"])
+    s = json.loads((d / "summary.json").read_text(encoding="utf-8"))
+    md = (d / "summary.md").read_text(encoding="utf-8")
+    assert s["allow_no_relabel"] is True and s["human_agreement"] == "none" and s["errors"] == []
+    assert s["selection"] == {"only": [na], "skipped": [nc]}
+    assert s["watch"]["violations"] == 0 and s["watch_run"]["violations"] == 0
+    (p,) = s["projects"]
+    assert p["name"] == na and p["errors"] == []
+    u = p["unseal"]
+    assert (u["sealed_valid"], u["unsealed_now"], u["failed"], u["presealed"], u["relabel_none"]) == (2, 2, [], 2, 2)
+    assert (u["topics"], u["words"], u["vectors"]) == (2, 2, 2) and u["verify"]["ok"] and u["verify"]["runs"] == 2
+    cm = p["compare"]
+    assert cm["agreement"] == day.AGREE_SKIPPED and cm["relabel_sessions"] == 0
+    assert cm["agreement_made"] == 0 and cm["agreement_errors"] == [] and cm["gate_report_id"] is None
+    assert cm["human_gate"] is None
+    assert sorted(r["label"] for r in cm["runs"]) == ["v0.2", "v0.3"]
+    v3 = next(r for r in cm["runs"] if r["label"] == "v0.3")
+    assert v3["pre_sealed"] is True and v3["e1_lenient"]["n"] >= 8
+    assert v3["e1_lenient"]["exact"] == pytest.approx(1.0)                      # v0.3 은 1차와 같은 값
+    (pair,) = cm["pairs"]
+    assert (pair["a"]["label"], pair["b"]["label"]) == ("v0.2", "v0.3") and pair["human"]["b_matches"] == 2
+    cb = p["calib"]
+    assert cb["groups"]["reacted"] == 5 and cb["groups"]["labelled_none"] == 3 and cb["context_run"].startswith("run-v03-")
+    assert len(os.listdir(d / "ai-compare" / a["pid"])) == 2                     # AI 비교 보고서 2판
+    assert not (d / "agreement").exists()                                        # 일치도 보고서는 만들지 않음
+    # 요약 머리·건너뜀·일치도 건너뜀
+    assert md.splitlines()[2].startswith(f"**{day.NO_HUMAN_AGREEMENT}**")
+    assert f"| {nc} | - | - | - | {day.SKIPPED_TEXT} | - |" in md and f"건너뜀 {day.SKIPPED_TEXT}: {nc}" in md
+    assert f"| {na} | 1 | 1 | True | - | {day.R_NO_PLAN} |" in md
+    assert f"재라벨 세션 0 이라 일치도 보고서를 건너뜀({day.AGREE_SKIPPED}, 오류 아님)" in md
+    # 해제 기록: relabel = none · allow_no_relabel = true
+    recs = jsonl.read(os.path.join(seal.project_ai_dir(a["root"], a["pid"]), "seal.jsonl")).records
+    un = [r for r in recs if r.get("kind") == "ai.unsealed"]
+    assert len(un) == 2 and all(r["relabel"] == "none" and r["allow_no_relabel"] is True and r["conditions_met"]
+                                for r in un)
+    # 고른 시범 폴더도, 고르지 않은 편(폴더·봉인 폴더)도 한 글자도 바뀌지 않았다
+    assert tree(a["root"]) == before_a and tree(c["root"]) == before_c and tree(c_ai) == before_c_ai
+    assert seal.seal_status(c["root"]).unsealed_count == 0 and seal.seal_status(c["root"]).sealed_count == 2
+    blob = md + (d / "summary.json").read_text(encoding="utf-8") + printed
+    for secret in (SECRET_TEXT, SECRET_NICK, SECRET_WORD, *TEXTS, "떡볶이", P_ID, RS_ID):
+        assert secret not in blob, secret

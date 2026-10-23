@@ -36,7 +36,9 @@ derived\\asr-words.json, 주제 흐름 파일. 아무것도 쓰지 않는다(--o
   **사람이 '반응 미확인' 으로 본 채팅**(result unconfirmed, 같은 eval)은 따로 '확인된 반응 없음'(labelled_none) 묶음으로 낸다.
   zip 에는 평가 제외(exclude_from_eval) 행이 없어 그 채팅은 반응 없음 쪽에 섞일 수 있다(건수만 info 에 '모름' 으로 적는다).
   시범 프로젝트는 이 길로만, **시범 세션이 모두 잠긴 뒤**(reference_set.pilot_sessions_locked = seal.unseal_conditions 와 같은
-  판단)에만 연다. 맥락(주제 흐름·전사 낱말)은 시범이면 **해제된 run 의 짝**(seal.read_topics · seal.read_words)에서만 읽는다
+  판단)에만 연다. calibrate(allow_no_relabel=True) 는 해제 당일 도구가 --allow-no-relabel(08 D-26) 일 때만 준다 — 그때는
+  seal.unseal_conditions(allow_no_relabel=True)(계획 파일이 없으면 no_relabel_plan 만 막지 않음)로 본다. 명령줄에는 없다.
+  맥락(주제 흐름·전사 낱말)은 시범이면 **해제된 run 의 짝**(seal.read_topics · seal.read_words)에서만 읽는다
   (derived\\asr-words.json 같은 평문 자리는 보지 않는다). --run-id 로 고르고, 없으면 전사 낱말 짝이 있는 가장 늦게 푼 run.
 
 여러 프로젝트 묶기: pool_reports(결과 목록) 가 묶음·판별 건수를 더해 같은 숫자(분포·lift·정밀도·p·후보)를 다시 낸다.
@@ -977,9 +979,14 @@ def load_context(project: str, *, topics_path: str | None) -> tuple[list, list, 
     return blocks, windows, info
 
 
-def _pilot_locked(project: str) -> bool:
+def _pilot_locked(project: str, *, allow_no_relabel: bool = False) -> bool:
+    """시범 세션이 모두 잠겼나. allow_no_relabel(D-26, 해제 당일 도구만): 계획 파일이 하나도 없으면 no_relabel_plan 만 막지
+    않는 seal.unseal_conditions 로 본다(1차 없음·잠기지 않음·표본 검증 실패 등은 그대로 막는다)."""
     from app import reference_set as rs
     try:
+        if allow_no_relabel:
+            from app import seal
+            return bool(seal.unseal_conditions(project, allow_no_relabel=True).met)
         return bool(rs.pilot_sessions_locked(project)[0])
     except Exception:  # noqa: BLE001 — 판단 못 하면 잠기지 않은 것으로(블라인드 쪽으로 안전하게)
         return False
@@ -997,9 +1004,10 @@ def _read_pdata(project: str) -> dict:
 def calibrate(project: str, *, topics_path: str | None = None, labels_path: str | None = None,
               grades: Sequence[str] | None = None, near_sec: int = DEFAULT_NEAR_SEC, quick: bool = False,
               final_set=None, final_eval: str = "lenient", run_id: str | None = None,
-              ai_root: str | None = None) -> dict:
+              ai_root: str | None = None, allow_no_relabel: bool = False) -> dict:
     """보정 자료 한 프로젝트. final_set 을 주면(zip 경로·'auto'·1차 세션 ID·build_final_set 결과) 손라벨 대신 최종 세트를
-    쓰고 grades 기본은 FINAL_GRADES(direct 만). 시범 프로젝트는 final_set 길로만, 시범 세션이 모두 잠긴 뒤에만 연다."""
+    쓰고 grades 기본은 FINAL_GRADES(direct 만). 시범 프로젝트는 final_set 길로만, 시범 세션이 모두 잠긴 뒤에만 연다.
+    allow_no_relabel: 해제 당일 도구의 --allow-no-relabel(D-26) — '잠긴 뒤' 를 그 플래그의 해제 조건으로 본다(_pilot_locked)."""
     project = os.path.abspath(project)
     if not os.path.isfile(os.path.join(project, "project.json")):
         raise CalibError("프로젝트 폴더가 아닙니다(project.json 없음)")
@@ -1014,7 +1022,7 @@ def calibrate(project: str, *, topics_path: str | None = None, labels_path: str 
     else:
         if final_eval not in FINAL_EVALS:
             raise CalibError("--final-eval 은 lenient 또는 strict")
-        if pilot and not _pilot_locked(project):
+        if pilot and not _pilot_locked(project, allow_no_relabel=allow_no_relabel):
             raise CalibError("시범 세션이 모두 잠기기 전에는 최종 세트를 열지 않습니다 (D-17 4)", 1)
         if pilot and topics_path:
             raise CalibError("시범 프로젝트의 주제 흐름은 해제된 run 에서만 읽습니다(--topics 를 쓰지 않음)")

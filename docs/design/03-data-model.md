@@ -713,6 +713,7 @@ flowchart LR
 | `engine_version` | 해제한 결과의 `engine.version`(없으면 null). 분석 화면의 '판 A 기본'·고르기 글이 이 값을 읽는다(`SealEntry.engine_version` → `RunChoice`). 옛 기록에는 없다 = '판 모름' | D-22 (23 5-2 의 10) |
 | `pairs[]` | 짝마다 `kind`(`topics`·`words`·`vectors`)·`sha256`(짝 봉인)·`file_sha256`(풀어 쓴 파일, 못 풀었으면 null)·`error`(문제 코드 또는 null). 짝이 없으면 빈 목록. 옛 기록에는 없다 | D-22 |
 | `topics`·`topics_error`, `words`·`words_error`, `vectors`·`vectors_error` | **짝이 있을 때만** 쓰는 칸. `<짝>` = `{sha256, file_sha256}` 또는 null, `<짝>_error` = 문제 코드 또는 null. 코드: `<짝>_unreadable`(봉인 파일을 못 읽음)·`<짝>_bin_mismatch`(해시·크기가 기록과 다름)·`<짝>_json`·`<짝>_format`. `read_topics`·`read_words`·`read_vectors` 는 이 칸의 `file_sha256` 과 파일을 대조한다 | topics E 둘째, words G 둘째, vectors D-22 |
+| `allow_no_relabel`, `relabel` | **재라벨 없이 해제(08 D-26)를 명시 플래그로 했을 때만** 쓰는 칸(`seal.unseal(allow_no_relabel=True)` — 명령줄은 `tools/pilot_unseal_day.py --allow-no-relabel` 하나). `allow_no_relabel` = 늘 true, `relabel` = `none`(그때 `relabel\` 에 계획 파일이 하나도 없음 — 사유 `no_relabel_plan` 하나만 막지 않았다) 또는 `planned`(계획이 있어 플래그가 한 일이 없음). 플래그 없는 해제 기록에는 두 칸이 없다(모양 그대로). 없음 = 재라벨 조건을 다 본 보통 해제 | D-26 |
 
 - **해제 전 읽기 없음.** `read_run`·`read_topics`·`read_words`·`read_vectors` 는 `ai.unsealed` 기록이 없으면 파일을 열기 전에 `SealNotUnsealedError`(= `SealBlindError`)를 낸다. 분석 세션은 해제된 것만 읽는다(12-1, 06 7-3).
 - **시범 프로젝트(`pilot-*`)의 전사 낱말·벡터는 이 해제 길로만 만든다**(`tools/engine_to_ai.py --from-project … --words --vectors --seal`). `derived\asr-words.json`·`asr-topic-vectors.json` 을 시범 프로젝트에 쓰지 않는다(2-1).
