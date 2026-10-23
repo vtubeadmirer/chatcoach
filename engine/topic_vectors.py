@@ -6,7 +6,8 @@ G 시청자 훈련 채점기(app/core/viewer_score)의 주제 적합성은 낱�
 '창 ↔ 창' 유사도로 주제 경계와 같은 주제 줄기·관련 앞선 창을 찾고, 쓴 글 쪽은 낱말 겹침(+ 동의어·2자 머리)으로 본다.
 
 방법(로컬만, D-06·D-17 6. 외부 호출·모델 다운로드 없음)
-  1. 보정: engine.transcript_words 와 같은 규칙(project.json 의 활성 보정, --offset-ms·--file-start-ms 가 이김).
+  1. 보정: engine.transcript_words 와 같은 규칙(project.json 의 활성 보정, --offset-ms·--file-start-ms 가 이김). 그 전에
+     asr 시각에 --asr-start-ms(기본 0, asr 를 영상 파일 중간부터 잘라 냈을 때 그 시작)를 더한다(TW.shift_segments).
   2. 창 글: 낱말 시각(asr words[].start_ms)이 있으면 낱말을 그 시각의 창에 시각 순으로 잇는다. 없으면 구간 글 전체를
      구간이 걸친 모든 창에 넣는다. span_ms(기본 = window_ms)가 창보다 길면 그 창 끝에서 span 만큼 앞 창들의 글을 잇는다.
      공백·기호를 뺀 글자가 min_chars 보다 적은 창은 벡터를 만들지 않는다(말 없는 창).
@@ -26,7 +27,7 @@ engine.transcript_words.out_protected, engine_to_ai 의 vectors_out_unprotected 
 
 실행(저장소 루트, **엔진 venv** — numpy·onnxruntime·tokenizers 가 있어야 한다)
   .venv-engine\\Scripts\\python -m engine topic-vectors --project <폴더> [--out <json>] [--asr F] [--start-ms N --end-ms N]
-         [--offset-ms N] [--file-start-ms N] [--window-sec 10] [--span-sec 10] [--encoding f16|round4]
+         [--offset-ms N] [--file-start-ms N] [--asr-start-ms N] [--window-sec 10] [--span-sec 10] [--encoding f16|round4]
          [--models-dir D] [--backend onnx|lmstudio]
 종료 코드: 0 정상 · 1 거부(시범·결과 검사 실패) · 2 입력 오류 · 3 임베딩 실행기·모델 없음(아무것도 쓰지 않음)
 """
@@ -374,12 +375,18 @@ def load_embedder(models_dir: str | None = None, backend: str = "onnx"):
 def from_project(project_dir: str, *, embedder=None, models_dir: str | None = None, backend: str = "onnx",
                  asr_path: str | None = None, offset_ms: int | None = None, file_start_ms: int | None = None,
                  start_ms: int | None = None, end_ms: int | None = None, cfg: VectorsConfig = VectorsConfig(),
-                 now: datetime | None = None, allow_pilot: bool = False) -> dict:
+                 now: datetime | None = None, allow_pilot: bool = False, asr_start_ms: int = 0) -> dict:
     """프로젝트 폴더 → topic-vectors 문서(메모리, 파일을 쓰지 않음). 시범은 읽기 전에 거부(allow_pilot 은 봉인 경로만).
 
+    asr_start_ms: asr 를 영상 파일의 어느 시각부터 잘라 냈나(보정 전에 더함, TW.shift_segments). calibration 칸은 키가
+    고정이라 stats.asr_start_ms(숫자)에 남긴다.
     embedder 를 주지 않으면 load_embedder(models_dir, backend). 결과가 검사를 못 넘으면 VectorsError('bad_result')."""
     if not allow_pilot:
         _refuse_pilot(project_dir, asr_path)
+    try:
+        a = TW.asr_start_or_error(asr_start_ms)
+    except TW.WordsError as e:
+        raise VectorsError(e.code, str(e)) from e
     t0 = time.perf_counter()
     pj = os.path.join(project_dir, "project.json")
     pdata: dict = {}
@@ -393,7 +400,9 @@ def from_project(project_dir: str, *, embedder=None, models_dir: str | None = No
         cal, fs, src = TW.calibration_for(pdata, offset_ms=offset_ms, file_start_ms=file_start_ms)
     except TW.WordsError as e:
         raise VectorsError(e.code, str(e)) from e
+    segs = TW.shift_segments(segs, a)                 # asr 시각 → 영상 파일 시각(보정 전)
     texts, stats = window_texts(segs, cal, fs, cfg=cfg, start_ms=start_ms, end_ms=end_ms)
+    stats["asr_start_ms"] = a
     if embedder is None:
         embedder, _st = load_embedder(models_dir, backend)
     now = now or datetime.now().astimezone()
@@ -425,7 +434,7 @@ def write_json(doc: Mapping, path: str) -> None:
     os.replace(tmp, path)
 
 
-INPUT_ERRORS = ("no_asr", "bad_asr", "bad_project", "bad_calibration", "bad_range")
+INPUT_ERRORS = TW.INPUT_ERRORS               # no_asr·bad_asr·bad_project·bad_calibration·bad_range·bad_asr_start
 MODEL_ERRORS = ("model_missing", "hash_mismatch", "backend_unavailable", "disabled")
 
 
@@ -443,7 +452,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--start-ms", type=int, help="VOD 시각. 이 앞 말은 넣지 않는다")
     ap.add_argument("--end-ms", type=int, help="VOD 시각. 이 뒤(같음 포함) 말은 넣지 않는다")
     ap.add_argument("--offset-ms", type=int, help="보정 오프셋(명령줄 값이 project.json 보다 앞선다)")
-    ap.add_argument("--file-start-ms", type=int, help="클립 파일 0초의 VOD 시각")
+    ap.add_argument("--file-start-ms", type=int,
+                    help="클립 파일 0초의 VOD 시각(project.json 보정과 짝). asr 를 잘라 낸 시작이 아니다")
+    ap.add_argument("--asr-start-ms", type=int, default=0,
+                    help="asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인지. 영상 파일 시각 = asr 시각 + 이 값(보정 전). 기본 0")
     ap.add_argument("--window-sec", type=int, default=10)
     ap.add_argument("--span-sec", type=int, help="창 하나가 덮는 길이(기본 = --window-sec, 그 배수)")
     ap.add_argument("--encoding", choices=tuple(ENCODINGS), default="f16")
@@ -470,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         doc = from_project(ns.project, models_dir=ns.models_dir, backend=ns.backend, asr_path=ns.asr,
                            offset_ms=ns.offset_ms, file_start_ms=ns.file_start_ms, start_ms=ns.start_ms,
-                           end_ms=ns.end_ms, cfg=cfg)
+                           end_ms=ns.end_ms, cfg=cfg, asr_start_ms=ns.asr_start_ms)
         write_json(doc, out)
     except VectorsError as e:
         print(json.dumps({"error": e.code}, ensure_ascii=False))
@@ -480,7 +492,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     st, c, m = doc["stats"], doc["calibration"], doc["model"]
     print(json.dumps({"out": out, "windows": st["windows"], "windows_with_speech": st["windows_with_speech"],
-                      "skipped_short": st["skipped_short"], "dim": doc["dim"], "encoding": doc["encoding"],
+                      "skipped_short": st["skipped_short"], "dropped_out_of_range": st["dropped_out_of_range"],
+                      "asr_start_ms": st["asr_start_ms"], "dim": doc["dim"], "encoding": doc["encoding"],
                       "model": m["name"], "model_sha256": m["model_sha256"], "calibration_source": c["source"],
                       "calibration_status": c["status"], "embed_s": st["embed_s"], "elapsed_s": st["elapsed_s"]},
                      ensure_ascii=False))

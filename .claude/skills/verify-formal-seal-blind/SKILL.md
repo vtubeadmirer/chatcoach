@@ -87,7 +87,7 @@ description: "AI 결과 봉인·해제(블라인드 보장, 06 7장)의 형식 �
 
 ## 무엇을 덮나 (적용 기록)
 
-**동기 커밋: `404abc8`** (2026-10-23 확인, 사유 코드·봉인 잠금 반영 뒤 check_seal_blind·--mutants 통과). 아래 파일·함수가 이 커밋 뒤로 바뀌었으면 검증을 다시 본다. `git diff 404abc8 -- app/seal.py app/agreement_report.py app/relabel.py app/locking.py app/core/visibility.py` 로 확인한다. 동기 커밋은 **검증이 새 커밋의 코드를 여전히 그대로 그린다고 확인한 뒤에만** 앞으로 옮긴다(이 파일의 이 줄을 고친다).
+**동기 커밋: `f012609`** (2026-10-24 확인, D-26 플래그 해제·D-27 3 해제 기록 판단 반영 뒤 check_seal_blind·--mutants 12/12 통과). 아래 파일·함수가 이 커밋 뒤로 바뀌었으면 검증을 다시 본다. `git diff f012609 -- app/seal.py app/agreement_report.py app/relabel.py app/locking.py app/core/visibility.py` 로 확인한다. 동기 커밋은 **검증이 새 커밋의 코드를 여전히 그대로 그린다고 확인한 뒤에만** 앞으로 옮긴다(이 파일의 이 줄을 고친다).
 
 | 검사 | 덮는 코드 |
 |---|---|

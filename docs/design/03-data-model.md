@@ -734,8 +734,13 @@ flowchart LR
 
 ```text
 .venv\Scripts\python tools\ai_seal.py status --project <pilot 폴더>          (먼저 pairs 의 topics·words·vectors 를 본다)
-.venv-engine\Scripts\python tools\ai_seal.py attach-pairs --project <pilot 폴더> --all --by L01 --from-engine --asr <sealed-work\…asr.json> [--start-ms N --end-ms N]
+.venv-engine\Scripts\python tools\ai_seal.py attach-pairs --project <pilot 폴더> --all --by L01 --from-engine --asr <sealed-work\…asr.json> --asr-start-ms 1200000 --start-ms 1200000 --end-ms 3600000
 ```
+
+(숫자는 시범 1편: VOD 전체 파일에서 20:00 부터 40분 wav 를 뽑아 전사.) 시각 입력 두 가지는 뜻이 다르다(2026-10-24, 시범 봉인 때 `--file-start-ms` 로 대신 써 발화가 20분 밀렸다):
+
+- `--file-start-ms N` — 클립 파일이 VOD 의 어디서 시작하나(project.json 보정과 짝). 보정이 있으면 상쇄되어 asr 시각을 옮기지 않는다.
+- `--asr-start-ms N` — asr 가 영상 파일의 어디서 잘라 낸 음성인가(`extract_audio --start-ms N`). 영상 파일 시각 = asr 시각 + N(보정 전). 판정·주제 흐름·전사 낱말·벡터가 모두 같은 값을 쓴다. 판정 v2 초안은 `calibration.asr_start_ms`, 전사 낱말·벡터는 `stats.asr_start_ms` 에 남는다(두 문서의 `calibration` 칸은 키가 고정이라 넣지 않음). 봉인하는 ai-result 1판에는 `calibration` 칸이 없어 남지 않는다.
 
 **해제·봉인 오류 원인 코드 (`app.seal.SEAL_ERROR_CODES`, 33개)** — `SealError` 마다 `.code` 속성에 둔다. 메시지(문장)는 사람이 읽는 그대로 화면에 보이고, 도구·요약은 코드만 적는다(`ai_seal` 오류 줄의 `code`, 해제 당일 요약의 `unseal:<코드>`). 코드에는 내용·경로·ID 가 없다. 어긋나면 `app/seal.py` 의 튜플이 맞다.
 

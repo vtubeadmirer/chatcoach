@@ -3,15 +3,19 @@
 입력
   - chat/messages.jsonl (가명 채팅. text 만 판정한다)
   - chat/protected/identities.jsonl (선택. 수집 PC 로컬의 가림 전 닉네임 — 닉네임 호명 증거에만 쓰고 결과에 넣지 않는다)
-  - derived/asr.json (engine.asr 결과, 영상 파일 시각)
+  - derived/asr.json (engine.asr 결과. 시각은 wav 0초 기준)
+  - --asr-start-ms (기본 0): asr 가 **영상 파일의 어느 시각부터 잘라 낸 음성인가**. 영상 파일 시각 = asr 시각 + asr_start_ms.
+      tools/extract_audio.py --start-ms S 로 뽑은 wav 를 전사했으면 S 를 준다. 보정(video_to_chat_ms) 전에 더한다.
   - 보정: project.json 의 calibration(있으면) 또는 명령줄 --offset-ms · --file-start-ms (기본 0, '앵커로 보정 필요')
+      --file-start-ms 는 **클립 파일이 VOD 의 어디서 시작하나**(project.json 보정과 짝)다. asr 를 잘라 낸 시작이 아니다 —
+      project.json 보정이 있으면 그 값은 되돌려 넣어 상쇄되므로 asr 시각을 옮기지 않는다(2026-10-24 시범 봉인의 함정).
 출력
   ai-result 형식 schema_version 2 초안(측정 문서 2장에 정의). schemas/ai-result.schema.json(v1)은 고치지 않았다.
   to_v1() 로 v1 스키마에 맞는 부분만 뽑을 수 있다.
 
 실행(저장소 루트에서. v0.2 는 무거운 의존성이 없어 앱 .venv 로도 돈다)
   python -m engine.link --project <폴더> --out <결과.json> [--start-ms 0] [--end-ms 300000] [--review-csv <csv>]
-      [--engine v0.3|v0.2] [--semantic-backend onnx|lmstudio|off] [--models-dir D]
+      [--asr F] [--asr-start-ms N] [--engine v0.3|v0.2] [--semantic-backend onnx|lmstudio|off] [--models-dir D]
 
 판(版)
   v0.2 (engine.version '0.1.0')  글자 겹침·시간 창 위주. link(..., semantic=None) — 2026-10-21 판 그대로.
@@ -43,6 +47,7 @@ from app.core.timecode import Calibration, calibration_from_json, chat_to_video_
 
 from . import features as F
 from . import semantic as S      # 표준 라이브러리만 쓴다. 무거운 실행기(onnxruntime)는 load_default 안에서만 부른다
+from .transcript_words import check_asr_start   # asr_start_ms 검사(transcript_words·topic_vectors 와 같은 규칙)
 
 ENGINE_NAME = "chatcoach-link"
 ENGINE_VERSION = "0.1.0"           # v0.2 규칙까지(판 번호를 올리지 않았다)
@@ -109,7 +114,7 @@ class LinkConfig:
 @dataclass(frozen=True)
 class Utterance:
     seg_id: int
-    start_ms: int      # 영상 파일 시각
+    start_ms: int      # 영상 파일 시각(asr 시각 + asr_start_ms)
     end_ms: int
     text: str
 
@@ -134,6 +139,7 @@ class Inputs:
     messages_sha256: str | None = None
     asr_meta: dict = field(default_factory=dict)
     skipped_kinds: dict = field(default_factory=dict)
+    asr_start_ms: int = 0       # utterances 에 이미 더한 값(기록용). 영상 파일 시각 = asr 시각 + asr_start_ms
 
 
 # ── 읽기 ─────────────────────────────────────────────────────────────────
@@ -188,25 +194,75 @@ def load_identities(path: str) -> dict[str, list[str]]:
     return out
 
 
-def load_asr(path: str) -> tuple[list[Utterance], dict]:
+def load_asr(path: str, asr_start_ms: int = 0) -> tuple[list[Utterance], dict]:
+    """asr.json → (발화 목록, 메타). 발화 시각 = asr 시각 + asr_start_ms (영상 파일 시각, 보정 전).
+
+    asr_start_ms: asr 가 영상 파일의 이 시각부터 잘라 낸 음성(tools/extract_audio.py --start-ms)일 때 그 시작. 기본 0.
+    Utterance 는 낱말 시각을 담지 않으므로 구간 start/end 만 옮긴다(낱말 시각은 engine.transcript_words.shift_segments 가
+    같은 값으로 옮긴다). meta['duration_ms'] 는 음성 길이 그대로다(끝 = asr_start_ms + duration_ms)."""
+    a = check_asr_start(asr_start_ms)
     d = _read_json(path)
     if d.get("format") != "chatcoach.asr":
         raise ValueError("asr.json 형식이 아닙니다")
-    utts = [Utterance(int(s.get("id", i)), int(s["start_ms"]), int(s["end_ms"]), s.get("text", ""))
+    utts = [Utterance(int(s.get("id", i)), int(s["start_ms"]) + a, int(s["end_ms"]) + a, s.get("text", ""))
             for i, s in enumerate(d.get("segments", []))]
     utts.sort(key=lambda u: (u.start_ms, u.seg_id))
     meta = {"model": (d.get("model") or {}).get("name"), "vad": (d.get("settings") or {}).get("vad"),
             "duration_ms": (d.get("audio") or {}).get("duration_ms"), "sha256": _sha256_file(path),
-            "segments": len(utts)}
+            "segments": len(utts), "asr_start_ms": a, "warnings": []}
     return utts, meta
 
 
+ASR_SHORT_PCT = 60        # asr 음성 길이가 매체 길이의 이 % 밑이면 '잘라 낸 음성인데 asr_start_ms 가 0' 을 의심한다
+W_ASR_SHORTER = "asr_shorter_than_media"
+
+
+def _is_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _media_duration_ms(project_data: Mapping | None) -> int | None:
+    """project.json media.current.probe.duration_ms (읽을 수 있을 때만, 양의 정수)."""
+    media = project_data.get("media") if isinstance(project_data, Mapping) else None
+    cur = media.get("current") if isinstance(media, Mapping) else None
+    probe = cur.get("probe") if isinstance(cur, Mapping) else None
+    v = probe.get("duration_ms") if isinstance(probe, Mapping) else None
+    return v if _is_int(v) and v > 0 else None
+
+
+def asr_shorter_warning(asr_duration_ms, media_duration_ms, *, file_start_ms: int | None,
+                        pct: int = ASR_SHORT_PCT) -> dict | None:
+    """함정 경고(2026-10-24 시범 봉인): --file-start-ms 를 주고(project.json 보정과 짝 → asr 시각을 옮기지 않음)
+    asr_start_ms 는 0 인데 asr 음성이 매체 길이의 pct% 보다 짧으면, asr 가 잘라 낸 음성이고 --asr-start-ms 가 빠졌을 수 있다.
+    숫자·코드만 담는다. 두 길이 중 하나라도 모르면 None. 정수 비교(asr·100 < pct·매체)."""
+    if not (_is_int(asr_duration_ms) and _is_int(media_duration_ms)) or media_duration_ms <= 0 or asr_duration_ms < 0:
+        return None
+    if asr_duration_ms * 100 >= pct * media_duration_ms:
+        return None
+    return {"code": W_ASR_SHORTER, "asr_duration_ms": asr_duration_ms, "media_duration_ms": media_duration_ms,
+            "file_start_ms": file_start_ms}
+
+
+def format_asr_warning(w: Mapping) -> str:
+    """경고 한 줄(표준 오류용, 숫자만 — 초). 모르는 코드면 코드만."""
+    if w.get("code") == W_ASR_SHORTER:
+        return (f"경고 {W_ASR_SHORTER}: asr 음성 {w['asr_duration_ms'] / 1000:.1f}초 < 영상 "
+                f"{w['media_duration_ms'] / 1000:.1f}초의 {ASR_SHORT_PCT}% "
+                f"(--file-start-ms {(w.get('file_start_ms') or 0) / 1000:.1f}초, --asr-start-ms 0초). "
+                f"--file-start-ms 는 클립 시작(보정 짝)이라 asr 시각을 옮기지 않는다 — 영상 중간부터 잘라 낸 음성이면 "
+                f"--asr-start-ms 를 주세요")
+    return f"경고 {w.get('code')}"
+
+
 def load_project(project_dir: str, *, use_identities: bool = True, offset_ms: int | None = None,
-                 file_start_ms: int | None = None, asr_path: str | None = None) -> Inputs:
-    """프로젝트 폴더에서 입력을 모은다. project.json 이 있으면 활성 보정을 쓰고, 명령줄 값이 있으면 그것이 이긴다."""
+                 file_start_ms: int | None = None, asr_path: str | None = None, asr_start_ms: int = 0) -> Inputs:
+    """프로젝트 폴더에서 입력을 모은다. project.json 이 있으면 활성 보정을 쓰고, 명령줄 값이 있으면 그것이 이긴다.
+
+    asr_start_ms: asr 를 영상 파일의 어느 시각부터 잘라 냈나(영상 파일 시각 = asr 시각 + asr_start_ms, 보정 전에 더함).
+    file_start_ms: 클립 파일이 VOD 의 어디서 시작하나(project.json 보정과 짝). 두 값은 뜻이 다르다."""
     msg_path = os.path.join(project_dir, "chat", "messages.jsonl")
     chats, skipped = load_messages(msg_path)
-    utts, asr_meta = load_asr(asr_path or os.path.join(project_dir, "derived", "asr.json"))
+    utts, asr_meta = load_asr(asr_path or os.path.join(project_dir, "derived", "asr.json"), asr_start_ms)
     nick = None
     idp = os.path.join(project_dir, "chat", "protected", "identities.jsonl")
     if use_identities and os.path.isfile(idp):
@@ -214,6 +270,7 @@ def load_project(project_dir: str, *, use_identities: bool = True, offset_ms: in
 
     cal, src, video_no = Calibration(), "default", None
     pj_cal = None
+    p: dict = {}
     pj = os.path.join(project_dir, "project.json")
     if os.path.isfile(pj):
         p = _read_json(pj)
@@ -239,9 +296,13 @@ def load_project(project_dir: str, *, use_identities: bool = True, offset_ms: in
                       method="single_offset", status="unverified")
         fs = file_start_ms or 0
         src = "cli"
+    if file_start_ms is not None and pj_cal is not None and asr_meta["asr_start_ms"] == 0:
+        w = asr_shorter_warning(asr_meta.get("duration_ms"), _media_duration_ms(p), file_start_ms=file_start_ms)
+        if w is not None:
+            asr_meta["warnings"].append(w)
     return Inputs(chats=chats, utterances=utts, nicknames=nick, calibration=cal, file_start_in_vod_ms=fs,
                   calibration_source=src, video_no=video_no, messages_sha256=_sha256_file(msg_path),
-                  asr_meta=asr_meta, skipped_kinds=skipped)
+                  asr_meta=asr_meta, skipped_kinds=skipped, asr_start_ms=asr_meta["asr_start_ms"])
 
 
 # ── 증거 계산 ────────────────────────────────────────────────────────────
@@ -398,6 +459,8 @@ def link(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms: int | None = 
     ngr = [F.char_ngrams(c.text) for c in chats]
     low = [F.is_low_content(c.text) for c in chats]
     audio_end = inp.asr_meta.get("duration_ms")
+    if audio_end is not None:
+        audio_end = audio_end + inp.asr_start_ms      # 음성 끝(영상 파일 시각) = 잘라 낸 시작 + 음성 길이
     W = cfg.rule.time_window_ms
     sw = cfg.similar_window_ms
 
@@ -666,10 +729,13 @@ def _build_doc_v02(inp: Inputs, reactions, stats, cfg: LinkConfig, *, start_ms, 
             "source": inp.calibration_source, "offset_ms": cal.offset_ms, "method": cal.method,
             "file_start_in_vod_ms": inp.file_start_in_vod_ms, "status": cal.status,
             "needs_anchor_calibration": cal.status == "unverified",
+            # asr 시각 → 영상 파일 시각에 더한 값(보정 전). v2 초안에만 있다 — v1(to_v1·engine_to_ai)에는 calibration 칸이 없다
+            "asr_start_ms": inp.asr_start_ms,
         },
         "scope": {"start_ms": start_ms, "end_ms": end_ms, "asr_duration_ms": inp.asr_meta.get("duration_ms")},
         "inputs": {"asr_sha256": inp.asr_meta.get("sha256"), "asr_segments": inp.asr_meta.get("segments"),
-                   "identities_used": inp.nicknames is not None},
+                   "identities_used": inp.nicknames is not None,
+                   "asr_warnings": [dict(w) for w in inp.asr_meta.get("warnings") or []]},   # 숫자·코드만
         "config": cfg.to_json(),
         # guide-config 가 null(미정)인 값을 엔진이 대신 정해 쓴 것. 이 값에 기댄 similar_chat_ids·'불명확' 은 엔진 가정이다.
         "assumptions": {
@@ -826,10 +892,10 @@ def build_doc(inp: Inputs, cfg: LinkConfig = LinkConfig(), *, start_ms=None, end
 def run(project_dir: str, out_path: str, *, start_ms=None, end_ms=None, use_identities=True, offset_ms=None,
         file_start_ms=None, asr_path=None, review_csv=None, top=20, cfg: LinkConfig = LinkConfig(),
         v1_out=None, engine: str = "v0.2", semantic_backend: str = "onnx", models_dir: str | None = None,
-        scorer=None) -> dict:
+        scorer=None, asr_start_ms: int = 0) -> dict:
     t0 = time.perf_counter()
     inp = load_project(project_dir, use_identities=use_identities, offset_ms=offset_ms,
-                       file_start_ms=file_start_ms, asr_path=asr_path)
+                       file_start_ms=file_start_ms, asr_path=asr_path, asr_start_ms=asr_start_ms)
     t_load = time.perf_counter() - t0
     doc = build_doc(inp, cfg, start_ms=start_ms, end_ms=end_ms, engine=engine, semantic_backend=semantic_backend,
                     models_dir=models_dir, scorer=scorer)
@@ -864,7 +930,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--start-ms", type=int)
     ap.add_argument("--end-ms", type=int)
     ap.add_argument("--offset-ms", type=int, help="보정 오프셋(영상 = VOD − 클립 시작 + 오프셋). 주면 project.json 보다 앞선다")
-    ap.add_argument("--file-start-ms", type=int, help="영상 파일이 VOD 몇 ms 에서 시작하는지(클립)")
+    ap.add_argument("--file-start-ms", type=int,
+                    help="클립 파일이 VOD 몇 ms 에서 시작하는지(project.json 보정과 짝). asr 를 잘라 낸 시작이 아니다")
+    ap.add_argument("--asr-start-ms", type=int, default=0,
+                    help="asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인지(extract_audio --start-ms 값). "
+                         "영상 파일 시각 = asr 시각 + 이 값(보정 전). 기본 0")
     ap.add_argument("--no-identities", action="store_true", help="닉네임 목록을 쓰지 않음(호명은 판단 불가)")
     ap.add_argument("--review-csv", help="사람 확인용 상위 N건 CSV(저장소 밖에만 둘 것)")
     ap.add_argument("--top", type=int, default=20)
@@ -885,14 +955,17 @@ def main(argv: list[str] | None = None) -> int:
         doc = run(ns.project, ns.out, start_ms=ns.start_ms, end_ms=ns.end_ms, use_identities=not ns.no_identities,
                   offset_ms=ns.offset_ms, file_start_ms=ns.file_start_ms, asr_path=ns.asr,
                   review_csv=ns.review_csv, top=ns.top, v1_out=ns.v1_out, engine=ns.engine,
-                  semantic_backend=ns.semantic_backend, models_dir=ns.models_dir)
+                  semantic_backend=ns.semantic_backend, models_dir=ns.models_dir, asr_start_ms=ns.asr_start_ms)
     except (OSError, ValueError, KeyError) as e:
         print(json.dumps({"error": type(e).__name__, "detail": str(e)[:300]}, ensure_ascii=False))
         return 1
+    for w in doc["inputs"].get("asr_warnings") or []:
+        print(format_asr_warning(w), file=sys.stderr)
     sem = doc.get("semantic") or {}
     print(json.dumps({"out": ns.out, "engine_version": doc["engine"]["version"],
                       "semantic": {k: sem.get(k) for k in ("active", "status", "fallback")} if sem else None,
-                      "calibration": doc["calibration"], "stats": doc["stats"]},
+                      "calibration": doc["calibration"], "asr_warnings": doc["inputs"].get("asr_warnings") or [],
+                      "stats": doc["stats"]},
                      ensure_ascii=False, indent=1))
     return 0
 

@@ -7,7 +7,9 @@ G 시청자 훈련 채점기(app/core/viewer_score)는 '보낸 시각 앞 60~120
 방법(로컬, AI·외부 호출·모델 없음)
   1. 보정: project.json 의 활성 보정(calibration.active_rev, 03 4-2 '영상 파일 시각 = VOD 시각 + offset_ms')을
      app.core.timecode.video_to_chat_ms 로 쓴다(piecewise_linear 도 같은 함수). 명령줄 --offset-ms·--file-start-ms 가 있으면
-     engine.link 와 같은 규칙으로 그것이 이긴다.
+     engine.link 와 같은 규칙으로 그것이 이긴다. 그 **전에** asr 시각에 --asr-start-ms(기본 0)를 더한다:
+     영상 파일 시각 = asr 시각 + asr_start_ms (asr 를 영상 파일 중간부터 잘라 낸 음성으로 만들었을 때, shift_segments).
+     --file-start-ms(클립 파일이 VOD 의 어디서 시작하나, project.json 보정과 짝)와 뜻이 다르다.
   2. 낱말: app.core.textnorm.tokens(앱 채점기와 같은 규칙). 2~12자 한글 음절·영문·숫자만 남긴다(더 긴 덩어리는 버리고 센다).
   3. 시각: 낱말 시각(asr words[].start_ms)이 있으면 그 낱말 하나하나를 그 시각의 창에 넣는다. 없으면 구간 낱말 전체를
      구간 [start, end) 가 걸친 모든 창에 넣는다(길이 0 구간은 시작 창 하나).
@@ -26,7 +28,7 @@ G 시청자 훈련 채점기(app/core/viewer_score)는 '보낸 시각 앞 60~120
 
 실행(저장소 루트. 무거운 의존성이 없어 앱 .venv 로도 돈다)
   python -m engine transcript-words --project <폴더> [--out <json>] [--asr F] [--start-ms N --end-ms N]
-         [--offset-ms N] [--file-start-ms N] [--window-sec 10]
+         [--offset-ms N] [--file-start-ms N] [--asr-start-ms N] [--window-sec 10]
 """
 from __future__ import annotations
 
@@ -60,6 +62,10 @@ class WordsError(Exception):
     def __init__(self, code: str, message: str = ""):
         super().__init__(message or code)
         self.code = code
+
+
+#: 입력 오류 코드(명령줄 종료 2). 그 밖의 WordsError 는 종료 1
+INPUT_ERRORS = ("no_asr", "bad_asr", "bad_project", "bad_calibration", "bad_range", "bad_asr_start")
 
 
 @dataclass(frozen=True)
@@ -183,6 +189,44 @@ def read_asr(path: str) -> tuple[list[dict], str]:
             raise WordsError("bad_asr", f"segments[{i}] 시각이 정수가 아닙니다")
         segs.append(s)
     return segs, _sha256_bytes(raw)
+
+
+def check_asr_start(asr_start_ms) -> int:
+    """asr_start_ms 검사: 0 이상 정수(bool 아님). 아니면 ValueError. engine.link·topic_vectors 도 이 함수를 쓴다."""
+    if not _is_int(asr_start_ms) or asr_start_ms < 0:
+        raise ValueError("asr_start_ms 는 0 이상 정수")
+    return int(asr_start_ms)
+
+
+def shift_segments(segments: Sequence[Mapping], asr_start_ms: int = 0) -> list:
+    """asr 구간 시각 → 영상 파일 시각: 영상 파일 시각 = asr 시각 + asr_start_ms (보정 video_to_chat_ms 보다 먼저).
+
+    asr.json 의 시각은 wav 0초 기준이다. wav 를 영상 파일 중간부터 뽑았으면(tools/extract_audio.py --start-ms S) S 를 준다.
+    구간 start_ms·end_ms 와 낱말 시각 words[].start_ms·end_ms(_word_points 가 읽는 키) 가운데 정수인 것만 옮긴다 —
+    정수가 아닌 낱말 시각은 그대로 두어 _word_points 가 전처럼 구간 단위로 물러나게 한다. 0 이면 입력을 그대로(목록만 새로).
+    입력 dict 는 고치지 않는다(새 dict). --file-start-ms(클립 파일이 VOD 의 어디서 시작하나)와 다른 값이다."""
+    a = check_asr_start(asr_start_ms)
+    if a == 0:
+        return list(segments)
+
+    def mv(d: Mapping) -> dict:
+        o = dict(d)
+        for k in ("start_ms", "end_ms"):
+            if _is_int(o.get(k)):
+                o[k] = o[k] + a
+        return o
+
+    out = []
+    for s in segments:
+        if not isinstance(s, Mapping):
+            out.append(s)
+            continue
+        o = mv(s)
+        ws = s.get("words")
+        if isinstance(ws, list):
+            o["words"] = [mv(w) if isinstance(w, Mapping) else w for w in ws]
+        out.append(o)
+    return out
 
 
 def calibration_for(project_data: Mapping | None, *, offset_ms: int | None = None,
@@ -350,17 +394,29 @@ def default_out_path(project_dir: str) -> str:
     return os.path.join(project_dir, DEFAULT_OUT_REL)
 
 
+def asr_start_or_error(asr_start_ms) -> int:
+    """check_asr_start 를 WordsError('bad_asr_start') 로(명령줄 종료 2)."""
+    try:
+        return check_asr_start(asr_start_ms)
+    except ValueError as e:
+        raise WordsError("bad_asr_start", "asr_start_ms 는 0 이상 정수입니다") from e
+
+
 def from_project(project_dir: str, *, asr_path: str | None = None, offset_ms: int | None = None,
                  file_start_ms: int | None = None, start_ms: int | None = None, end_ms: int | None = None,
-                 cfg: WordsConfig = WordsConfig(), now: datetime | None = None, allow_pilot: bool = False) -> dict:
+                 cfg: WordsConfig = WordsConfig(), now: datetime | None = None, allow_pilot: bool = False,
+                 asr_start_ms: int = 0) -> dict:
     """프로젝트 폴더 → transcript-words 문서(메모리, 파일을 쓰지 않음). 시범은 읽기 전에 거부(allow_pilot 은 봉인 경로만).
 
-    asr_path 기본 <project>\\derived\\asr.json. 결과가 검사를 못 넘으면 WordsError('bad_result')."""
+    asr_path 기본 <project>\\derived\\asr.json. asr_start_ms: asr 를 영상 파일의 어느 시각부터 잘라 냈나(보정 전에 더함,
+    shift_segments). 문서의 calibration 칸은 스키마가 키를 고정해 넣지 못하므로 stats.asr_start_ms(숫자)에 남긴다.
+    결과가 검사를 못 넘으면 WordsError('bad_result')."""
     if not allow_pilot:
         _refuse_pilot(project_dir)
         if inside_pilot(asr_path):
             # 시범 폴더 안의 asr.json 을 다른 프로젝트 이름으로 읽어 평문 낱말 파일을 만드는 길을 막는다(검토 2026-10-23)
             raise WordsError("pilot_locked", "시범 프로젝트 안의 asr.json 은 봉인 경로로만 읽습니다 (D-15 8, D-20 5)")
+    a = asr_start_or_error(asr_start_ms)
     t0 = time.perf_counter()
     pj = os.path.join(project_dir, "project.json")
     pdata: dict = {}
@@ -370,6 +426,7 @@ def from_project(project_dir: str, *, asr_path: str | None = None, offset_ms: in
         except (OSError, UnicodeDecodeError, ValueError) as e:
             raise WordsError("bad_project", "project.json 을 읽지 못했습니다") from e
     segs, asr_sha = read_asr(asr_path or os.path.join(project_dir, "derived", "asr.json"))
+    segs = shift_segments(segs, a)                    # asr 시각 → 영상 파일 시각(보정 전)
     cal, fs, src = calibration_for(pdata, offset_ms=offset_ms, file_start_ms=file_start_ms)
     part = build_windows(segs, cal, fs, cfg=cfg, start_ms=start_ms, end_ms=end_ms)
     now = now or datetime.now().astimezone()
@@ -379,6 +436,7 @@ def from_project(project_dir: str, *, asr_path: str | None = None, offset_ms: in
                     created_at=now.isoformat(timespec="seconds"), calibration=calibration_info(cal, fs, src),
                     project_id=str(pid) if pid else os.path.basename(os.path.abspath(project_dir)),
                     video_no=str(vno) if vno else None, asr_sha256=asr_sha)
+    doc["stats"]["asr_start_ms"] = a
     doc["stats"]["elapsed_s"] = round(time.perf_counter() - t0, 3)
     probs = validate(doc)
     if probs:
@@ -415,7 +473,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--start-ms", type=int, help="VOD 시각. 이 앞 낱말은 넣지 않는다")
     ap.add_argument("--end-ms", type=int, help="VOD 시각. 이 뒤(같음 포함) 낱말은 넣지 않는다")
     ap.add_argument("--offset-ms", type=int, help="보정 오프셋(명령줄 값이 project.json 보다 앞선다)")
-    ap.add_argument("--file-start-ms", type=int, help="클립 파일 0초의 VOD 시각")
+    ap.add_argument("--file-start-ms", type=int,
+                    help="클립 파일 0초의 VOD 시각(project.json 보정과 짝). asr 를 잘라 낸 시작이 아니다")
+    ap.add_argument("--asr-start-ms", type=int, default=0,
+                    help="asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인지. 영상 파일 시각 = asr 시각 + 이 값(보정 전). 기본 0")
     ap.add_argument("--window-sec", type=int, default=10)
     ns = ap.parse_args(argv)
     out = ns.out or default_out_path(ns.project)
@@ -431,24 +492,27 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--window-sec 는 양수")
     try:
         doc = from_project(ns.project, asr_path=ns.asr, offset_ms=ns.offset_ms, file_start_ms=ns.file_start_ms,
-                           start_ms=ns.start_ms, end_ms=ns.end_ms, cfg=WordsConfig(window_ms=ns.window_sec * 1000))
+                           start_ms=ns.start_ms, end_ms=ns.end_ms, cfg=WordsConfig(window_ms=ns.window_sec * 1000),
+                           asr_start_ms=ns.asr_start_ms)
         write_json(doc, out)
     except WordsError as e:
         print(json.dumps({"error": e.code}, ensure_ascii=False))
-        return 2 if e.code in ("no_asr", "bad_asr", "bad_project", "bad_calibration", "bad_range") else 1
+        return 2 if e.code in INPUT_ERRORS else 1
     except OSError as e:
         print(json.dumps({"error": type(e).__name__}, ensure_ascii=False))
         return 2
     st, c = doc["stats"], doc["calibration"]
     print(json.dumps({"out": out, "windows": st["windows"], "words": st["words"], "segments": st["segments"],
                       "segments_used": st["segments_used"], "dropped_before_vod0": st["dropped_before_vod0"],
+                      "dropped_out_of_range": st["dropped_out_of_range"], "asr_start_ms": st["asr_start_ms"],
                       "calibration_source": c["source"], "calibration_status": c["status"],
                       "elapsed_s": st["elapsed_s"]}, ensure_ascii=False))
     return 0
 
 
 __all__ = ["ENGINE_NAME", "ENGINE_VERSION", "SCHEMA", "SCHEMA_VERSION", "DEFAULT_OUT_REL", "WordsConfig", "WordsError",
-           "is_pilot_dir", "inside_pilot", "out_protected", "refuse_unprotected_out", "read_asr", "calibration_for", "calibration_info", "build_windows",
+           "is_pilot_dir", "inside_pilot", "out_protected", "refuse_unprotected_out", "read_asr", "check_asr_start",
+           "shift_segments", "calibration_for", "calibration_info", "build_windows",
            "build_doc", "validate", "default_out_path", "from_project", "dump", "write_json", "main"]
 
 

@@ -749,6 +749,7 @@ sequenceDiagram
 | 채팅 시계 (03 의 'VOD 시각') | API 의 `playerMessageTime` (ms) | 라벨의 모든 시각 |
 | 영상 시각 | 로컬 파일의 재생 위치 (ms) | 화면 표시와 재생에만 |
 | 보정 | `video_ms = chat_ms + offset_ms` | `project.json` 의 `calibration` (`active_rev`, 판 목록 `revs[]`: `offset_ms`·`anchors[]`·`status`·`broadcast_delay_ms`) |
+| 엔진 asr 시각 | `asr.json` 의 시각(wav 0초 기준). 영상 시각 = asr 시각 + `asr_start_ms`(보정 전) | 엔진 `link`·`topics`·`transcript-words`·`topic-vectors`·`engine_to_ai`·`ai_seal attach-pairs` 의 `--asr-start-ms`(wav 를 영상 중간부터 뽑았을 때 그 시작, 기본 0). `--file-start-ms`(클립 파일이 VOD 의 어디서 시작하나, project.json 보정과 짝)와 다르다 |
 
 라벨에는 그때의 보정 판 `calibration_rev` 와 영상 판 `media_rev` 를 남긴다. 오프셋을 다시 재면 어느 라벨이 옛 보정으로 매겨졌는지 알 수 있고 다시 계산할 수 있다. MVP 는 오프셋 하나다. 방송 중간에 오프셋이 바뀌는지(앵커 사이 보간이 필요한지)는 확인 필요 — 실제 10시간 VOD 로 잰 뒤 v1 에서 정한다. 상세는 [03-data-model.md](03-data-model.md).
 

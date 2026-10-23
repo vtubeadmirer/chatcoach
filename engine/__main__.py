@@ -18,6 +18,11 @@
                                            engine.topic_vectors 의 main(VOD 10초 창마다 전사 글의 e5-small 벡터.
                                            창 글은 저장하지 않음, 기본 <P>/derived/asr-topic-vectors.json, 시범은 거부,
                                            모델이 없으면 종료 3. 엔진 venv 에서)
+  link · topics · transcript-words · topic-vectors 는 모두 --asr-start-ms N 을 받는다: asr.json 이 영상 파일의 N ms 부터
+                                           잘라 낸 음성이면(extract_audio --start-ms N) 영상 파일 시각 = asr 시각 + N 으로
+                                           보정 전에 옮긴다(기본 0). --file-start-ms(클립 파일이 VOD 의 어디서 시작하나,
+                                           project.json 보정과 짝)와 다르다 — project.json 보정이 있으면 그 값은 상쇄되어
+                                           asr 시각을 옮기지 않는다
   scenario --project <P> --from T --to T … tools/make_scenario.py 의 main 을 그대로 부른다(가상 채팅 시나리오)
   generate --project <P> --from T --to T (--fake <응답.json> | --model <id> [--url http://127.0.0.1:1234]) …
                                            engine.generate 의 main(H-3 생성 채팅, 지시문 판 gen-chat-v1). 앞 1~2분 전사

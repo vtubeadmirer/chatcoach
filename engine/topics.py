@@ -18,7 +18,7 @@
 
 실행(저장소 루트. 무거운 의존성이 없어 앱 .venv 로도 돈다)
   python -m engine.topics --project <폴더> --out <topic-flow.json> [--asr F] [--start-ms N --end-ms N]
-         [--offset-ms N] [--file-start-ms N] [--window-sec 60] [--min-block-sec 180] [--no-identities]
+         [--offset-ms N] [--file-start-ms N] [--asr-start-ms N] [--window-sec 60] [--min-block-sec 180] [--no-identities]
          [--semantic off|onnx|lmstudio] [--models-dir D] [--embed engine.<모듈>:<함수>]
   --semantic 은 engine.semantic 의 로컬 임베딩(받지 않음, D-17 6)을 섞는다. 기본 off. 없으면 낱말만으로 돈다.
 """
@@ -426,11 +426,13 @@ def build_doc(part: Mapping, *, cfg: TopicConfig, run_id: str, created_at: str, 
 # ── 입력 · 출력 ──────────────────────────────────────────────────────────
 
 def inputs_from_project(project_dir: str, *, asr_path: str | None = None, offset_ms: int | None = None,
-                        file_start_ms: int | None = None, use_identities: bool = True):
-    """engine.link 의 읽기를 그대로 쓴다. 발화 시각은 VOD 로 바꾼다. (utts, msgs, nicknames, inp)"""
+                        file_start_ms: int | None = None, use_identities: bool = True, asr_start_ms: int = 0):
+    """engine.link 의 읽기를 그대로 쓴다. 발화 시각은 VOD 로 바꾼다. (utts, msgs, nicknames, inp)
+
+    asr_start_ms: asr 를 영상 파일의 어느 시각부터 잘라 냈나(L.load_project 가 보정 전에 더한다)."""
     from . import link as L
     inp = L.load_project(project_dir, use_identities=use_identities, offset_ms=offset_ms,
-                         file_start_ms=file_start_ms, asr_path=asr_path)
+                         file_start_ms=file_start_ms, asr_path=asr_path, asr_start_ms=asr_start_ms)
     cal, fs = inp.calibration, inp.file_start_in_vod_ms
     utts = [Utt(video_to_chat_ms(u.start_ms, cal, fs), video_to_chat_ms(u.end_ms, cal, fs), u.text)
             for u in inp.utterances]
@@ -504,7 +506,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--start-ms", type=int)
     ap.add_argument("--end-ms", type=int)
     ap.add_argument("--offset-ms", type=int)
-    ap.add_argument("--file-start-ms", type=int)
+    ap.add_argument("--file-start-ms", type=int,
+                    help="클립 파일이 VOD 몇 ms 에서 시작하는지(project.json 보정과 짝). asr 를 잘라 낸 시작이 아니다")
+    ap.add_argument("--asr-start-ms", type=int, default=0,
+                    help="asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인지. 영상 파일 시각 = asr 시각 + 이 값(보정 전). 기본 0")
     ap.add_argument("--window-sec", type=int, default=60)
     ap.add_argument("--min-block-sec", type=int, default=180)
     ap.add_argument("--no-identities", action="store_true", help="닉네임 목록으로 키워드를 거르지 않음")
@@ -521,11 +526,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if ns.window_sec <= 0 or ns.min_block_sec < 0:
         ap.error("--window-sec 는 양수, --min-block-sec 는 0 이상")
+    if ns.asr_start_ms < 0:
+        ap.error("--asr-start-ms 는 0 이상")
 
     t0 = time.perf_counter()
     utts, msgs, nicks, inp = inputs_from_project(ns.project, asr_path=ns.asr, offset_ms=ns.offset_ms,
                                                  file_start_ms=ns.file_start_ms,
-                                                 use_identities=not ns.no_identities)
+                                                 use_identities=not ns.no_identities, asr_start_ms=ns.asr_start_ms)
+    from . import link as L
+    for w in inp.asr_meta.get("warnings") or []:
+        print(L.format_asr_warning(w), file=sys.stderr)
     times = [u.t_ms for u in utts] + [u.end_ms for u in utts] + [m.t_ms for m in msgs]
     start = ns.start_ms if ns.start_ms is not None else (min(times) if times else 0)
     end = ns.end_ms if ns.end_ms is not None else (max(times) + 1 if times else start + 1)
