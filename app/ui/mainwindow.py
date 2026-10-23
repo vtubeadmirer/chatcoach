@@ -1965,10 +1965,15 @@ class MainWindow(QMainWindow):
                             scores=data.scores, chat_times=chat_times, duration_ms=dur,
                             runs=data.choices, run_loader=data.load_run, run_id=data.run_id, title_base=title,
                             confirm_rows=list(data.final_rows) + list(data.excluded_rows),
-                            confirm_loader=store.load, confirm_writer=store.save)
+                            confirm_loader=store.load, confirm_writer=store.save,
+                            chat_text=self._chat_text_lookup())
         lay.addWidget(view)
         if wb is not None:
             view.seekRequested.connect(wb.seek_vod)
+            chat_panel = getattr(wb, "chat", None)
+            if chat_panel is not None and hasattr(chat_panel, "select_chat"):
+                # 고른 건의 채팅 줄로 작업대 채팅 목록이 따라간다(08 D-30). 필터에 걸려 안 보이면 그대로
+                view.chatSelected.connect(lambda cid, cp=chat_panel: cp.select_chat(cid))
         view.loopRequested.connect(self._on_confirm_loop)
         dlg.finished.connect(self._on_side_view_finished)
         avail = self.screen().availableGeometry() if self.screen() is not None else None
@@ -1992,13 +1997,35 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(tr("AI 확인 큐: {0}").format(view.confirm_progress_text()), 8000)
         return dlg
 
+    def _chat_text_lookup(self):
+        """나란히 보기에 줄 채팅 본문 찾기(08 D-30): chat_id → (시청자 번호, 가린 닉네임, 본문) 또는 None.
+        작업대 채팅 패널이 이미 읽어 둔 것만 쓴다(파일을 새로 열지 않음). 분석 자리에서만 부른다."""
+        wb = self.workbench
+        chat_panel = getattr(wb, "chat", None)
+        if chat_panel is None or not hasattr(chat_panel, "chat_data"):
+            return None
+        try:
+            data = chat_panel.chat_data()
+        except Exception:  # noqa: BLE001
+            return None
+        if data is None or not hasattr(data, "index_of"):
+            return None
+
+        def lookup(chat_id: str):
+            i = data.index_of(chat_id)
+            if i is None:
+                return None
+            return int(data.vnos[i]), data.nicks[i], data.texts[i]
+        return lookup
+
     CONFIRM_MIN_SCREEN_W = 1500          # 이보다 좁은 화면에서는 창을 나누지 않는다(겹친 채로)
     CONFIRM_DIALOG_W = 960               # 큐 창 폭(목록 + 두 판 표가 읽히는 최소)
 
     def _arrange_confirm_windows(self, dlg) -> bool:
         """AI 확인 큐(08 D-30): 큐 창이 본 창의 영상을 덮어 '멈춘 것처럼' 보이지 않게, 본 창은 왼쪽(영상·채팅),
         큐 창은 오른쪽에 **겹치지 않게** 놓는다. 화면이 CONFIRM_MIN_SCREEN_W 보다 좁으면 손대지 않고 False."""
-        scr = self.screen()
+        from PySide6.QtGui import QGuiApplication
+        scr = QGuiApplication.primaryScreen() or self.screen()   # 주 모니터에(여러 모니터면 보던 화면으로)
         avail = scr.availableGeometry() if scr is not None else None
         if avail is None or avail.width() < self.CONFIRM_MIN_SCREEN_W or avail.height() < 600:
             return False

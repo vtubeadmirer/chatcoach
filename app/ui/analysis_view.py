@@ -601,6 +601,7 @@ class AnalysisView(QWidget):
     titleChanged = Signal(str)       # 창 제목 글이 바뀜 (window_title())
     loopRequested = Signal(int, int)  # AI 확인 큐에서 고른 건의 반복 재생 범위 (VOD ms, 채팅 − 5초 ~ 발화 끝 + 3초)
     verdictSaved = Signal(str, str)  # AI 확인 큐 판정을 저장함 (chat_id, yes·no·unsure)
+    chatSelected = Signal(str)       # 고른 건의 chat_id — 작업대 채팅 목록이 그 줄로 가게(08 D-30, 본문은 거기서도 보임)
 
     def __init__(self, parent=None, *, run: Mapping | None = None, final_rows: Iterable[Mapping] | None = None,
                  sealed_count: int = 0, scores: Mapping | None = None, chat_times: Mapping[str, int] | None = None,
@@ -609,7 +610,8 @@ class AnalysisView(QWidget):
                  pick_default: bool = True, title_base: str | None = None,
                  confirm_rows: Iterable[Mapping] | None = None,
                  confirm_loader: Callable[[str], Mapping] | None = None,
-                 confirm_writer: Callable[[str, str, str], Any] | None = None):
+                 confirm_writer: Callable[[str, str, str], Any] | None = None,
+                 chat_text: Callable[[str], tuple | None] | None = None):
         super().__init__(parent)
         self._title_base: str | None = title_base if isinstance(title_base, str) and title_base else None
         self._title = ""
@@ -628,6 +630,8 @@ class AnalysisView(QWidget):
         self._final_rows: list = []
         self._chat_times: Mapping[str, int] | None = None
         self._duration: int | None = None
+        # 고른 건의 채팅 본문(08 D-30): chat_id → (시청자 번호, 가린 닉네임, 본문) 또는 None. 해제 뒤 분석 자리에서만 받는다
+        self._chat_text = chat_text
         # AI 확인 큐 (08 D-29 3)
         self._confirm_rows: list | None = None      # 큐의 사람 쪽(최종 세트 set = final 행 전부). None 이면 final_rows
         self._confirm_loader: Callable[[str], Mapping] | None = None
@@ -742,6 +746,15 @@ class AnalysisView(QWidget):
         self.detail_title = QLabel()
         self.detail_title.setWordWrap(True)
         rl.addWidget(self.detail_title)
+        # 고른 건의 채팅 본문(08 D-30) — 판정할 채팅이 무엇인지 창 안에서 바로 보인다
+        self.chat_label = QLabel()
+        self.chat_label.setTextFormat(Qt.PlainText)
+        self.chat_label.setWordWrap(True)
+        self.chat_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.chat_label.setStyleSheet("QLabel { font-size: 15px; font-weight: bold; padding: 6px; "
+                                      "border: 1px solid palette(mid); border-radius: 4px; }")
+        self.chat_label.hide()
+        rl.addWidget(self.chat_label)
         self.detail = QGridLayout()
         self.detail.setHorizontalSpacing(12)
         rl.addLayout(self.detail)
@@ -1566,12 +1579,33 @@ class AnalysisView(QWidget):
                      _fmt_score(sb) if sb is not None else "—", same or "—"))
         return rows
 
+    def _show_chat_text(self, chat_id: str) -> None:
+        """고른 건의 채팅 본문을 창 안에 보이고(08 D-30), 작업대 채팅 목록이 그 줄로 가게 chatSelected 를 보낸다.
+        chat_text 가 없거나 모르는 chat_id 면 본문 칸을 숨긴다(라벨링 자리에서는 chat_text 를 받지 않는다)."""
+        got = None
+        if self._chat_text is not None:
+            try:
+                got = self._chat_text(chat_id)
+            except Exception:  # noqa: BLE001 — 본문을 못 읽어도 판정은 막지 않는다
+                got = None
+        if got:
+            vno, nick, text = (list(got) + [None, None, None])[:3]
+            who = tr("익명") if not _is_int(vno) or vno <= 0 else tr("시청자 {0:04d}").format(int(vno))
+            if isinstance(nick, str) and nick:
+                who += f" · {nick}"
+            self.chat_label.setText(tr("채팅 {0}: {1}").format(who, text if isinstance(text, str) else ""))
+            self.chat_label.show()
+        else:
+            self.chat_label.hide()
+        self.chatSelected.emit(chat_id)
+
     def _fill_detail(self, it: CompareItem) -> None:
         self._take_detail()
         qi = self._queue_index(it.chat_id) if self.is_confirm_mode() else None
         tail = tr("AI 확인 큐 · {0}").format(tr(VERDICT_KO[self._queue[qi].verdict])) if qi is not None \
             else self.status_ko(it.status)
         self.detail_title.setText(f"{_t(it.t_ms)} · {it.chat_id} · {tail}")
+        self._show_chat_text(it.chat_id)
         heads = ("",) + self._side_names() + ((tr("사람 최종"),) if self.is_runs_mode() else ())
         for c, text in enumerate(heads):
             lab = QLabel(f"<b>{text}</b>")
