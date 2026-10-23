@@ -1984,12 +1984,33 @@ class MainWindow(QMainWindow):
         if show:
             dlg.show()
             if confirm:
+                self._arrange_confirm_windows(dlg)   # 큐 창이 영상을 가리지 않게(08 D-30)
                 view.list.setFocus()
         if data.warnings:
             self.statusBar().showMessage(tr("나란히 보기: 경고 {0}개 (보고서에서 확인)").format(len(data.warnings)), 6000)
         elif confirm:
             self.statusBar().showMessage(tr("AI 확인 큐: {0}").format(view.confirm_progress_text()), 8000)
         return dlg
+
+    CONFIRM_MIN_SCREEN_W = 1500          # 이보다 좁은 화면에서는 창을 나누지 않는다(겹친 채로)
+    CONFIRM_DIALOG_W = 960               # 큐 창 폭(목록 + 두 판 표가 읽히는 최소)
+
+    def _arrange_confirm_windows(self, dlg) -> bool:
+        """AI 확인 큐(08 D-30): 큐 창이 본 창의 영상을 덮어 '멈춘 것처럼' 보이지 않게, 본 창은 왼쪽(영상·채팅),
+        큐 창은 오른쪽에 **겹치지 않게** 놓는다. 화면이 CONFIRM_MIN_SCREEN_W 보다 좁으면 손대지 않고 False."""
+        scr = self.screen()
+        avail = scr.availableGeometry() if scr is not None else None
+        if avail is None or avail.width() < self.CONFIRM_MIN_SCREEN_W or avail.height() < 600:
+            return False
+        gap = 8
+        dw = min(self.CONFIRM_DIALOG_W, avail.width() // 2)
+        mw = avail.width() - dw - gap
+        if self.isMaximized() or self.isFullScreen():
+            self.showNormal()
+        self.setGeometry(avail.x(), avail.y(), mw, avail.height() - 40)
+        dlg.setGeometry(avail.x() + mw + gap, avail.y(), dw, avail.height() - 40)
+        dlg.raise_()
+        return True
 
     def _on_confirm_loop(self, start_ms: int, end_ms: int) -> None:
         """AI 확인 큐에서 고른 건: 작업대 확인 재생기로 그 범위를 반복한다(영상이 없으면 시작 위치로만, D-16 클릭 0)."""
