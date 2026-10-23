@@ -3681,7 +3681,7 @@ class Workbench(QWidget):
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, tr("내보내기 실패"), str(e))
             return
-        self._say(tr("내보냈습니다: 행 {0}개").format(len(res.rows)))
+        self._say(tr("내보냈습니다: 행 {0}개").format(int(res.rows)))   # ExportResult.rows 는 int (시범 당일 TypeError 수정)
 
     # ------------------------------------------------------------ 분석 보기
     def set_analysis_view(self, on: bool) -> None:
