@@ -213,22 +213,22 @@ def _req(tmp_path, video, *, vno=VNO, engine_python=None, models=None, limit=Non
 
 # ---------------------------------------------------------------------------- 이름 뽑기
 def test_video_no_from_url_and_number():
-    assert chzzk_chat.parse_video_no("https://chzzk.naver.com/video/15767532") == "15767532"
-    assert chzzk_chat.parse_video_no(" 15767532 ") == "15767532"
-    assert chzzk_chat.parse_video_no("chzzk.naver.com/video/15767532?t=10") == "15767532"
+    assert chzzk_chat.parse_video_no("https://chzzk.naver.com/video/12345678") == "12345678"
+    assert chzzk_chat.parse_video_no(" 12345678 ") == "12345678"
+    assert chzzk_chat.parse_video_no("chzzk.naver.com/video/12345678?t=10") == "12345678"
     assert chzzk_chat.parse_video_no("https://example.com/video/1") is None
 
 
 def test_parse_video_file_name_clipslicer():
     # ClipSlicer: '<제목> [<번호>] HHMMSS-HHMMSS_01.mp4' · 'MMmSSs' 꼴 · 시간 없는 이름 · 번호 없는 이름
-    assert er.parse_video_file_name(r"C:\v\합성 [15767532] 000000-034900_01.mp4") == ("15767532", 0)
-    assert er.parse_video_file_name(r"C:\v\합성 [15767532] 012000-034900.mp4") == ("15767532", 4_800_000)
-    assert er.parse_video_file_name(r"C:\v\합성 [15632692] 00m00s-05m00s.mp4") == ("15632692", 0)
-    assert er.parse_video_file_name(r"C:\v\합성 [15632692] 01h02m03s-02h00m00s.mp4") == ("15632692", 3_723_000)
-    assert er.parse_video_file_name(r"C:\v\합성 [0015632692].mp4") == ("15632692", None)
+    assert er.parse_video_file_name(r"C:\v\합성 [12345678] 000000-034900_01.mp4") == ("12345678", 0)
+    assert er.parse_video_file_name(r"C:\v\합성 [12345678] 012000-034900.mp4") == ("12345678", 4_800_000)
+    assert er.parse_video_file_name(r"C:\v\합성 [23456789] 00m00s-05m00s.mp4") == ("23456789", 0)
+    assert er.parse_video_file_name(r"C:\v\합성 [23456789] 01h02m03s-02h00m00s.mp4") == ("23456789", 3_723_000)
+    assert er.parse_video_file_name(r"C:\v\합성 [0023456789].mp4") == ("23456789", None)
     assert er.parse_video_file_name(r"C:\v\합성 재데뷔_02.mp4") == (None, None)
     assert er.parse_video_file_name(r"C:\v\합성 [0] 000000-000100.mp4") == (None, None)
-    assert er.title_from_file_name(r"C:\v\합성 제목 [15767532] 000000-034900.mp4") == "합성 제목"
+    assert er.title_from_file_name(r"C:\v\합성 제목 [12345678] 000000-034900.mp4") == "합성 제목"
     assert er.title_from_file_name(r"C:\v\제목만.mp4") is None
 
 
@@ -511,9 +511,9 @@ def test_dialog_extracts_number_and_fills_from_file_name(qapp, tmp_path):
     from app.ui.new_broadcast_dialog import NewBroadcastDialog
     dlg = NewBroadcastDialog(None, settings=None, labeler_id="L01")
     assert dlg.ed_labeler is None                                   # 라벨러는 설정의 것 — 칸이 없다
-    dlg.ed_vod.setText("https://chzzk.naver.com/video/15767532")
+    dlg.ed_vod.setText("https://chzzk.naver.com/video/12345678")
     dlg._normalize_vod()
-    assert dlg.ed_vod.text() == "15767532" and dlg.video_no() == "15767532"
+    assert dlg.ed_vod.text() == "12345678" and dlg.video_no() == "12345678"
     dlg.ed_vod.setText("")
     video = _video(tmp_path, f"합성 제목 [{VNO}] 000000-001000_01.mp4")
     dlg.choose_file = lambda: video
