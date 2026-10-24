@@ -269,10 +269,16 @@ def test_run_steps_in_order_and_derived_names(tmp_path, monkeypatch):
     from app import backup
     for rel in (er.WORDS_REL, er.VECTORS_REL, er.TOPICS_REL, er.ASR_REL):
         assert backup.in_protected_zone("/".join(rel), backup.DEFAULT_PROTECTED_ZONE), rel
-    # 중간 파일(wav·쓰던 asr·asr-link 단계 파일)은 남지 않는다
+    # 중간 파일(wav·쓰던 asr·asr-link 단계 파일)은 남지 않는다. 판정 도장(D-32 4)은 숫자·이름만
     left = sorted(os.listdir(d))
     assert left == sorted(["asr.json", "asr-topic-flow.json", "asr-words.json", "asr-topic-vectors.json",
-                           "link-v0.3.json"]), left
+                           "link-v0.3.json", "engine-stamp.json"]), left
+    with open(os.path.join(d, "engine-stamp.json"), encoding="utf-8") as f:
+        stamp = json.load(f)
+    assert set(stamp) == {"format", "version", "calibration_rev", "offset_ms", "media_rev", "asr_sha256", "link"}
+    assert (stamp["calibration_rev"], stamp["offset_ms"], stamp["media_rev"], stamp["link"]) == (0, 0, 1,
+                                                                                                "link-v0.3.json")
+    assert res.step("engine").numbers["position"] == "full" and res.calibration is None
     assert res.number("engine", "removed") == 1                 # wav 하나를 os.remove
     # 숫자
     assert (res.chats, res.utterances, res.direct) == (N_CHATS, 4, 2)

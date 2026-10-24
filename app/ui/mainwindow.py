@@ -419,6 +419,18 @@ class MainWindow(QMainWindow):
         self.last_new_broadcast = None           # 마지막 engine_run.Result
         self.last_new_broadcast_line: str | None = None
         self.last_progress_text = ""             # run_job_modal(show_text) 의 마지막 진행 글
+        # 시간 정렬(보정) 확정 화면 (08 D-32): 보기 전용 작업대 위에 쌓는다
+        self.a_calibrate = QAction(tr("시간 정렬(보정)…(&A)"), self)
+        self.a_calibrate.setToolTip(tr("영상이 VOD 의 어디인지 앵커 후보를 들어 보고 정합니다(전사한 프로젝트)"))
+        self.a_calibrate.triggered.connect(lambda: self.calibration_dialog())
+        m_file.addAction(self.a_calibrate)
+        self.calibration_view_widget = None      # 떠 있는 CalibrationView
+        self.calibration_parts = None            # 시험: CalibrationView 부품(가짜 플레이어)
+        self.calibration_bg = None               # 시험: 후보 찾기를 돌릴 함수(None 이면 뒤 스레드)
+        self.last_calibration_outcome: str | None = None
+        self._calib_ctx: dict | None = None
+        self._calib_workers: list = []
+        self._last_nb_req = None
         a_open = QAction(tr("프로젝트 열기(&O)…"), self)
         a_open.setShortcut("Ctrl+O")
         a_open.triggered.connect(self.project_view.choose_and_open)
@@ -2260,6 +2272,7 @@ class MainWindow(QMainWindow):
         req = engine_run.Request(video_no=str(video_no), video_path=str(video_path), labeler_id=lid,
                                  projects_root=engine_run.default_projects_root(),
                                  asr_limit_ms=self.new_broadcast_limit_ms())
+        self._last_nb_req = req
         res = self.run_new_broadcast(req)
         self.finish_new_broadcast(res)
         return res
@@ -2306,6 +2319,22 @@ class MainWindow(QMainWindow):
             if not res.cancelled:
                 self.warn(title, line + "\n" + tr("만든 것은 남겨 두었습니다 — 같은 번호로 다시 '새 방송' 을 하면 이어서 합니다."))
             return line
+        if not res.pilot and res.calibration in ("auto", "needed"):
+            # 영상이 VOD 의 어디인지 자동으로 짐작했거나(확인 전) 못 찾음 — 분석 화면 전에 시간 정렬 화면(08 D-32 6)
+            req = self._last_nb_req
+            rerun = {"video_no": str(req.video_no), "video_path": str(req.video_path), "labeler_id": req.labeler_id} \
+                if req is not None else None
+            view = self.calibration_dialog(root, rerun=rerun)
+            if view is not None:
+                line = f"{line} · " + tr("시간 정렬을 확인하세요(맞음 1 · 아님 2 · 모름 3)")
+                self.last_new_broadcast_line = line
+                self.statusBar().showMessage(line, 60_000)
+                return line
+            if res.calibration == "needed":
+                line = f"{line} · {self.last_open_block or ''}".rstrip(" ·")
+                self.last_new_broadcast_line = line
+                self.statusBar().showMessage(line)
+                return line
         why = self.open_analysis(root) if res.pilot else self.open_engine_view(root)
         if why:
             line = f"{line} · {why}"
@@ -2353,6 +2382,241 @@ class MainWindow(QMainWindow):
         if act is None or not act.isChecked():
             return self._block_open(tr("새 방송: 분석 보기를 켜지 못했습니다 (분석 세션·엔진 결과를 확인하세요)"))
         return None
+
+    # ---------------------------------------------------------------- 시간 정렬(보정) 확정 화면 (08 D-32)
+    def calibration_block_reason(self, root: str) -> str | None:
+        """이 프로젝트에 시간 정렬 화면을 열 수 없는 까닭(한 줄) 또는 None. 시범(시범 고정) · project.json 못 읽음 · 전사 없음 ·
+        라벨링이 진행된 프로젝트(잠긴 라벨링 세션·재라벨 계획, 또는 보정이 이미 확인됐는데 라벨링 세션이 있음 — 찍은 시각이
+        어긋난다)는 막는다. 보정 확인 전의 1차 세션(② 반응은 보정 관문에 막혀 있다)·분석 세션만 있는 프로젝트는 연다."""
+        from .. import calibration as calib
+        from .. import engine_run
+        from .. import session as sess
+        from ..core import visibility as vis
+        from ..project import open_project
+        if engine_run.is_pilot(root):
+            return tr("시범 프로젝트의 보정은 이 화면에서 바꾸지 않습니다(시범 고정)")
+        try:
+            data = open_project(root).data
+        except Exception:  # noqa: BLE001
+            data = None
+        if data is None:
+            return tr("시간 정렬: project.json 을 읽지 못했습니다")
+        if engine_run.asr_summary(engine_run.derived_path(root, engine_run.ASR_REL)) is None:
+            return tr("시간 정렬: 전사(derived\\asr.json)가 없어 앵커 후보를 만들 수 없습니다 — '파일 → 새 방송…' 으로 전사하세요")
+        try:
+            sv = sess.survey_project(root, data)
+        except (OSError, ValueError):
+            return tr("시간 정렬: 세션 기록을 확인하지 못했습니다")
+        labeling = {s for s in sv.session_ids if vis.session_kind_of_id(s) in vis.LABELING_SESSIONS}
+        if (labeling & set(sv.locked_ids)) or sv.relabel_plans or \
+                (labeling and calib.media_position(data) == "confirmed"):
+            return tr("시간 정렬: 라벨링이 진행된 프로젝트라 보정을 바꾸지 않습니다(찍은 시각이 어긋납니다) — "
+                      "tools\\calibrate.py 를 쓰세요")
+        return None
+
+    def _view_only_on(self, root: str) -> bool:
+        """root 를 보기 전용(세션 없음) 작업대로 연다(이미 그렇게 열려 있으면 그대로). 잠금은 작업대가 잡는다."""
+        wb = self.workbench
+        if wb is not None and wb.project is not None and os.path.normcase(os.path.abspath(wb.project.root)) == \
+                os.path.normcase(root) and wb.session is None:
+            return True
+        if wb is not None:
+            if not wb.resolve_unsaved(allow_cancel=True):
+                return False
+            self._close_workbench("user")
+        self._reopen_view_only = True
+        try:
+            out = self.project_view.open_path(root)
+        finally:
+            self._reopen_view_only = False
+        return out is not None and getattr(out, "ok", False) and self.workbench is not None
+
+    def _chat_lookup(self, wb, root: str):
+        """chat_id → (채팅 시각, '시청자 n', 본문 한 줄) — 작업대가 읽은 채팅 표 자료(없으면 messages.jsonl 을 한 번 읽음)."""
+        from .chat_panel import ChatData, clean_line, fmt_viewer_no
+        box: dict = {}
+
+        def data():
+            if "d" not in box:
+                cd = None
+                fn = getattr(getattr(wb, "chat", None), "chat_data", None)
+                try:
+                    cd = fn() if callable(fn) else None
+                except Exception:  # noqa: BLE001
+                    cd = None
+                if not isinstance(cd, ChatData) or cd.n == 0:
+                    from .. import jsonl
+                    from ..project import ProjectPaths
+                    try:
+                        cd = ChatData(jsonl.read(ProjectPaths(root).messages_jsonl).records)
+                    except (OSError, ValueError):
+                        cd = None
+                box["d"] = cd
+            return box["d"]
+
+        def lookup(chat_id: str):
+            cd = data()
+            i = cd.index_of(chat_id) if cd is not None else None
+            if i is None:
+                return None
+            return int(cd.times[i]), fmt_viewer_no(int(cd.vnos[i])), clean_line(cd.texts[i])[:200]
+        return lookup
+
+    def _calib_run_bg(self, fn, done) -> None:
+        """후보 찾기를 뒤 스레드에서(작업대 FuncWorker)."""
+        from .workbench import FuncWorker
+        w = FuncWorker(lambda _cancelled: fn(), self)
+        self._calib_workers.append(w)
+
+        def fin(res, err, w=w):
+            if w in self._calib_workers:
+                self._calib_workers.remove(w)
+            w.deleteLater()
+            done(res, err)
+        w.done.connect(fin)
+        w.start()
+
+    def calibration_dialog(self, root: str | None = None, *, rerun: dict | None = None, show: bool = True,
+                           provider=None):
+        """'파일 → 시간 정렬(보정)…' 과 새 방송 끝(자동 추정 확인, rerun = 진행기 요청 값). 지금 연 프로젝트(또는 root)를
+        보기 전용으로 (다시) 열고 그 위에 CalibrationView 를 쌓는다. 끝나면 _on_calibration_finished. 막혔으면 None(까닭은
+        상태 줄·last_open_block)."""
+        self.last_open_block = None
+        if self.jobs_busy():
+            return self._calib_block(tr("작업이 도는 중입니다 — 끝난 뒤에 하세요"))
+        if self.calibration_view_widget is not None:
+            return self.calibration_view_widget
+        wb = self.workbench
+        if root is None and wb is not None and wb.project is not None:
+            root = wb.project.root
+        if not root or not os.path.isfile(os.path.join(root, "project.json")):
+            return self._calib_block(tr("시간 정렬: 프로젝트를 먼저 여세요"))
+        root = os.path.abspath(root)
+        why = self.calibration_block_reason(root)
+        if why:
+            return self._calib_block(why)
+        if not self._view_only_on(root):
+            return self._calib_block(tr("시간 정렬: 프로젝트를 보기 전용으로 열지 못했습니다"))
+        wb = self.workbench
+        try:
+            wb.player.pause()
+        except Exception:  # noqa: BLE001
+            pass
+        from .calibration_view import CalibrationView
+        lid = self._new_broadcast_labeler() or "L01"
+        view = CalibrationView(self, parts=self.calibration_parts)   # 처음부터 이 창의 자식(mpv 창 핸들, 훈련과 같음)
+        self.stack.addWidget(view)
+        if show:
+            self.stack.setCurrentWidget(view)
+        self.calibration_view_widget = view
+        self._calib_ctx = {"root": root, "rerun": rerun}
+        view.finished.connect(self._on_calibration_finished)
+        view.messageShown.connect(self._on_training_message)
+        if hasattr(wb, "detach_status_bar"):
+            wb.detach_status_bar()
+        cur = ((wb.project.data or {}).get("media") or {}).get("current") or {}
+        media_path = wb.media_path or (cur.get("path_abs") if isinstance(cur, dict) else None)
+        view.start(root, wb.project.data, media_path=media_path, labeler_id=lid,
+                   write=lambda m, wb=wb, lid=lid: wb.write_calibration(m, lid), lookup=self._chat_lookup(wb, root),
+                   provider=provider, run_bg=self.calibration_bg or self._calib_run_bg)
+        if show:
+            view.setFocus()
+        LOG.info("시간 정렬 열기 (새 방송 뒤=%s)", bool(rerun))
+        return view
+
+    def _calib_block(self, why: str):
+        self.last_open_block = why
+        self.statusBar().showMessage(why, 10_000)
+        LOG.info("시간 정렬: 막음 (%s)", why[:60])
+        return None
+
+    def close_calibration(self) -> None:
+        """시간 정렬 화면을 아무것도 쓰지 않고 닫는다(작업대를 닫을 때). 여러 번 불러도 된다."""
+        view, self.calibration_view_widget = self.calibration_view_widget, None
+        self._calib_ctx = None
+        if view is None:
+            return
+        try:
+            view.finished.disconnect(self._on_calibration_finished)
+        except (RuntimeError, TypeError):
+            pass
+        view.close_view()                    # 후보 찾기 도구 프로세스도 이 표시(취소)를 보고 끝난다
+        self._wait_calib_workers()
+        self.stack.removeWidget(view)
+        view.deleteLater()
+
+    def _wait_calib_workers(self, ms: int = 10_000) -> None:
+        """도는 후보 찾기 스레드를 멈추고 기다린다(창을 닫을 때 'QThread 가 도는 중 파괴' 를 막는다)."""
+        for w in list(self._calib_workers):
+            try:
+                w.cancel()
+                w.wait(ms)
+            except RuntimeError:
+                pass
+
+    def _has_labeling_sessions(self, root: str) -> bool:
+        """labels/ 에 라벨링 세션(1차·재라벨·출처 판정·조정) 기록이 있나. 판단이 안 되면 있다고 본다(블라인드 쪽으로)."""
+        from .. import session as sess
+        from ..core import visibility as vis
+        try:
+            sv = sess.survey_project(root, None)
+        except (OSError, ValueError):
+            return True
+        return any(vis.session_kind_of_id(s) in vis.LABELING_SESSIONS for s in sv.session_ids)
+
+    def _rerun_request(self, root: str) -> dict | None:
+        """판정만 다시 할 진행기 요청 값(project.json 의 VOD 번호·연결된 영상)."""
+        from ..project import open_project
+        try:
+            d = open_project(root).data or {}
+        except Exception:  # noqa: BLE001
+            return None
+        vno = (d.get("broadcast") or {}).get("video_no")
+        cur = (d.get("media") or {}).get("current") or {}
+        path = cur.get("path_abs") if isinstance(cur, dict) else None
+        if not vno or not isinstance(path, str) or not os.path.isfile(path):
+            return None
+        return {"video_no": str(vno), "video_path": path, "labeler_id": self._new_broadcast_labeler() or "L01"}
+
+    def _on_calibration_finished(self, outcome: str) -> None:
+        """화면이 끝남: 'verified'·'skipped' 면 판이 바뀌었다 — 판정이 있거나 새 방송 뒤면 진행기로 판정만 다시(앞 단계는 건너뜀)
+        하고 분석 화면. 'closed' 면 새 방송 뒤에는 판정이 있으면 분석 화면(상태 칩 '보정 확인 안 됨'), 없으면 상태 줄 한 줄."""
+        from .. import engine_run
+        view, self.calibration_view_widget = self.calibration_view_widget, None
+        ctx, self._calib_ctx = self._calib_ctx or {}, None
+        if view is not None:
+            view.close_view()
+            self.stack.removeWidget(view)
+            view.deleteLater()
+        wb = self.workbench
+        if wb is not None:
+            if hasattr(wb, "attach_status_bar"):
+                wb.attach_status_bar(self.statusBar())
+            self.stack.setCurrentWidget(wb)
+            wb.reload_calibration()
+        self.last_calibration_outcome = outcome
+        root, rerun = ctx.get("root"), ctx.get("rerun")
+        if not root:
+            return
+        has_link = engine_run.find_link(os.path.join(root, "derived")) is not None
+        LOG.info("시간 정렬 끝: %s (판정 있음=%s, 새 방송 뒤=%s)", outcome, has_link, bool(rerun))
+        if outcome in ("verified", "skipped"):
+            # 판정이 있으면 새 보정으로 다시. 판정이 없어도(새 방송이 'needed' 로 끝남) 라벨링 세션이 없는 프로젝트면 판정을
+            # 만든다 — 라벨링 중인 프로젝트에 엔진 결과를 새로 만들지는 않는다(블라인드)
+            req = rerun or (self._rerun_request(root) if has_link or not self._has_labeling_sessions(root) else None)
+            if req:
+                # 화면의 키·단추 처리 안에서 진행기 모달을 돌리지 않게 한 바퀴 뒤에
+                QTimer.singleShot(0, lambda req=req: self.start_new_broadcast(req["video_no"], req["video_path"],
+                                                                               labeler_id=req.get("labeler_id")))
+            return
+        if rerun:
+            if has_link:
+                self.show_home()
+                why = self.open_engine_view(root)
+                self.statusBar().showMessage(why or tr("보정은 자동 추정 그대로입니다(확인 전) — '파일 → 시간 정렬(보정)…' 으로 "
+                                                       "확정할 수 있습니다"), 15_000)
+            else:
+                self.statusBar().showMessage(tr("새 방송: 영상이 VOD 의 어디인지 정하면 판정합니다 — '파일 → 시간 정렬(보정)…'"))
 
     def ai_compare_dialog(self, *, run_id: str | None = None, out_root: str | None = None, gate=None):
         """'보고 → AI 비교 보고서…' (06 6-3~6-7). 세션 밖·조정 세션에서 해제된 run 하나로 보고서를 프로젝트 밖에 쓴다
@@ -2829,6 +3093,7 @@ class MainWindow(QMainWindow):
 
     def _close_workbench(self, reason: str = "user") -> None:
         """작업대를 닫는다. 저장하지 않은 구간 변경이 있으면 저장·버리기를 묻고(취소 없음), store 는 reason 으로 닫는다."""
+        self.close_calibration()              # 시간 정렬 화면도 이 작업대(잠금·쓰기 통로)에 묶여 있다 — 쓰지 않고 닫는다
         self.close_training()                 # 훈련 화면은 이 작업대(채팅·보정)에 묶여 있다 — 먼저 닫는다(training.end)
         self.close_viewer_training()          # 시청자 훈련도 같다(viewer.end closed)
         self.close_discern()                  # 가려내기도 같다(정답 전이면 discern.end closed)

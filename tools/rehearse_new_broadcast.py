@@ -58,6 +58,91 @@ def _leftovers(root: str) -> int:
     return n
 
 
+TRUTH_LAG_MAX_MS = 20_000                 # 참값 판정: 짝 차이 − 참 오프셋이 0 ~ 20초(읽기 지연)면 '맞음'
+
+
+def _active_rev(root: str) -> dict:
+    from app import calibration as calib
+    from app.project import open_project
+    return dict(calib.active_rev((open_project(root).data or {}).get("calibration")) or {})
+
+
+def _drive_calibration(win, app, a, rec: dict) -> dict:
+    """시간 정렬 화면: 후보가 뜰 때까지 기다린 뒤 --calibration 대로. 숫자만 돌려준다(본문 없음)."""
+    from app.core import timecode as tc
+    view = win.calibration_view_widget
+    root = view.root
+    auto = _active_rev(root)
+    first = win.last_new_broadcast
+    out: dict = {"position": first.step("engine").numbers.get("position") if first else None,
+                 "auto_offset_ms": auto.get("offset_ms") if auto.get("status") == "unverified" else None,
+                 "keys": 0, "clicks": 0}
+    truth = tc.parse_time(a.truth_start) if a.truth_start else None
+    if truth is not None:
+        out["truth_offset_ms"] = -truth
+        if out["auto_offset_ms"] is not None:
+            out["auto_err_s"] = round((out["auto_offset_ms"] + truth) / 1000, 2)
+    t0 = time.perf_counter()
+    end = t0 + 120
+    while view._busy and time.perf_counter() < end:              # 후보 찾기(뒤 스레드)
+        app.processEvents()
+        time.sleep(0.02)
+    out["find_s"] = round(time.perf_counter() - t0, 2)
+    out["candidates"] = len(view.cands)
+    out["consistent"] = view.found.consistent
+    if a.calibration == "close" or truth is None:
+        view._on_close_btn()
+        out["clicks"] += 1
+        out["outcome"] = "closed"
+    else:
+        true_hits = 0
+        for c in view.cands:
+            lag = c.offset_ms + truth
+            true_hits += 1 if 0 <= lag <= TRUTH_LAG_MAX_MS else 0
+        out["true_candidates"] = true_hits
+        while not view.can_confirm():
+            if view.current is None or view.cands[view.current].verdict is not None:
+                break
+            c = view.cands[view.current]
+            ok = 0 <= c.offset_ms + truth <= TRUTH_LAG_MAX_MS
+            view.judge("yes" if ok else "no")                    # 키 1 · 2
+            out["keys"] += 1
+            app.processEvents()
+        if view.can_confirm():
+            out["keys"] += 1                                     # Enter
+            view.confirm()
+            out["outcome"] = "verified"
+        else:
+            view._on_close_btn()
+            out["clicks"] += 1
+            out["outcome"] = "closed_not_ready"
+    out["judge_s"] = round(time.perf_counter() - t0, 2)
+    rec["clicks"] += out["clicks"]
+    t1 = time.perf_counter()
+    end = t1 + 600
+    while time.perf_counter() < end:                             # 판정만 다시(진행기 모달) → 분석 화면
+        app.processEvents()
+        wb = win.workbench
+        if win.last_new_broadcast is not first and wb is not None and not win.jobs_busy():
+            break
+        if out.get("outcome") != "verified" and wb is not None and wb.session is not None:
+            break
+        time.sleep(0.05)
+    out["relink_s"] = round(time.perf_counter() - t1, 1)
+    act = _active_rev(root)
+    out["final_status"] = act.get("status")
+    out["final_offset_ms"] = act.get("offset_ms")
+    if truth is not None and isinstance(act.get("offset_ms"), int):
+        out["final_err_s"] = round((act["offset_ms"] + truth) / 1000, 2)
+    if first is not None:
+        out["direct_before"] = first.direct
+    second = win.last_new_broadcast
+    if second is not None and second is not first:
+        out["direct_after"] = second.direct
+        out["relink_engine_s"] = second.step("engine").elapsed_s if second.step("engine") else None
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="'파일 → 새 방송…' 한 바퀴 리허설(임시 데이터 폴더, 끝에 지움)")
     ap.add_argument("--vod", required=True, help="치지직 VOD 번호")
@@ -69,6 +154,10 @@ def main(argv=None) -> int:
     ap.add_argument("--data-dir", help="앞선 --keep 실행의 데이터 폴더를 다시 쓴다(같은 번호면 이어서, 디버그만 — "
                                        "%%LOCALAPPDATA%%\\ChatCoachSmoke\\rehearsal-* 만 받는다)")
     ap.add_argument("--tick", type=float, default=15.0, help="진행 글을 찍는 간격(초)")
+    ap.add_argument("--truth-start", help="(D-32 측정) 영상 0초의 참 VOD 시각(1:02:03 형식). 시간 정렬 화면이 뜨면 이 값으로 "
+                                          "사람 대신 판정한다: 짝 차이 − 참 오프셋이 0~TRUTH_LAG_MAX 초면 맞음(1), 아니면 아님(2)")
+    ap.add_argument("--calibration", choices=("confirm", "close"), default="confirm",
+                    help="시간 정렬 화면이 뜨면: confirm(참값으로 판정해 확정, --truth-start 필요) · close(닫기 = 자동 추정 그대로)")
     a = ap.parse_args(argv)
     video = os.path.abspath(a.video)
     low = video.lower()
@@ -167,6 +256,9 @@ def main(argv=None) -> int:
     t_menu = time.perf_counter()
     rec["clicks"] += MENU_CLICKS
     win.a_new_broadcast.trigger()                                # 대화상자 → [시작] → 진행 → 분석 화면까지 여기서 돈다
+    calib_out = None
+    if win.calibration_view_widget is not None:                  # 위치를 몰라 자동 추정·확인 화면(08 D-32)
+        calib_out = _drive_calibration(win, app, a, rec)
     t_run_end = time.perf_counter()
     res = win.last_new_broadcast
     wb = win.workbench
@@ -196,7 +288,7 @@ def main(argv=None) -> int:
         "open_view_s": round(t_view - t_run_end, 1), "total_s": round(t_view - t_menu, 1),
         "ok": bool(res is not None and res.ok), "line": win.last_new_broadcast_line,
         "progress_heads": rec["heads"], "steps": steps, "view": view, "blocked": rec["blocked"],
-        "cli_needed": 0, "leftover_intermediate": left, "limit_min": a.limit_min,
+        "cli_needed": 0, "leftover_intermediate": left, "limit_min": a.limit_min, "calibration": calib_out,
     }
     win.close()
     for _ in range(50):

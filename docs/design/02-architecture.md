@@ -222,7 +222,7 @@ flowchart TB
 | `app/ui/project_view.py` | 최근 프로젝트, 열기(쓰기 잠금 확인) | store | 7-2 | MVP |
 | `app/engine_run.py` · `app/ui/new_broadcast_dialog.py` | **새 방송 한 번에 진행기**([08](08-decisions-2026-10-20.md) D-31 2·3): 메뉴 '파일 → 새 방송…' 의 대화상자(VOD 번호 또는 주소 · 영상 파일, 라벨러를 모를 때만 한 칸 더)와 Qt 없는 진행기 — 프로젝트 만들기(`project.create`) → 채팅 받기(`chzzk_chat.collect`) → 영상 연결(`media.media_ref`) → 보정 앵커 후보 수(`tools/find_anchors.py --json`, 따로 프로세스) → 엔진(엔진 venv 따로 프로세스: 음성 뽑기 → `engine asr` → `tools/engine_to_ai.py --engine v0.3` + 주제·전사 낱말·벡터). 시범이 아니면 봉인 없이 `derived\`(화면이 읽는 이름 그대로), 시범이면 `tools/pilot_engine_run.py`. 단계마다 진행 글(단계 이름·경과 시간·숫자)만, 실패하면 단계·까닭 코드 한 줄, 같은 번호로 다시 하면 이어서. 메인 창이 JobWorker·`run_job_modal(show_text)` 로 돌리고 끝나면 분석 세션 작업대 '분석 보기' 를 연다. 앱은 engine 을 import 하지 않는다 | project, chzzk_chat, media, analysis | 따로 프로세스(엔진 venv) | D-31 |
 | `app/ui/new_project_wizard.py` | (계획) 새 프로젝트 5단계. 지금은 화면이 없고 `app/project.create` 와 도구로 만든다 | project, workers | 7-2 | 계획 (파일 없음, D-13 2) |
-| `app/ui/calibration_dialog.py` | (계획) 시간 정렬(앵커 입력·오프셋 확정·건너뛰기 사유). 지금은 작업대가 `project.json` 의 `calibration` 을 읽어 쓰기만 한다 | timecode, store | 7-5 | 계획 (파일 없음, D-13 2) |
+| `app/ui/calibration_view.py` · `app/calibration.py` | 시간 정렬 확정 화면(앵커 후보 듣기 1·2·3 · 오프셋 확정 · 건너뛰기 사유 · 아는 VOD 시각으로 다시 찾기). 보기 전용 작업대 위에 쌓고 쓰기는 작업대 통로(`Workbench.write_calibration`). 화면 없는 층(위치 판단·후보·판 만들기)은 `app/calibration.py` | timecode, project, tools/find_anchors(따로 프로세스) | 7-5 | 됨 (08 D-32) |
 | `app/ui/workbench.py` | 작업대: 플레이어 + 타임라인 + 오른쪽 작업 칸 | ui 부품 | 7-3 | MVP |
 | `app/ui/queue_view.py` | 큐 모드: 표본 한 건씩 판정 | sampling, forms | 7-4 | MVP |
 | `app/ui/review_player.py` | 7-2 확인 범위 반복, 속도 프리셋, 프레임 번호(가변 프레임이면 끔), 들은 범위 기록, 화면 위 문구(OSD) | player, timecode | 7-3 | MVP |
@@ -950,6 +950,8 @@ sequenceDiagram
 ```
 
 앵커 차이의 흩어짐이 크면(예: 3초 넘음, 시작값) 경고한다. 앞부분이 잘린 파일이거나 방송 중간에 끊긴 VOD 일 수 있다.
+
+**구현 메모 (2026-10-24, 08 D-32).** 대화상자 대신 보기 전용 작업대 위에 쌓는 화면(`app/ui/calibration_view.py`)이다. 앵커는 사람이 찍지 않고 `tools/find_anchors.py` 후보(채팅을 소리 내 읽은 장면·닉네임 호명)를 들어 1 맞음 · 2 아님 · 3 모름으로 고른다. 맞음 3개·흩어짐 3초 이하·이상치 없음이면 [확정 (Enter)]. 오프셋 = 차이 중앙값 − 읽기 지연 6.7초(실제 클립 2편에서 잰 시작값 — 앵커 차이에는 채팅을 보고 읽기까지의 시간이 들어 있다). 영상이 VOD 의 어디인지 모르면 `--locate` 로 먼저 자리를 찾는다. '파일 → 새 방송…' 은 위치를 모를 때 자동 추정 판(미확인)을 더하고 판정한 뒤 이 화면을 연다.
 
 ### 7-6. 단축키와 포커스 규칙
 

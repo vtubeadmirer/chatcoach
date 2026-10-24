@@ -1,10 +1,12 @@
 """tools/find_anchors.py 테스트 (합성 데이터만)."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
 import sys
+from contextlib import redirect_stdout
 
 import pytest
 
@@ -220,3 +222,142 @@ def test_cli_subprocess_utf8(proj):
                        capture_output=True, timeout=60)
     assert r.returncode == 0
     assert "후보" in r.stdout.decode("utf-8")
+
+
+# ---------------------------------------------------------------------------- (c) 위치 찾기 (08 D-32)
+SYL = "".join(chr(0xAC00 + (i * 21 + m) * 28) for i in range(19) for m in range(21))   # 받침 없는 음절 399개
+CLIP_START = 7_380_000            # 합성 정답: 영상 0초 = VOD 2:03:00
+CLIP_LEN = 1_200_000
+
+
+def _word(rng):
+    return "".join(rng.choice(SYL) for _ in range(rng.randint(2, 4)))
+
+
+def _synth(n_chats=3000, span_ms=10_800_000, reads=30, noise_utts=60, spam=True, seed=7):
+    """3시간 합성 채팅 + 20분 클립(영상 0초 = VOD CLIP_START)의 발화: 채팅을 읽은 발화(지연 3~9초) + 엉뚱한 발화 +
+    흔한 인사(채팅·발화 모두 여기저기). 본문은 무작위 음절 낱말(실제 채팅 아님)."""
+    import random
+    rng = random.Random(seed)
+    ts = sorted(rng.randrange(0, span_ms) for _ in range(n_chats))
+    msgs = [_msg(f"s{i:06d}", t, f"vw_synth{i % 97:07d}", " ".join(_word(rng) for _ in range(rng.randint(2, 5))),
+                 masked="시**") for i, t in enumerate(ts)]
+    if spam:
+        for k in range(60):
+            msgs.append(_msg(f"g{k:04d}", rng.randrange(0, span_ms), VB, "안녕하세요 반가워요 오늘도", masked="시**"))
+    msgs.sort(key=lambda m: (m["t_ms"], m["chat_id"]))
+    inside = [m for m in msgs if CLIP_START + 30_000 <= m["t_ms"] < CLIP_START + CLIP_LEN - 30_000
+              and m["chat_id"].startswith("s")]
+    segs = []
+    lags = []
+    for m in rng.sample(inside, reads):
+        lag = rng.randint(3000, 9000)
+        lags.append(lag)
+        st = m["t_ms"] - CLIP_START + lag
+        segs.append({"start_ms": st, "end_ms": st + 2500, "text": m["text"] + " 라고 하셨네요"})
+    for _ in range(noise_utts):
+        st = rng.randrange(0, CLIP_LEN - 5000)
+        segs.append({"start_ms": st, "end_ms": st + 2000, "text": " ".join(_word(rng) for _ in range(4))})
+    if spam:
+        for _ in range(8):
+            st = rng.randrange(0, CLIP_LEN - 5000)
+            segs.append({"start_ms": st, "end_ms": st + 2000, "text": "안녕하세요 반가워요 오늘도"})
+    segs.sort(key=lambda s: s["start_ms"])
+    asr = {"format": "chatcoach.asr", "format_version": 1, "audio": {"duration_ms": CLIP_LEN},
+           "segments": [dict(id=i, words=[], **s) for i, s in enumerate(segs)]}
+    return msgs, asr, sorted(lags)
+
+
+def _write_synth(tmp_path, msgs, asr):
+    _write_jsonl(str(tmp_path / "chat" / "messages.jsonl"), msgs)
+    os.makedirs(tmp_path / "derived", exist_ok=True)
+    with open(tmp_path / "derived" / "asr.json", "w", encoding="utf-8") as f:
+        json.dump(asr, f, ensure_ascii=False)
+    return str(tmp_path / "derived" / "asr.json")
+
+
+def test_locate_finds_clip_inside_long_vod(tmp_path):
+    msgs, asr, lags = _synth()
+    path = _write_synth(tmp_path, msgs, asr)
+    chats = fa.text_chats(msgs)
+    utts = fa.load_asr(path)
+    loc = fa.locate_clip(chats, utts)
+    assert loc is not None and not loc.clamped
+    med_lag = lags[len(lags) // 2]
+    # 자리 = 클립 시작 − 읽기 지연(중앙값 근처): 지연을 빼면 참값과 몇 초 안
+    assert abs((CLIP_START - loc.file_start_ms) - med_lag) <= 3000, (loc, med_lag)
+    assert loc.peak_utts >= fa.LOC_MIN_UTTS and loc.peak_chats >= fa.LOC_MIN_CHATS
+    assert loc.peak > 3 * max(loc.second, 0.1)                      # 인사 잡음은 자리를 만들지 않는다
+    # 2단계: 그 자리로 (a) — 서로 맞는 후보가 읽은 채팅들
+    cands = fa.asr_candidates(chats, utts, identities=None, file_start_ms=loc.file_start_ms, top=20)
+    med, cons = fa.consistent_subset(cands, loc.file_start_ms)
+    assert len(cons) >= 10 and all(c.chat["chat_id"].startswith("s") for c in cons)
+    assert all(c.utt.end_ms == c.utt.start_ms + 2500 for c in cons)
+    off = med - loc.file_start_ms                                     # 저장 오프셋 축(영상 − 채팅)
+    assert abs(off - (-CLIP_START + med_lag)) <= 3000
+
+
+def test_locate_no_signal_returns_none(tmp_path):
+    msgs, asr, _ = _synth(reads=0, spam=True)
+    path = _write_synth(tmp_path, msgs, asr)
+    assert fa.locate_clip(fa.text_chats(msgs), fa.load_asr(path)) is None
+    assert fa.locate_clip([], fa.load_asr(path)) is None
+
+
+def test_locate_clamps_negative_start():
+    """클립이 VOD 0초부터이고 지연만 있으면 차이가 양수 → 클립 시작 0 으로 자르고 표시."""
+    chats = [_msg(f"c{i:02d}", 60_000 + i * 30_000, VA, f"합성 낱말 {_w} 이야기" , masked="시**")
+             for i, _w in enumerate(["가나다", "라마바", "사아자", "차카타", "파하거", "너더러"])]
+    utts = [fa.Utt(i, c["t_ms"] + 5000, c["text"] + " 네", None, c["t_ms"] + 7000) for i, c in enumerate(chats)]
+    loc = fa.locate_clip(chats, utts)
+    assert loc is not None and loc.clamped and loc.file_start_ms == 0 and loc.diff_ms == 5000
+
+
+def test_locate_cost_large_vod(tmp_path):
+    """3만 건 × 발화 600 이 넉넉히 1분 안(실제 13시간·2만6천 건은 약 1초 — 느린 PC 에서도 흔들리지 않게 크게 잡음)."""
+    import time
+    msgs, asr, _ = _synth(n_chats=30_000, span_ms=46_000_000, reads=40, noise_utts=560)
+    path = _write_synth(tmp_path, msgs, asr)
+    chats, utts = fa.text_chats(msgs), fa.load_asr(path)
+    t0 = time.perf_counter()
+    loc = fa.locate_clip(chats, utts)
+    assert time.perf_counter() - t0 < 60
+    assert loc is not None and abs(CLIP_START - loc.file_start_ms) <= 12_000
+
+
+def test_cli_locate_list_numbers_only(tmp_path):
+    msgs, asr, _ = _synth()
+    path = _write_synth(tmp_path, msgs, asr)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = fa.main(["--project", str(tmp_path), "--asr", path, "--json", "--list", "--locate", "--top", "10"])
+    out = buf.getvalue().strip().splitlines()
+    assert rc == 0 and len(out) == 1
+    doc = json.loads(out[0])
+    assert doc["located"]["file_start_ms"] == doc["file_start_ms"] and doc["candidates"] == len(doc["rows"]) == 10
+    assert set(doc["rows"][0]) == {"chat_id", "chat_ms", "video_ms", "video_end_ms", "basis", "score", "diff_ms"}
+    assert all(r["chat_id"].startswith("s") and r["basis"].startswith("text") for r in doc["rows"])
+    for m in msgs[:200]:                                            # 본문·발화 글은 없다
+        assert m["text"] not in out[0]
+    assert "라고 하셨네요" not in out[0]
+    # 자리를 못 찾으면 located null · 후보 0
+    m2, a2, _ = _synth(reads=0)
+    p2 = _write_synth(tmp_path / "b", m2, a2)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = fa.main(["--project", str(tmp_path / "b"), "--asr", p2, "--json", "--list", "--locate"])
+    d2 = json.loads(buf.getvalue())
+    assert rc == 0 and d2["located"] is None and d2["candidates"] == 0 and d2["rows"] == []
+    # --locate 는 --asr 가 있어야
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = fa.main(["--project", str(tmp_path), "--json", "--locate"])
+    assert rc == 1 and json.loads(buf.getvalue()) == {"error": "locate_needs_asr"}
+
+
+def test_cli_locate_text_mode(tmp_path, capsys):
+    msgs, asr, _ = _synth()
+    path = _write_synth(tmp_path, msgs, asr)
+    assert fa.main(["--project", str(tmp_path), "--asr", path, "--locate", "--no-text"]) == 0
+    out = capsys.readouterr().out
+    assert "(c) 자리: 영상 0초 ≈ VOD 02:02:" in out and "--file-start-ms" not in out

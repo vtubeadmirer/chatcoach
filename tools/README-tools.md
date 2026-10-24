@@ -11,8 +11,8 @@
 | `adopt_project.py` | project.json 이 없는 기존 채팅 수집 폴더를, 그 솔트를 그대로 쓰는 앱 프로젝트로 들인다. |
 | `fetch_chat.py` | 치지직 VOD 채팅을 프로젝트 폴더에 받는다 (`app.chzzk_chat.collect` 의 명령줄 껍데기). |
 | `chat_window.py` | 어느 시각 주변의 채팅을 화면에 보여 주는 로컬 도우미 (손라벨·앵커 찾기용). |
-| `find_anchors.py` | 시각 보정 앵커 '후보' 를 제안한다. 사람이 다시보기에서 확인한 것만 `calibrate.py` 에 넣는다. `--json` 은 표·본문 없이 후보 수 같은 숫자만 JSON 한 줄. |
-| `calibrate.py` | 영상 시각 = 채팅 시각 앵커로 시각 보정을 기록한다. |
+| `find_anchors.py` | 시각 보정 앵커 '후보' 를 제안한다. 사람이 다시보기에서 확인한 것만 `calibrate.py` 에 넣는다. `--json` 은 표·본문 없이 후보 수 같은 숫자만 JSON 한 줄, `--list` 를 더하면 후보 rows(chat_id·시각·근거 코드·점수, 본문 없음). `--locate`(`--asr` 필요)는 영상이 VOD 의 어디인지 모를 때 먼저 자리를 찾는다(08 D-32 — 13시간·채팅 2만6천 건에서 약 1초). |
+| `calibrate.py` | 영상 시각 = 채팅 시각 앵커로 시각 보정을 기록한다(차이 중앙값 그대로 — 읽기 지연을 빼지 않는다). 앱의 '파일 → 시간 정렬(보정)…' 은 앵커를 들어 확정하고 읽기 지연 6.7초를 뺀다(08 D-32). |
 | `extract_audio.py` | 영상에서 STT 용 16kHz 모노 WAV 를 뽑고 걸린 시간을 출력한다. |
 | `export_labels.py` | 프로젝트의 현재 유효 라벨을 zip 하나로 내보낸다 (`app.export.export_labels`). |
 | `make_scenario.py` | 가상 채팅 시나리오(retrieved, H-2)를 `scenarios\` 에 만든다. `--generated <생성 후보>`(H-3, `python -m engine generate --out` 이 만든 파일)를 주면 retrieved 와 합치고 G 채점기(`app.core.gen_filter`)로 한 번 더 거른다 — 기본 `--generated-mode replace` 는 생성 몫(`--max-generated-ratio`, 기본 0.25)을 먼저 잡고 그 창의 점수 낮은 retrieved 를 뺀다(창 목표·가상 비율 상한은 그대로). 이 도구는 LLM 을 부르지 않는다. 시범 프로젝트는 거부(`--generated`·`--topic-flow`·`--blocklist`·`--projects-root` 가 시범 폴더 안이어도 읽기 전에 종료 2). `--generated` 는 원 닉네임 목록(`chat\protected\identities.jsonl`)이 없으면 `nicknames_missing` 종료 1(`--allow-no-identities` 로만 진행, 경고). 금칙어는 저장소 밖 `config\blocklist-ko.txt`(해시만 기록). |
@@ -21,7 +21,7 @@
 | `viewer_score_calib.py` | 시청자 훈련 채점 보정 자료: 반응받은 채팅과 같은 구간 다른 채팅의 세 축 분포·lift·정밀도·문턱 후보(기본값은 바꾸지 않음). 손라벨 길과 시범 최종 세트 길(`--final-set`, D-22). 출력은 숫자·코드만. |
 | `rehearse_new_broadcast.py` | **'파일 → 새 방송…' 한 바퀴 리허설**(08 D-31 4): 실제 MainWindow 를 임시 데이터 폴더(`%LOCALAPPDATA%\ChatCoachSmoke\rehearsal-<시각>`)로 띄워 메뉴 → 대화상자(번호 글자 입력·[고르기…]) → [시작] → 분석 화면까지 몰고 클릭 수·칸 수·단계별 초·막힌 곳을 JSON 한 줄로. 실제 채팅 받기·엔진 venv 를 쓴다. 끝에 데이터 폴더를 `shutil.rmtree`(휴지통 금지). `--limit-min N` = 처음 N분만 전사. |
 
-- **앱에서는 `파일 → 새 방송…` 으로 같은 일을 한다**(08 D-31 2·3, `app/engine_run.py`): 위 `new_project`·`fetch_chat`·영상 연결·`find_anchors`(후보 수만) 다음에 엔진(엔진 venv 따로 프로세스: 음성 뽑기 → `engine asr` → `engine_to_ai.py --engine v0.3 --topics --words --vectors`)까지. 시범이 아니면 봉인 없이 그 프로젝트 `derived\`(asr.json · link-v0.3.json · asr-topic-flow.json · asr-words.json · asr-topic-vectors.json), 시범이면 `pilot_engine_run.py` 봉인 길. 명령줄은 개발·시험용이다.
+- **앱에서는 `파일 → 새 방송…` 으로 같은 일을 한다**(08 D-31 2·3, `app/engine_run.py`): 위 `new_project`·`fetch_chat`·영상 연결·`find_anchors`(후보 수만) 다음에 엔진(엔진 venv 따로 프로세스: 음성 뽑기 → `engine asr` → (영상이 VOD 의 어디인지 모르면 `find_anchors.py --locate` 로 자동 위치 추정, 08 D-32) → `engine_to_ai.py --engine v0.3 --topics --words --vectors`)까지. 판정 도장 `derived\engine-stamp.json` 이 지금 보정과 다르면 판정만 다시 한다. 시범이 아니면 봉인 없이 그 프로젝트 `derived\`(asr.json · link-v0.3.json · asr-topic-flow.json · asr-words.json · asr-topic-vectors.json), 시범이면 `pilot_engine_run.py` 봉인 길. 명령줄은 개발·시험용이다.
 
 ### 가상 채팅 생성 (H-3) — `python -m engine generate` 와 LM Studio
 

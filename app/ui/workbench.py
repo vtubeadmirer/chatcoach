@@ -2153,6 +2153,31 @@ class Workbench(QWidget):
             return
         self.project.update(mutate, by=by)
 
+    def write_calibration(self, mutate, by: str | None = None) -> None:
+        """보정 판 쓰기(08 D-32 시간 정렬 화면) — _write_project 와 같은 통로. 세션이 project.json 을 쓸 수 없으면(분석·재라벨 등)
+        ReadOnlyError. 쓴 뒤 TimeMap·영상 범위·상태 칩을 새 활성 판으로 다시 맞춘다(reload_calibration)."""
+        from ..project import ReadOnlyError
+        if self.project is None or self.project.read_only:
+            raise ReadOnlyError("read_only")
+        if not may_write_media(self.session_kind, self.phase):
+            raise ReadOnlyError("session_cannot_write_project_json")
+        self._write_project(mutate, by or self.labeler_id or (self.project.data or {}).get("created_by") or "L01")
+        self.reload_calibration()
+
+    def reload_calibration(self) -> None:
+        """project.json 의 활성 보정으로 TimeMap 을 다시 만들고 영상 범위·상태 칩·재생 위치 표시를 맞춘다."""
+        data = (self.project.data if self.project is not None else None) or {}
+        self.timemap = TimeMap(data.get("calibration"))   # 확인 재생기·탐색은 vod_to_file 로 이 값을 그때그때 읽는다
+        self._refresh_coverage()
+        if self.media_path:
+            self._apply_frame_info()                      # 타임라인 프레임 원점 = 파일 0초의 VOD 시각
+            raw = getattr(self, "_wave_raw", None)
+            if raw:
+                aligned, span = align_waveform(raw[0], raw[1], self.timemap.to_vod(0))
+                self.timeline.set_waveform(aligned, span)
+            self._set_vod(self.timemap.to_vod(int(self._file_pos or 0)), from_player=True)
+        self._update_status(full=True)
+
     def _start_waveform(self, path: str) -> None:
         from .. import analysis
 
@@ -2181,6 +2206,7 @@ class Workbench(QWidget):
                 self._fps, self._vfr = fps, vfr
                 self._apply_frame_info()
         if res.get("vals"):
+            self._wave_raw = (res["vals"], res["dur"])     # 보정이 바뀌면 다시 맞춘다(reload_calibration)
             aligned, span = align_waveform(res["vals"], res["dur"], self.timemap.to_vod(0))
             self.timeline.set_waveform(aligned, span)
 

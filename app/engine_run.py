@@ -8,8 +8,16 @@ VOD 번호와 영상 파일 하나로 다섯 단계를 차례로 돈다. 단계�
 | project 프로젝트 만들기 | <프로젝트 자리>\\<slug> (app.project.create — tools/new_project.py 가 부르는 함수). 제목·VOD 길이는 영상 정보 API 한 번(app.chzzk_chat.fetch_video_info), 없으면 ClipSlicer 파일 이름의 제목 → '방송 <번호>' | 같은 VOD 번호 프로젝트가 있으면 그것(project.json 이 늦게 바뀐 것) |
 | chat 채팅 받기 | app.chzzk_chat.collect (tools/fetch_chat.py 가 부르는 함수, 솔트는 프로젝트의 chat\\protected\\salt.json). 받은 건수만 | chat\\messages.jsonl 이 있으면 건너뜀 |
 | media 영상 연결 | app.media.media_ref(부분 지문·ffprobe) → project.json media.current (작업대 '영상 연결' 의 '처음 연결' 과 같은 규칙). ClipSlicer 이름의 시작이 0 이 아니면(클립) 그 시작만 합친 보정 판(미확인)을 더한다 — tools/calibrate.py --file-start-ms 와 같은 저장 | 같은 파일이면 건너뜀. 다른 파일이 연결돼 있으면 멈춤(media_other — 바꾸기는 작업대에서 사유와 함께) |
-| anchors 보정 앵커 후보 | tools/find_anchors.py --json 을 따로 프로세스로(후보 수만, 파일 안 씀). 보정은 오프셋 0 '미확인' 그대로 — 확정은 사람 | 늘 다시 센다. 실패해도 멈추지 않는다(경고 코드) |
-| engine 엔진 | 엔진 venv(<저장소>\\.venv-engine)를 따로 프로세스로: 음성 뽑기(app.analysis.extract_audio_wav, 영상 처음부터 — 전체 또는 asr_limit_ms) → python -m engine asr → tools/engine_to_ai.py --engine v0.3 --topics --words --vectors --out | derived\\ 결과가 다 있으면 건너뜀(asr.json 만 있으면 전사를 건너뜀) |
+| anchors 보정 앵커 후보 | tools/find_anchors.py --json 을 따로 프로세스로(후보 수만, 파일 안 씀, 창은 활성 보정의 클립 시작 근처). 확정은 사람 | 늘 다시 센다. 실패해도 멈추지 않는다(경고 코드) |
+| engine 엔진 | 엔진 venv(<저장소>\\.venv-engine)를 따로 프로세스로: 음성 뽑기(app.analysis.extract_audio_wav, 영상 처음부터 — 전체 또는 asr_limit_ms) → python -m engine asr → (위치를 모르면 자동 위치 추정, 아래) → tools/engine_to_ai.py --engine v0.3 --topics --words --vectors --out → 도장 | derived\\ 결과가 다 있고 도장이 지금 보정·영상·전사와 같으면 건너뜀(asr.json 만 있으면 전사를 건너뜀, 도장이 다르면 판정만 다시) |
+
+자동 위치 추정(08 D-32). 전사 뒤·판정 전에 app.calibration.media_position 이 'unknown'(보정이 만든 그대로이고, ClipSlicer 이름에
+구간이 없고, 영상 길이가 VOD 길이와 다름)이면 tools/find_anchors.py --locate 로 영상이 VOD 의 어디인지 찾는다. 서로 맞는 후보가
+LOCATE_MIN_CONSISTENT 이상이면 '자동 위치 추정' 판(미확인, 앵커 없음, 차이 중앙값 − 읽기 지연)을 더하고 판정한다 — 끝 화면 전에
+메인 창이 확인 화면을 연다(numbers.calibration = 'auto'). 못 찾으면 판정하지 않고 code 'calibration_needed'
+(numbers.calibration = 'needed' — 멈춤이 아니다. 확인 화면에서 정하고 같은 번호로 다시 돌리면 판정한다).
+도장 derived\\engine-stamp.json: 판정을 만든 보정 판·저장 오프셋·영상 판·asr.json sha256·판정 파일 이름(숫자·이름만). 판정 파일을
+옮긴 뒤 마지막에 쓴다. 없거나 다르면 판정만 다시 한다(D-32 4 — 전사 낱말은 메인 창이 따로 다시 만들 수 있어 도장으로 쓰지 않는다).
 
 엔진 결과 자리(D-31 3). 시범이 아닌 프로젝트는 봉인 없이 그 프로젝트 derived\\ 에, **화면이 읽는 이름 그대로** 둔다:
   derived\\asr.json(전사 — app.viewer_flow.ASR_REL) · derived\\link-v0.3.json(판정 — 작업대 '분석 보기' 와 세션 화면의
@@ -48,6 +56,7 @@ from datetime import datetime
 from typing import Callable, Mapping, Sequence
 
 from . import analysis, chzzk_chat, media, paths
+from . import calibration as calib
 from . import project as project_mod
 from .core import timecode as tc
 
@@ -67,6 +76,9 @@ LINK_GLOB = "link-*.json"
 LINK_NAME = {"v0.3": "link-v0.3.json", "v0.2": "link-v0.2.json"}
 STAGE_NAME = "asr-link.json"             # engine_to_ai --out (보호 구역 derived/asr*) — 다 쓰면 위 이름으로 옮긴다
 STAGE_SIDES = {"topics": TOPICS_REL, "words": WORDS_REL, "vectors": VECTORS_REL}
+STAMP_REL = ("derived", "engine-stamp.json")   # 판정을 만든 보정·영상·전사(숫자·이름만, D-32 4)
+STAMP_FORMAT = "chatcoach.engine_stamp"
+LOCATE_MIN_CONSISTENT = 3                 # 자동 위치 추정 판을 더할 '서로 맞는 후보' 수(timecode.MIN_ANCHORS_VERIFIED 와 같은 값)
 
 ENGINE_VERSION_V03 = "link-v0.3"          # engine.link.ENGINE_VERSION_V03 (글자로 둔다 — 앱은 엔진을 import 하지 않는다)
 ASR_MODEL = "large-v3-turbo"
@@ -108,6 +120,8 @@ CODE_KO = {
     "e5_missing": "의미 비교 모델이 없어 벡터 없이 했습니다(v0.3 → v0.2)",
     "engine_fallback": "v0.3 의미 비교가 돌지 않아 v0.2 로 판정했습니다",
     "tool_unavailable": "앵커 후보 도구를 띄울 수 없습니다(묶은 exe)",
+    "calibration_needed": "영상이 VOD 의 어디인지 찾지 못해 판정하지 않았습니다 — 시간 정렬 화면에서 정하세요",
+    "calibration_save": "자동 위치 추정 판을 project.json 에 저장하지 못했습니다",
     "cancelled": "취소했습니다",
 }
 
@@ -555,13 +569,23 @@ class Result:
     def direct(self):
         return self.number("engine", "direct")
 
+    @property
+    def calibration(self) -> str | None:
+        """엔진 단계가 남긴 보정 표시: 'auto'(자동 위치 추정 판, 사람 확인 전) · 'needed'(자리를 못 찾아 판정 안 함) · None."""
+        v = self.number("engine", "calibration")
+        return v if v in ("auto", "needed") else None
+
     def line(self) -> str:
         """상태 줄 한 줄(숫자만): '새 방송 끝: 채팅 n · 발화 n · 반응(direct) n' 또는 멈춘 단계와 까닭."""
         def num(v) -> str:
             return f"{v:,}" if isinstance(v, int) and not isinstance(v, bool) else "-"
+        if self.ok and self.calibration == "needed":
+            return (f"새 방송: 판정 전 — 영상이 VOD 의 어디인지 정해야 합니다 · 채팅 {num(self.chats)} · "
+                    f"발화 {num(self.utterances)}")
         if self.ok:
             direct = "봉인됨" if self.pilot else num(self.direct)
-            return f"새 방송 끝: 채팅 {num(self.chats)} · 발화 {num(self.utterances)} · 반응(direct) {direct}"
+            tail = " · 보정: 자동 추정(확인 전)" if self.calibration == "auto" else ""
+            return f"새 방송 끝: 채팅 {num(self.chats)} · 발화 {num(self.utterances)} · 반응(direct) {direct}{tail}"
         s = self.stopped
         if s is None:
             return "새 방송: 끝나지 않았습니다"
@@ -763,14 +787,7 @@ def _step_chat(r: _Run, st: Step) -> None:
 
 
 # ---------------------------------------------------------------------------- (c) 영상
-def _default_calibration(cal: Mapping | None) -> bool:
-    """활성 보정이 만든 그대로(판 0 · 오프셋 0 · 앵커 없음 · 미확인)인가."""
-    if not isinstance(cal, Mapping):
-        return True
-    revs = [x for x in cal.get("revs") or [] if isinstance(x, Mapping)]
-    act = next((x for x in revs if x.get("rev") == cal.get("active_rev")), None)
-    return act is None or (act.get("offset_ms") == 0 and not act.get("anchors") and act.get("status") == "unverified"
-                           and len(revs) == 1)
+_default_calibration = calib.is_default_calibration    # 활성 보정이 만든 그대로(판 0 · 오프셋 0 · 앵커 없음 · 미확인)인가
 
 
 def _step_media(r: _Run, st: Step) -> None:
@@ -843,8 +860,11 @@ def _step_anchors(r: _Run, st: Step) -> None:
     asr = derived_path(r.root, ASR_REL)
     if not r.result.pilot and asr_summary(asr) is not None:
         cmd += ["--asr", asr]                       # 다시 돌릴 때 전사가 있으면 (a) 발화 기준 후보
-    if r.clip_start_ms:
-        cmd += ["--file-start-ms", str(r.clip_start_ms)]
+    cal = (r.proj.data or {}).get("calibration")
+    # 활성 보정이 말하는 클립 시작(자동 추정·확정 판 포함). 만든 그대로면 파일 이름의 클립 시작
+    fs = r.clip_start_ms if calib.is_default_calibration(cal) else calib.approx_file_start_ms(r.proj.data)
+    if fs:
+        cmd += ["--file-start-ms", str(fs)]
     p = RUN_PROCESS(cmd, cancelled=r.cancelled, tick=r.tick, timeout_s=ANCHORS_TIMEOUT_S, env=tool_env())
     if p.error == "cancelled":
         raise _Cancelled()
@@ -936,7 +956,7 @@ def _transcribe(r: _Run, st: Step, py: str, models: str, asr: str) -> None:
         st.numbers["removed"] = st.numbers.get("removed", 0) + _remove(left)
 
 
-def _link(r: _Run, st: Step, py: str, models: str, e5: bool) -> None:
+def _link(r: _Run, st: Step, py: str, models: str, e5: bool) -> str:
     d = os.path.join(r.root, "derived")
     stage = os.path.join(d, STAGE_NAME)
     stem = os.path.splitext(stage)[0]
@@ -979,6 +999,7 @@ def _link(r: _Run, st: Step, py: str, models: str, e5: bool) -> None:
                       vector_windows=p.doc.get("vector_windows"), link_s=round(time.monotonic() - t, 1))
     if ver != ENGINE_VERSION_V03:
         st.code = st.code or "engine_fallback"
+    return dst
 
 
 def _numbers_from_outputs(project_root: str) -> dict:
@@ -987,6 +1008,84 @@ def _numbers_from_outputs(project_root: str) -> dict:
     g = grade_counts(link) if link else {}
     return {"utterances": a.get("segments"), "words": a.get("words"), "reactions": g.get("graded"),
             "direct": g.get("direct"), "likely": g.get("likely")}
+
+
+# ---------------------------------------------------------------------------- 도장 (D-32 4)
+def _sha256_path(path: str) -> str | None:
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for b in iter(lambda: f.read(1 << 20), b""):
+                h.update(b)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def stamp_doc(project_root: str, data: Mapping | None, link_name: str | None) -> dict:
+    """판정을 만든 보정 판·저장 오프셋·영상 판·전사 sha256·판정 파일 이름(숫자·이름만)."""
+    act = calib.active_rev((data or {}).get("calibration") if isinstance(data, Mapping) else None) or {}
+    m = (data or {}).get("media") if isinstance(data, Mapping) else None
+    return {"format": STAMP_FORMAT, "version": 1, "calibration_rev": act.get("rev"), "offset_ms": act.get("offset_ms"),
+            "media_rev": (m or {}).get("media_rev") if isinstance(m, Mapping) else None,
+            "asr_sha256": _sha256_path(derived_path(project_root, ASR_REL)), "link": link_name}
+
+
+def write_stamp(project_root: str, data: Mapping | None, link_name: str) -> None:
+    doc = stamp_doc(project_root, data, link_name)
+    project_mod.atomic_write(derived_path(project_root, STAMP_REL),
+                             json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8"))
+
+
+def stamp_matches(project_root: str, data: Mapping | None) -> bool:
+    """도장이 있고 지금 보정·영상·전사와 같으며 그 판정 파일이 있는가. 아니면 판정을 다시 해야 한다."""
+    try:
+        with open(derived_path(project_root, STAMP_REL), "rb") as f:
+            old = json.loads(f.read(1 << 16).decode("utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(old, dict) or old.get("format") != STAMP_FORMAT:
+        return False
+    name = old.get("link")
+    if not isinstance(name, str) or name not in LINK_NAME.values() or \
+            not os.path.isfile(os.path.join(os.path.abspath(project_root), "derived", name)):
+        return False
+    now = stamp_doc(project_root, data, name)
+    return all(old.get(k) == now[k] for k in ("calibration_rev", "offset_ms", "media_rev", "asr_sha256"))
+
+
+# ---------------------------------------------------------------------------- 자동 위치 추정 (D-32)
+def _auto_locate(r: _Run, st: Step) -> bool:
+    """find_anchors --locate 로 클립 자리를 찾아 '자동 위치 추정' 판을 더한다. 더했으면 True."""
+    r.say(sub="자동 위치 추정", frac=0.75)
+    t = time.monotonic()
+    found = calib.find_candidates(r.root, locate=True, engine_python=r.req.engine_python, cancelled=r.cancelled,
+                                  tick=r.tick)
+    st.numbers["locate_s"] = round(time.monotonic() - t, 1)
+    if found.error == "cancelled":
+        raise _Cancelled()
+    if found.error:
+        st.numbers["locate_error"] = clean_code(found.error)
+        return False
+    loc = found.located or {}
+    st.numbers.update(located=1 if found.located else 0, located_consistent=found.consistent,
+                      located_votes=loc.get("peak_votes"))
+    if not found.located or (found.consistent or 0) < LOCATE_MIN_CONSISTENT or found.median_offset_ms is None:
+        return False
+    by, now = r.req.labeler_id, datetime.now().astimezone().isoformat(timespec="seconds")
+
+    def build(rev: int, media_rev: int, _d) -> dict:
+        return calib.auto_rev_json(found.median_offset_ms, rev=rev, media_rev=media_rev, by=by, now_iso=now,
+                                   consistent=found.consistent or 0, peak=loc.get("peak"), second=loc.get("second"))
+    try:
+        rj = calib.add_rev(lambda m: r.proj.update(m, by=by), build)
+    except (project_mod.ConflictError, project_mod.ReadOnlyError, ValueError, OSError):
+        raise StepError("calibration_save") from None
+    st.numbers.update(calibration="auto", calibration_rev=rj.get("rev"),
+                      file_start_s=round(-int(rj.get("offset_ms") or 0) / 1000, 1))
+    r.say(f"영상 0초 ≈ VOD {fmt_s(-int(rj.get('offset_ms') or 0) / 1000)} · 서로 맞는 후보 {found.consistent}", force=True)
+    return True
 
 
 def _step_engine(r: _Run, st: Step) -> None:
@@ -998,7 +1097,11 @@ def _step_engine(r: _Run, st: Step) -> None:
         raise StepError("engine_venv_missing")
     models = os.path.abspath(r.req.models_dir or default_models_dir())
     e5 = e5_present(models)
-    if engine_outputs(r.root, need_vectors=e5)["complete"]:
+    pos = calib.media_position(r.proj.data, r.req.video_path)
+    st.numbers["position"] = pos
+    if pos == "estimated":
+        st.numbers["calibration"] = "auto"           # 앞 실행의 자동 추정 판이 아직 사람 확인 전 — 끝에 확인 화면
+    if pos != "unknown" and engine_outputs(r.root, need_vectors=e5)["complete"] and stamp_matches(r.root, r.proj.data):
         st.status = "skipped"
         st.numbers.update(_numbers_from_outputs(r.root))
         return
@@ -1014,7 +1117,14 @@ def _step_engine(r: _Run, st: Step) -> None:
     else:
         st.numbers.update(utterances=have["segments"], words=have["words"], asr_kept=1)
     r.check()
-    _link(r, st, py, models, e5)
+    if pos == "unknown" and not _auto_locate(r, st):
+        st.numbers["calibration"] = "needed"
+        st.code = "calibration_needed"               # 멈춤이 아니다 — 확인 화면에서 정한 뒤 다시 돌리면 판정한다
+        r.say("판정 전 — 영상이 VOD 의 어디인지 정해야 합니다", frac=1.0, force=True)
+        st.status = "done"
+        return
+    dst = _link(r, st, py, models, e5)
+    write_stamp(r.root, r.proj.data, os.path.basename(dst))
     if not e5:
         st.code = "e5_missing"
     n = st.numbers

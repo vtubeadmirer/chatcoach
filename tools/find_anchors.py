@@ -18,10 +18,17 @@
 (b) --asr 가 없으면: '질문형이고 짧은' 채팅을 시간대별로 고르게 뽑는다. 다시보기에서 그 채팅 시각 근처를
     보며 스트리머가 읽거나 답하는지 사람이 확인할 목록이다. 영상 시각 칸은 사람이 채운다.
 
+(c) --locate (--asr 필요): 영상이 VOD 의 어디인지 모를 때(13시간 VOD 의 19분 클립 등, 08 D-32). (1단계) 정보가 많은 발화
+    최대 LOC_MAX_UTTS 개를 모든 text 채팅과 희귀 bigram 역색인으로 맞대어 짝마다 차이(영상 − 채팅)에 표를 던지고, LOC_WIN_MS
+    폭 창에서 표 합이 가장 큰 자리를 찾는다(서로 다른 발화·채팅이 LOC_MIN_UTTS·LOC_MIN_CHATS 이상이어야 자리로 본다).
+    그 차이 중앙값의 반대가 클립 시작 추정(읽기 지연이 든 값, 0 밑이면 0). (2단계) (a) 를 그 추정을 --file-start-ms 로 돌린다.
+
 끝에 tools/calibrate.py --anchor <영상시각>=<채팅시각> 모양으로도 찍는다.
 시각 형식: --from/--to 는 1:02:03(.5) 형식, 정수는 ms (tools/chat_window.py 와 같다).
 출력은 화면에만 한다. 이 도구는 파일을 쓰지 않는다.
 --json: 표·본문 없이 숫자만 JSON 한 줄(candidate_counts — 앱 '파일 → 새 방송…' 이 후보 수만 센다, 08 D-31 2).
+--json --list: 같은 줄에 후보 rows(chat_id · 채팅 시각 · 영상 시각 · 발화 끝 · 근거 코드 · 점수 — 본문·닉네임·발화 글 없음)를
+    더한다. 앱 '시간 정렬(보정)' 화면이 읽는다(08 D-32 — 본문은 앱이 messages.jsonl 에서 직접 읽는다).
 종료 코드: 0 정상 · 1 입력 오류
 """
 from __future__ import annotations
@@ -67,6 +74,16 @@ WEAK_NAME_SCORE = 0.2       # (a) 가림 닉네임 첫 글자만 맞음
 CONSISTENT_MS = 3000        # 차이 중앙값에서 이만큼 안이면 '서로 맞는 후보' (calibrate 흩어짐 경고 기준과 같음)
 Q_MIN_CHARS, Q_MAX_CHARS = 4, 25   # (b) 짧은 질문의 글자 수 범위
 DENSITY_WIN_MS = 15_000     # (b) 주변 채팅 밀도를 셀 창 (± 초)
+# (c) 위치 찾기 — 도구 시작값(D-32 측정 문서에 실제 클립 2편 결과)
+LOC_MAX_UTTS = 400          # 1단계에 쓸 발화 수(희귀 bigram 이 많은 순)
+LOC_DF_MIN = 20             # 희귀 bigram: 그 bigram 이 든 채팅 수 ≤ max(LOC_DF_MIN, LOC_DF_FRAC × 채팅 수)
+LOC_DF_FRAC = 0.002
+LOC_MIN_SHARED = 3          # 짝이 되려면 공유 희귀 bigram 이 이만큼 (MIN_SHARED_BIGRAMS 와 같은 값)
+LOC_TOPK = 3                # 발화 하나가 던지는 표 수(점수 높은 짝부터)
+LOC_WIN_MS = 60_000         # 표를 모으는 창 폭 — 읽기 지연이 수 초~수십 초로 퍼져 있어 넓게
+LOC_SECOND_GAP_MS = 120_000  # '둘째 자리' 는 첫 자리 가운데에서 이만큼 떨어진 창만(보고용)
+LOC_MIN_UTTS = 3            # 자리로 보려면 창 안 표의 서로 다른 발화 수
+LOC_MIN_CHATS = 3           # … 와 서로 다른 채팅 수
 
 _NIM_NAME = re.compile(r"([0-9a-z가-힣]{1,12})님")
 
@@ -77,6 +94,7 @@ class Utt:
     start_ms: int        # wav 시각
     text: str
     name_ms: int | None  # '님' 이 든 단어의 시작 (wav 시각), 없으면 None
+    end_ms: int | None = None  # 발화 끝 (wav 시각), 없으면 None
 
 
 @dataclass
@@ -109,7 +127,9 @@ def load_asr(path: str) -> list[Utt]:
             if isinstance(w, dict) and "님" in str(w.get("word", "")) and isinstance(w.get("start_ms"), int):
                 name_ms = w["start_ms"]
                 break
-        out.append(Utt(int(s.get("id", i)), int(s["start_ms"]), str(s.get("text") or ""), name_ms))
+        end = s.get("end_ms")
+        end = end if isinstance(end, int) and not isinstance(end, bool) and end >= s["start_ms"] else None
+        out.append(Utt(int(s.get("id", i)), int(s["start_ms"]), str(s.get("text") or ""), name_ms, end))
     out.sort(key=lambda u: (u.start_ms, u.seg_id))
     return out
 
@@ -236,6 +256,113 @@ def spread_pick(cands: list, key, k: int = 3) -> list:
     return [s[i] for i in idx]
 
 
+# ── (c) 위치 찾기 ────────────────────────────────────────────────────────
+
+@dataclass
+class Located:
+    """1단계 결과(숫자만). file_start_ms = 영상 0초의 VOD 시각 추정(읽기 지연이 든 값, 0 밑이면 0 — clamped)."""
+    file_start_ms: int
+    diff_ms: int             # 자리 창 안 표의 차이(영상 − 채팅) 중앙값
+    peak: float              # 자리 창의 표 합
+    second: float            # 첫 자리에서 LOC_SECOND_GAP_MS 넘게 떨어진 창 가운데 가장 큰 표 합
+    votes: int               # 던진 표 수
+    peak_votes: int
+    peak_utts: int
+    peak_chats: int
+    utts_used: int
+    clamped: bool = False
+
+    def doc(self) -> dict:
+        return {"file_start_ms": self.file_start_ms, "diff_ms": self.diff_ms, "peak": round(self.peak, 3),
+                "second": round(self.second, 3), "votes": self.votes, "peak_votes": self.peak_votes,
+                "peak_utts": self.peak_utts, "peak_chats": self.peak_chats, "utts_used": self.utts_used,
+                "clamped": self.clamped}
+
+
+def locate_clip(chats: list[dict], utts: list[Utt], *, asr_start_ms: int = 0) -> Located | None:
+    """(c) 1단계: 오프셋을 모를 때 영상이 VOD 의 어디인지. 자리를 못 찾으면 None.
+
+    희귀 bigram(그 bigram 이 든 채팅이 max(LOC_DF_MIN, LOC_DF_FRAC × 채팅 수) 이하)만 역색인해, 발화마다 공유 희귀 bigram 이
+    LOC_MIN_SHARED 이상인 채팅을 score_pair(닉네임 대조 없음)로 매긴다. 발화 하나는 점수 높은 LOC_TOPK 짝까지 표를 던지고, 표의
+    무게는 점수 ÷ 같은 문구 채팅 수(인사·따라 치기처럼 흔한 문구가 자리를 만들지 않게). 차이(영상 − 채팅)로 늘어놓고 LOC_WIN_MS
+    폭 창 가운데 무게 합이 가장 큰 창이 자리다."""
+    cache: dict = {}
+    post: dict[str, list[int]] = {}
+    tcount: Counter = Counter()
+    for i, c in enumerate(chats):
+        body = str(c.get("text") or "")
+        comp = F.compact(body)
+        cg = F.char_ngrams(body)
+        cache[c.get("chat_id")] = (cg, len(comp))
+        tcount[comp] += 1
+        if len(comp) < MIN_CHAT_CHARS:
+            continue
+        for g in cg:
+            post.setdefault(g, []).append(i)
+    df_max = max(LOC_DF_MIN, int(LOC_DF_FRAC * len(chats)))
+    rare = {g: v for g, v in post.items() if len(v) <= df_max}
+    sel = []
+    for u in utts:
+        ug = F.char_ngrams(u.text)
+        r = [g for g in ug if g in rare]
+        if len(r) >= LOC_MIN_SHARED:
+            sel.append((len(r), u.start_ms, u, ug, r))
+    sel.sort(key=lambda x: (-x[0], x[1], x[2].seg_id))
+    sel = sel[:LOC_MAX_UTTS]
+    votes: list[tuple[int, float, str, int]] = []           # (차이, 무게, chat_id, seg_id)
+    for _n, _t, u, ug, r in sel:
+        hits: Counter = Counter()
+        for g in r:
+            for i in rare[g]:
+                hits[i] += 1
+        mine = []
+        for i, n in hits.items():
+            if n < LOC_MIN_SHARED:
+                continue
+            c = chats[i]
+            cand = score_pair(c, u, nicknames=[], ngram_cache=cache, utt_ngrams=ug)
+            if cand is None:
+                continue
+            w = cand.score / max(1, tcount[F.compact(str(c.get("text") or ""))])
+            mine.append((w, asr_start_ms + u.start_ms - c["t_ms"], c["chat_id"]))
+        mine.sort(key=lambda x: (-x[0], x[1], x[2]))
+        votes += [(d, w, cid, u.seg_id) for w, d, cid in mine[:LOC_TOPK]]
+    if not votes:
+        return None
+    votes.sort(key=lambda v: (v[0], v[2], v[3]))
+    wins = []                                               # (무게 합, 왼쪽, 오른쪽)
+    j, s = 0, 0.0
+    for i, v in enumerate(votes):
+        s += v[1]
+        while v[0] - votes[j][0] > LOC_WIN_MS:
+            s -= votes[j][1]
+            j += 1
+        wins.append((s, j, i))
+    best = max(wins, key=lambda w: (round(w[0], 9), -(votes[w[2]][0] - votes[w[1]][0]), -w[1]))
+    s1, j1, i1 = best
+    members = votes[j1:i1 + 1]
+    n_utts, n_chats = len({m[3] for m in members}), len({m[2] for m in members})
+    if n_utts < LOC_MIN_UTTS or n_chats < LOC_MIN_CHATS:
+        return None
+    center = (votes[j1][0] + votes[i1][0]) / 2
+    second = max((w[0] for w in wins if abs((votes[w[1]][0] + votes[w[2]][0]) / 2 - center) > LOC_SECOND_GAP_MS),
+                 default=0.0)
+    diff = int(statistics.median_low(m[0] for m in members))
+    return Located(file_start_ms=max(0, -diff), diff_ms=diff, peak=s1, second=second, votes=len(votes),
+                   peak_votes=len(members), peak_utts=n_utts, peak_chats=n_chats, utts_used=len(sel), clamped=-diff < 0)
+
+
+def candidate_rows(cands: list[Cand], file_start_ms: int, asr_start_ms: int = 0) -> list[dict]:
+    """--list 의 rows: 숫자·chat_id·근거 코드만(본문·닉네임·발화 글 없음)."""
+    out = []
+    for c in cands:
+        end = (asr_start_ms + c.utt.end_ms) if c.utt is not None and c.utt.end_ms is not None else None
+        out.append({"chat_id": c.chat["chat_id"], "chat_ms": c.chat["t_ms"], "video_ms": c.video_ms,
+                    "video_end_ms": end if end is not None and end >= c.video_ms else None, "basis": c.basis,
+                    "score": c.score, "diff_ms": c.diff_ms(file_start_ms)})
+    return out
+
+
 # ── (b) asr 가 없을 때 ────────────────────────────────────────────────────
 
 def question_candidates(chats: list[dict], *, top: int = 20) -> list[tuple[float, dict]]:
@@ -314,19 +441,36 @@ def print_question_table(rows: list[tuple[float, dict]], vno: dict, *, show_text
 
 def candidate_counts(project: str, *, asr: str | None = None, top: int = 20, asr_start_ms: int = 0,
                      file_start_ms: int = 0, lag_before_ms: int = 120_000, lag_after_ms: int = 30_000,
-                     t_from: int | None = None, t_to: int | None = None, use_identities: bool = True) -> dict:
-    """(a)·(b) 후보를 main 과 같은 함수로 고르고 **숫자만** 돌려준다(본문·닉네임·시각 목록 없음).
+                     t_from: int | None = None, t_to: int | None = None, use_identities: bool = True,
+                     locate: bool = False, rows: bool = False) -> dict:
+    """(a)·(b)·(c) 후보를 main 과 같은 함수로 고르고 **숫자만** 돌려준다(본문·닉네임 없음).
 
     {"mode": "asr"|"question", "chats": text 채팅 수, "utterances": 발화 수(asr 일 때), "candidates": 후보 수,
-     "consistent": 차이 중앙값 ±3초 안 후보 수(asr 일 때), "median_diff_ms": 그 중앙값(asr 일 때), "warnings": 읽기 경고 수,
-     "elapsed_s"}. 채팅 파일이 없으면 FileNotFoundError, asr 를 읽지 못하면 ValueError·OSError."""
+     "consistent": 차이 중앙값 ±3초 안 후보 수(asr 일 때), "median_diff_ms": 그 중앙값(asr 일 때, file_start_ms 축),
+     "file_start_ms": 그 축의 클립 시작, "warnings": 읽기 경고 수, "elapsed_s"}.
+    locate=True(asr 필요)면 "located": Located.doc() 또는 None(자리를 못 찾음 — 후보 0), 2단계는 그 file_start_ms 로.
+    rows=True 면 "rows": candidate_rows(…)(chat_id · 시각 · 근거 코드 · 점수 — D-32 화면용).
+    채팅 파일이 없으면 FileNotFoundError, asr 를 읽지 못하면 ValueError·OSError, locate 인데 asr 가 없으면 ValueError."""
     t0 = time.perf_counter()
+    if locate and not asr:
+        raise ValueError("locate_needs_asr")
     records, warns = cw.load_messages(project)
     records = cw.sort_messages(records)
     chats = text_chats(records, t_from, t_to)
     out: dict = {"mode": "asr" if asr else "question", "chats": len(chats), "warnings": len(warns)}
     if asr:
         utts = load_asr(asr)
+        fs = file_start_ms
+        if locate:
+            loc = locate_clip(chats, utts, asr_start_ms=asr_start_ms)
+            out["located"] = loc.doc() if loc is not None else None
+            if loc is None:
+                out.update(utterances=len(utts), candidates=0, consistent=0, median_diff_ms=None, file_start_ms=None,
+                           identities=None, elapsed_s=round(time.perf_counter() - t0, 2))
+                if rows:
+                    out["rows"] = []
+                return out
+            fs = loc.file_start_ms
         identities = None
         if use_identities:
             try:
@@ -334,11 +478,13 @@ def candidate_counts(project: str, *, asr: str | None = None, top: int = 20, asr
             except FileNotFoundError:
                 identities = None
         cands = asr_candidates(chats, utts, identities=identities, asr_start_ms=asr_start_ms,
-                               file_start_ms=file_start_ms, lag_before_ms=lag_before_ms, lag_after_ms=lag_after_ms,
+                               file_start_ms=fs, lag_before_ms=lag_before_ms, lag_after_ms=lag_after_ms,
                                top=top)
-        med, cons = consistent_subset(cands, file_start_ms)
+        med, cons = consistent_subset(cands, fs)
         out.update(utterances=len(utts), candidates=len(cands), consistent=len(cons), median_diff_ms=med,
-                   identities=identities is not None)
+                   file_start_ms=fs, identities=identities is not None)
+        if rows:
+            out["rows"] = candidate_rows(cands, fs, asr_start_ms)
     else:
         out.update(candidates=len(question_candidates(chats, top=top)))
     out["elapsed_s"] = round(time.perf_counter() - t0, 2)
@@ -360,6 +506,10 @@ def main(argv=None) -> int:
     ap.add_argument("--no-text", action="store_true", help="본문·발화 글을 화면에도 찍지 않는다")
     ap.add_argument("--json", action="store_true",
                     help="표·본문 없이 후보 수 같은 숫자만 JSON 한 줄로 낸다(candidate_counts)")
+    ap.add_argument("--locate", action="store_true",
+                    help="(c) 영상이 VOD 의 어디인지 먼저 찾고(--asr 필요) 그 자리로 (a) 를 돈다. --file-start-ms 는 무시")
+    ap.add_argument("--list", action="store_true",
+                    help="--json 줄에 후보 rows(chat_id·시각·근거 코드·점수, 본문 없음)를 더한다 (앱 시간 정렬 화면용)")
     a = ap.parse_args(argv)
 
     def bad(msg: str, code: str) -> int:
@@ -378,6 +528,8 @@ def main(argv=None) -> int:
     if (a.t_from and t_from is None) or (a.t_to and t_to is None):
         return bad("오류: --from / --to 시각을 읽지 못했다", "time")
 
+    if a.locate and not a.asr:
+        return bad("오류: --locate 는 --asr 가 필요하다", "locate_needs_asr")
     if a.json:
         if a.asr and not os.path.isfile(a.asr):
             return bad("", "asr_missing")
@@ -385,7 +537,7 @@ def main(argv=None) -> int:
             doc = candidate_counts(a.project, asr=a.asr, top=a.top, asr_start_ms=a.asr_start_ms,
                                    file_start_ms=a.file_start_ms, lag_before_ms=int(a.lag_before * 1000),
                                    lag_after_ms=int(a.lag_after * 1000), t_from=t_from, t_to=t_to,
-                                   use_identities=not a.no_identities)
+                                   use_identities=not a.no_identities, locate=a.locate, rows=a.list)
         except FileNotFoundError:
             return bad("", "messages_missing")
         except (OSError, ValueError):
@@ -420,20 +572,31 @@ def main(argv=None) -> int:
                 identities = cw.load_identities(a.project)
             except FileNotFoundError:
                 identities = None
+        fs = a.file_start_ms
+        if a.locate:
+            loc = locate_clip(chats, utts, asr_start_ms=a.asr_start_ms)
+            if loc is None:
+                print(f"(c) 자리를 찾지 못했다 — 발화 {len(utts)}개 × text 채팅 {len(chats)}건에서 서로 맞는 짝이 "
+                      f"{LOC_MIN_UTTS}개 넘게 모이지 않았다(채팅을 읽지 않은 구간일 수 있다). 클립 시작을 알면 --file-start-ms 로")
+                return 0
+            fs = loc.file_start_ms
+            print(f"(c) 자리: 영상 0초 ≈ VOD {tc.fmt_display(fs)} (읽기 지연이 든 값) · 표 {loc.peak_votes}/{loc.votes} · "
+                  f"발화 {loc.peak_utts} · 채팅 {loc.peak_chats} · 창 합 {loc.peak:.2f} (다른 자리 {loc.second:.2f})"
+                  + (" · 0 밑이라 0 으로 자름" if loc.clamped else ""))
         print(f"(a) 발화 {len(utts)}개 × text 채팅 {len(chats)}건 · 창 발화 −{a.lag_before:g}초 ~ +{a.lag_after:g}초 · "
-              f"asr 시작 {tc.fmt_display(a.asr_start_ms)} · 클립 시작 {tc.fmt_display(a.file_start_ms)}")
+              f"asr 시작 {tc.fmt_display(a.asr_start_ms)} · 클립 시작 {tc.fmt_display(fs)}")
         print("    닉네임 대조: " + ("보호 구역 identities.jsonl 사용 (닉네임은 화면에 찍지 않음)" if identities is not None
                                else "없음 — 가림 닉네임 첫 글자만 보는 약한 단서(name?)"))
         cands = asr_candidates(chats, utts, identities=identities, asr_start_ms=a.asr_start_ms,
-                               file_start_ms=a.file_start_ms, lag_before_ms=int(a.lag_before * 1000),
+                               file_start_ms=fs, lag_before_ms=int(a.lag_before * 1000),
                                lag_after_ms=int(a.lag_after * 1000), top=a.top)
         elapsed = time.perf_counter() - t_start
         print(f"후보 {len(cands)}개 ({elapsed:.2f}초)")
         if not cands:
             print("후보가 없다. 말이 많은 구간의 asr 이나 --lag-before 를 넓혀 다시 해 보거나, --asr 없이 질문형 목록을 쓴다.")
             return 0
-        print_asr_table(cands, vno, a.file_start_ms, show_text=show_text)
-        med, cons = consistent_subset(cands, a.file_start_ms)
+        print_asr_table(cands, vno, fs, show_text=show_text)
+        med, cons = consistent_subset(cands, fs)
         print(f"차이 중앙값 {tc.fmt_offset(med)} ({med}ms) · 그 ±{CONSISTENT_MS // 1000}초 안 후보 {len(cons)}개 "
               "(서로 맞는 후보가 많을수록 그 오프셋일 가능성이 크다. 그래도 확인은 다시보기로)")
         print("calibrate 형식 (후보 전부, 확인한 것만 골라 쓴다):")
@@ -441,10 +604,10 @@ def main(argv=None) -> int:
             print(f"  {anchor_arg(c.video_ms, c.chat['t_ms'])}")
         pick = spread_pick(cons, key=lambda c: c.chat["t_ms"])
         if pick:
-            fs = f" --file-start-ms {a.file_start_ms}" if a.file_start_ms else ""
+            fsa = f" --file-start-ms {a.file_start_ms}" if a.file_start_ms and not a.locate else ""
             print("예시 명령 (서로 맞는 후보 중 앞·가운데·뒤 — 다시보기에서 확인한 뒤에만):")
             print(f"  .venv\\Scripts\\python tools\\calibrate.py --project {a.project} "
-                  + " ".join(anchor_arg(c.video_ms, c.chat["t_ms"]) for c in pick) + f"{fs} --dry-run")
+                  + " ".join(anchor_arg(c.video_ms, c.chat["t_ms"]) for c in pick) + f"{fsa} --dry-run")
         return 0
 
     rows = question_candidates(chats, top=a.top)
