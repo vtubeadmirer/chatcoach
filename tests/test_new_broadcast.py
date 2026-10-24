@@ -113,9 +113,11 @@ class Fakes:
             segs = [{"id": i, "start_ms": i * 20_000, "end_ms": i * 20_000 + 3_000, "text": f"합성 발화 {i}",
                      "words": [{"word": "합성", "start_ms": i * 20_000, "end_ms": i * 20_000 + 500}]}
                     for i in range(4)]
+            # 음성 길이 = 뽑은 wav 길이(engine asr 의 audio.duration_ms — '처음 N 분' 이면 N 분)
+            dur = next((c[2] for c in reversed(self.calls) if c[0] == "extract"), None) or VIDEO_MS
             with open(arg("--out"), "w", encoding="utf-8") as f:
                 json.dump({"format": "chatcoach.asr", "format_version": 1, "segments": segs,
-                           "audio": {"duration_ms": VIDEO_MS}}, f, ensure_ascii=False)
+                           "audio": {"duration_ms": dur}}, f, ensure_ascii=False)
             # engine asr: 형식 문제가 있어도 asr.json 은 다 쓰고 종료 1(engine/__main__.py)
             return er.ProcResult(1 if self.asr_problems else 0,
                                  {"out": arg("--out"), "device": "cuda", "fallback": None,
@@ -275,9 +277,11 @@ def test_run_steps_in_order_and_derived_names(tmp_path, monkeypatch):
                            "link-v0.3.json", "engine-stamp.json"]), left
     with open(os.path.join(d, "engine-stamp.json"), encoding="utf-8") as f:
         stamp = json.load(f)
-    assert set(stamp) == {"format", "version", "calibration_rev", "offset_ms", "media_rev", "asr_sha256", "link"}
+    assert set(stamp) == {"format", "version", "calibration_rev", "offset_ms", "media_rev", "asr_sha256", "range",
+                          "link"}
     assert (stamp["calibration_rev"], stamp["offset_ms"], stamp["media_rev"], stamp["link"]) == (0, 0, 1,
                                                                                                 "link-v0.3.json")
+    assert stamp["version"] == er.STAMP_VERSION == 2 and stamp["range"] == [0, VIDEO_MS]
     assert res.step("engine").numbers["position"] == "full" and res.calibration is None
     assert res.number("engine", "removed") == 1                 # wav 하나를 os.remove
     # 숫자
@@ -297,7 +301,11 @@ def test_run_steps_in_order_and_derived_names(tmp_path, monkeypatch):
     for flag in ("--from-project", "--engine", "--topics", "--words", "--vectors"):
         assert flag in link_cmd
     assert link_cmd[link_cmd.index("--engine") + 1] == "v0.3" and "--seal" not in link_cmd
-    assert "--start-ms" not in link_cmd and "--asr-start-ms" not in link_cmd     # 전체 길이 · 영상 0초부터
+    assert "--asr-start-ms" not in link_cmd                                      # 영상 0초부터 전사
+    # 판정 범위(D-33) = 영상이 덮는 VOD 구간: 전체 VOD 파일(오프셋 0)이면 [0, 영상 끝) — 앞 20초 넓힘은 VOD 0 에서 잘린다
+    assert (link_cmd[link_cmd.index("--start-ms") + 1], link_cmd[link_cmd.index("--end-ms") + 1]) == ("0",
+                                                                                                    str(VIDEO_MS))
+    assert (eng["range_start_s"], eng["range_s"]) == (0, VIDEO_MS / 1000)
     assert ("extract", None, None) in fk.calls
     # project.json: 영상 연결(media_rev 1), 보정은 오프셋 0 미확인 그대로, 목적·VOD 길이
     pj = project_mod.open_project(root).data
@@ -428,8 +436,9 @@ def test_clip_start_from_name_and_limit_range(tmp_path, monkeypatch):
     assert anchors_cmd[anchors_cmd.index("--file-start-ms") + 1] == "600000"
     assert ("extract", None, 120_000) in fk.calls                                    # 영상 처음 2분만
     link_cmd = fk.cmds[fk.kinds().index("link")]
-    assert link_cmd[link_cmd.index("--start-ms") + 1] == "600000"
-    assert link_cmd[link_cmd.index("--end-ms") + 1] == "720000"                       # 그 2분이 덮는 VOD 구간
+    # 그 2분이 덮는 VOD 구간(D-33): 앞은 반응 창 20초만큼 넓힘(VOD 9:40 채팅도 영상 첫 발화에 반응될 수 있다)
+    assert link_cmd[link_cmd.index("--start-ms") + 1] == str(600_000 - er.JUDGE_LEAD_MS) == "580000"
+    assert link_cmd[link_cmd.index("--end-ms") + 1] == "720000"
 
 
 def test_pilot_project_goes_seal_path(tmp_path, monkeypatch):
@@ -652,3 +661,111 @@ def test_main_new_broadcast_args():
     assert main.parse_args([])["new_broadcast"] is None and main.start_request(main.parse_args([])) is None
     b = main.parse_args(["--project", "C:\\p", "--new-broadcast", VNO, "C:\\v.mp4"])
     assert "new_broadcast" in main.start_request(b)                                    # --project 보다 앞선다
+
+
+# ---------------------------------------------------------------------------- 판정 범위 (08 D-33)
+CLIP_FS = 600_000                     # 합성 클립: 파일 0초 = VOD 10:00
+CLIP_MS = 300_000                     # 5분
+
+
+def _pj(*, offset=-CLIP_FS, dur=CLIP_MS, media=True):
+    from app.core import timecode as tc
+    cal = tc.Calibration(offset_ms=offset, rev=1, media_rev=1, created_at="2026-10-24T12:00:00+09:00",
+                         created_by="L01")
+    d = {"calibration": {"active_rev": 1, "revs": [tc.calibration_to_json(cal)]}}
+    if media:
+        d["media"] = {"media_rev": 1, "current": {"probe": {"duration_ms": dur}}, "history": []}
+    return d
+
+
+def test_judge_range_is_coverage_with_reaction_window_lead():
+    lead = er.JUDGE_LEAD_MS
+    from app.core import rules
+    assert lead == rules.V0_1.time_window_ms == 20_000                  # guide-config reaction.time_window_sec
+    assert er.judge_range(_pj()) == (CLIP_FS - lead, CLIP_FS + CLIP_MS)  # [VOD 9:40, VOD 15:00)
+    assert er.judge_range(_pj(), CLIP_MS) == (CLIP_FS - lead, CLIP_FS + CLIP_MS)
+    assert er.judge_range(_pj(), 120_000) == (CLIP_FS - lead, CLIP_FS + 120_000)     # 처음 2분만 전사
+    assert er.judge_range(_pj(), CLIP_MS * 2) == (CLIP_FS - lead, CLIP_FS + CLIP_MS)  # 음성이 길어도 파일 끝까지
+    assert er.judge_range(_pj(offset=0)) == (0, CLIP_MS)                             # VOD 0 앞은 자른다
+    assert er.judge_range(_pj(offset=-10_000)) == (0, 10_000 + CLIP_MS)
+    # 영상 길이를 모르면 음성 길이로, 둘 다 모르거나 영상이 없으면 범위 없이(VOD 전체 — D-33 전처럼)
+    assert er.judge_range(_pj(dur=None), 60_000) == (CLIP_FS - lead, CLIP_FS + 60_000)
+    assert er.judge_range(_pj(dur=None)) is None
+    assert er.judge_range(_pj(media=False), 60_000) is None and er.judge_range(None) is None
+    assert er.judge_range(_pj(offset=CLIP_MS + 1)) is None                           # 영상 전체가 VOD 0 앞
+
+
+def test_old_stamp_without_range_judges_again(tmp_path, monkeypatch):
+    # D-33 전 도장(VOD 전체 판정 — range 칸 없음)은 다르다고 보고 전사는 두고 판정만 한 번 다시
+    fk = Fakes(tmp_path).install(monkeypatch)
+    req = _req(tmp_path, _video(tmp_path))
+    first = er.run(req)
+    assert first.ok and er.stamp_matches(first.project_root, project_mod.open_project(first.project_root).data)
+    p = os.path.join(first.project_root, *er.STAMP_REL)
+    with open(p, encoding="utf-8") as f:
+        old = json.load(f)
+    old.pop("range")
+    old["version"] = 1
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(old, f)
+    second = er.run(req)
+    assert second.ok and second.step("engine").status == "done" and second.step("engine").numbers.get("asr_kept") == 1
+    assert fk.kinds() == ["anchors", "asr", "link", "anchors", "link"]
+    with open(p, encoding="utf-8") as f:
+        assert json.load(f)["range"] == [0, VIDEO_MS]
+    third = er.run(req)
+    assert third.step("engine").status == "skipped" and fk.kinds()[-1] == "anchors"
+
+
+def _engine_inputs():
+    """합성 클립(파일 0초 = VOD 10:00, 5분) — 채팅은 VOD 0~20분 전체, 발화는 파일 0~5분."""
+    from app.core import ids
+    from app.core.timecode import Calibration
+    from engine import link as L
+
+    def chat(n, t, text, viewer=None):
+        uid = f"fixture-range-{viewer if viewer is not None else n}"
+        return L.Chat(ids.chat_id_base("0", 1_700_000_000_000 + t, uid, 1, text), t, f"vw_range{viewer or n:04d}", text)
+    filler = ["자 이제 다음 판 가볼게요", "이 보스 패턴이 진짜 어렵거든요", "잠깐 물 좀 마시고 올게요", "이 맵은 처음이라서"]
+    utts = [L.Utterance(i, 7_000 * i + 6_000, 7_000 * i + 8_000, filler[i % 4]) for i in range(42)]
+    utts.append(L.Utterance(100, 3_000, 5_500, "고양이 이름 뭐예요 하셨는데 나비예요"))     # 파일 3초 = VOD 10:03
+    utts.append(L.Utterance(101, 150_000, 152_500, "치킨 시켰어요 오늘 저녁은 치킨"))
+    utts.sort(key=lambda u: u.start_ms)
+    utts = [L.Utterance(i, u.start_ms, u.end_ms, u.text) for i, u in enumerate(utts)]
+    chats = [chat(i, 13_000 * i + 500, f"합성 잡담 {i} 보스 어렵다") for i in range(90)]          # VOD 0~19:30
+    chats += [
+        chat(201, CLIP_FS - 10_000, "고양이 이름 뭐예요"),        # 영상 0초 10초 앞 — 앞 넓힘 안(첫 발화에 반응)
+        chat(202, CLIP_FS - 25_000, "고양이 이름 뭐예요?", 301),  # 넓힘 밖 — 202 는 범위 밖, 201 의 비슷한 채팅으로는 보인다
+        chat(203, CLIP_FS + 140_000, "오늘 저녁 뭐 드세요"),       # 영상 안
+        chat(204, CLIP_FS + CLIP_MS + 5_000, "오늘 저녁 뭐 드세요?", 302),   # 파일 끝 뒤
+    ]
+    chats.sort(key=lambda c: c.t_ms)
+    return L.Inputs(chats=chats, utterances=utts, nicknames={c.viewer_id: [] for c in chats},
+                    calibration=Calibration(offset_ms=-CLIP_FS), asr_meta={"duration_ms": CLIP_MS})
+
+
+@pytest.mark.parametrize("v03", [False, True], ids=["v0.2", "v0.3"])
+def test_range_keeps_every_judgement_inside_and_drops_only_unreactable(v03):
+    # D-33 의 뜻: 범위로 좁혀도 범위 안 채팅의 판정(후보·근거·비슷한 채팅·'이미 그 주제')은 VOD 전체 판정과 한 글자도 같고,
+    # 범위 밖 채팅은 VOD 전체로 돌려도 창 안 발화가 없어 늘 반응 미확인(후보 없음)이었다.
+    from engine import link as L
+    from engine import semantic as S
+    inp = _engine_inputs()
+    a, b = er.judge_range(_pj(), CLIP_MS)
+    sem = (lambda: S.SemanticScorer(S.FakeEmbedder({"고양이": "pet", "치킨": "meal", "저녁": "meal"}),
+                                    S.SemanticConfig())) if v03 else (lambda: None)
+    whole, _ = L.link(inp, semantic=sem())
+    part, st = L.link(inp, start_ms=a, end_ms=b, semantic=sem())
+    inside = [r for r in whole if a <= r["chat_t_ms"] < b]
+    assert part == inside and st["chats_in_scope"] == len(inside) < len(whole)
+    outside = [r for r in whole if not a <= r["chat_t_ms"] < b]
+    assert outside and all(r["result"] == "unconfirmed" and not r["candidates"] and r["window_utterances"] == 0
+                           for r in outside)
+    by_t = {r["chat_t_ms"]: r for r in part}
+    near = by_t[CLIP_FS - 10_000]
+    assert near["result"] == "graded" and near["grade"] is not None and near["window_utterances"] > 0
+    assert near["similar_chat_ids"]                                   # 범위 밖(VOD 9:35) 비슷한 채팅도 본다
+    assert CLIP_FS - 25_000 not in by_t and CLIP_FS + CLIP_MS + 5_000 not in by_t
+    # 앞을 넓히지 않았다면(영상 0초부터) 그 반응을 잃는다
+    bare, _ = L.link(inp, start_ms=CLIP_FS, end_ms=b, semantic=sem())
+    assert CLIP_FS - 10_000 not in {r["chat_t_ms"] for r in bare}

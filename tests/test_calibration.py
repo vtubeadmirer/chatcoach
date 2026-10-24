@@ -228,6 +228,11 @@ def test_run_unknown_position_auto_locates_then_links(tmp_path, monkeypatch):
     assert res.line().endswith("· 보정: 자동 추정(확인 전)")
     stamp = json.load(open(os.path.join(res.project_root, *er.STAMP_REL), encoding="utf-8"))
     assert (stamp["calibration_rev"], stamp["offset_ms"]) == (1, act["offset_ms"])
+    # 판정 범위(D-33)는 자동 추정 판이 놓은 자리: 영상이 덮는 VOD 구간, 앞은 반응 창 20초만큼
+    link = fk.cmds[fk.kinds().index("link")]
+    a, b = int(link[link.index("--start-ms") + 1]), int(link[link.index("--end-ms") + 1])
+    assert (a, b) == (-act["offset_ms"] - er.JUDGE_LEAD_MS, -act["offset_ms"] + nb.VIDEO_MS)
+    assert stamp["range"] == [a, b] and a > 0 and b < fk.vod_ms                 # VOD(3시간 20분) 전체가 아니다
     # 다시 돌리면: 도장이 같아 판정은 건너뛰지만 자동 추정은 그대로 — 끝 화면 전에 다시 확인을 권한다
     again = er.run(_req(tmp_path, video))
     assert again.ok and again.step("engine").status == "skipped" and again.calibration == "auto"
@@ -244,6 +249,9 @@ def test_run_unknown_position_auto_locates_then_links(tmp_path, monkeypatch):
     assert sum(1 for c in fk.calls if c[0] == "extract") == n_extract
     stamp = json.load(open(os.path.join(res.project_root, *er.STAMP_REL), encoding="utf-8"))
     assert (stamp["calibration_rev"], stamp["offset_ms"]) == (2, -CLIP_FS)
+    link = fk.cmds[-1]                                                         # 확정 판으로 범위도 옮긴다
+    assert (link[link.index("--start-ms") + 1], link[link.index("--end-ms") + 1]) ==         (str(CLIP_FS - er.JUDGE_LEAD_MS), str(CLIP_FS + nb.VIDEO_MS))
+    assert stamp["range"] == [CLIP_FS - er.JUDGE_LEAD_MS, CLIP_FS + nb.VIDEO_MS]
 
 
 @pytest.mark.parametrize("located,consistent", [(False, 0), (True, 2)])
@@ -286,6 +294,9 @@ def test_stamp_mismatch_rules(tmp_path, monkeypatch):
     d2 = json.loads(json.dumps(data))
     d2["media"]["media_rev"] = 9
     assert not er.stamp_matches(root, d2)
+    d3 = json.loads(json.dumps(data))
+    d3["media"]["current"]["probe"]["duration_ms"] -= 60_000                   # 판정 범위가 바뀜(D-33)
+    assert not er.stamp_matches(root, d3)
     os.remove(os.path.join(root, "derived", "link-v0.3.json"))
     assert not er.stamp_matches(root, data)                                    # 판정 파일이 없음
     os.remove(os.path.join(root, *er.STAMP_REL))
