@@ -72,6 +72,10 @@ ALLOWED_VIDEO_NOS: dict[str, str] = {
     # tests/test_ai_results.py · test_ai_compare.py · test_seal.py — 합성 프로젝트(project.create(…, 777, …))와 맞춘
     # ai-result 의 target.video_no. 778 은 '다른 방송' 거부 시험값. 실제 VOD 번호(7~8자리)가 아니다
     "777": "합성 시험 방송 번호", "778": "합성 시험 방송 번호(불일치 시험)", "999": "합성 시험 방송 번호(불일치 시험)",
+    # tests/test_new_broadcast.py — '새 방송' 대화상자의 번호 뽑기(주소·파일 이름 [NNNNNNNN])는 8자리여야 길을 타므로
+    # 연속 숫자 합성값을 쓴다. 실제 VOD 번호가 아니다(치지직에 이런 번호의 방송이 있어도 무관)
+    "12345678": "합성 8자리 시험값(새 방송 번호 뽑기)", "23456789": "합성 8자리 시험값(새 방송 번호 뽑기)",
+    "11111111": "합성 8자리 시험값(새 방송 인자)",
 }
 ALLOWED_NICKNAMES: dict[str, str] = {
     "익명의 후원자": "치지직이 익명 후원에 붙이는 고정 표시 (사람 닉네임 아님)",
