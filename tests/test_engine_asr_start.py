@@ -287,7 +287,8 @@ def test_engine_to_ai_v02_direct_path_passes_asr_start(project):
     assert _reaction(doc)["utterance_start_ms"] == 3000 + ASR_START and doc["calibration"]["asr_start_ms"] == ASR_START
     # ns 에 칸이 없는 옛 호출은 0
     ns0 = argparse.Namespace(no_identities=False, offset_ms=None, file_start_ms=None, start_ms=ASR_START, end_ms=END)
-    assert e2a.asr_start_of(ns0) == 0 and e2a._run_engine(project, ns0)["calibration"]["asr_start_ms"] == 0
+    # (08 D-33) 칸이 없으면 None — 엔진이 asr.json 의 기억(audio.asr_start_ms)을 쓰고, 이 asr 는 기억이 없어 0
+    assert e2a.asr_start_of(ns0) is None and e2a._run_engine(project, ns0)["calibration"]["asr_start_ms"] == 0
 
 
 def _attach_parser():
@@ -307,7 +308,7 @@ def test_ai_seal_engine_pairs_uses_asr_start(project, fake_loader, capsys):
     assert v["stats"]["asr_start_ms"] == ASR_START and len(v["windows"]) == 240
     assert t["stats"]["utterances"] == 240
     assert capsys.readouterr().err == ""
-    assert _attach_parser().parse_args(["--from-engine"]).asr_start_ms == 0
+    assert _attach_parser().parse_args(["--from-engine"]).asr_start_ms is None   # 08 D-33: 주지 않으면 asr.json 의 기억
 
 
 def test_ai_seal_attach_pairs_cli_passes_asr_start(project, monkeypatch, capsys):

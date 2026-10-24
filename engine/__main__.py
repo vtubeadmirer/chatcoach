@@ -2,6 +2,8 @@
 
   asr <wav> --out <asr.json> [--model large-v3-turbo] [--prompt-file F] [--device cuda] [--compute-type float16]
       [--language ko] [--no-vad] [--no-words] [--beam-size 5] [--models-dir D] [--measure-vram] [--no-fallback]
+      [--asr-start-ms N]                   wav 가 영상 파일의 N ms 부터 뽑은 음성이면 asr.json audio.asr_start_ms 에 적는다
+                                           (08 D-33 — 아래 읽는 명령들이 그 값을 쓴다)
   compare <a.asr.json> <b.asr.json>        두 결과의 문자 차이 비율(숫자만)
   model-hash [--model large-v3-turbo]      모델을 받아(없으면) model.bin sha256 을 출력
   transcript <txt> --out <json> [--single] [--skip-comments]
@@ -20,9 +22,10 @@
                                            모델이 없으면 종료 3. 엔진 venv 에서)
   link · topics · transcript-words · topic-vectors 는 모두 --asr-start-ms N 을 받는다: asr.json 이 영상 파일의 N ms 부터
                                            잘라 낸 음성이면(extract_audio --start-ms N) 영상 파일 시각 = asr 시각 + N 으로
-                                           보정 전에 옮긴다(기본 0). --file-start-ms(클립 파일이 VOD 의 어디서 시작하나,
-                                           project.json 보정과 짝)와 다르다 — project.json 보정이 있으면 그 값은 상쇄되어
-                                           asr 시각을 옮기지 않는다
+                                           보정 전에 옮긴다. 주지 않으면 asr.json 의 audio.asr_start_ms(없으면 0), 주었는데
+                                           그 값과 다르면 asr_start_conflict 로 거부(종료 2). --file-start-ms(클립 파일이
+                                           VOD 의 어디서 시작하나, project.json 보정과 짝)와 다르다 — project.json 보정이
+                                           있으면 그 값은 상쇄되어 asr 시각을 옮기지 않는다
   scenario --project <P> --from T --to T … tools/make_scenario.py 의 main 을 그대로 부른다(가상 채팅 시나리오)
   generate --project <P> --from T --to T (--fake <응답.json> | --model <id> [--url http://127.0.0.1:1234]) …
                                            engine.generate 의 main(H-3 생성 채팅, 지시문 판 gen-chat-v1). 앞 1~2분 전사
@@ -100,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--models-dir")
     a.add_argument("--measure-vram", action="store_true")
     a.add_argument("--no-fallback", action="store_true", help="GPU 실패 시 cpu 로 내려가지 않고 실패")
+    a.add_argument("--asr-start-ms", type=int, default=None,
+                   help="wav 가 영상 파일의 몇 ms 부터 뽑은 음성인지. asr.json audio.asr_start_ms 에 적는다(08 D-33)")
 
     c = sub.add_parser("compare", help="두 asr.json 의 문자 차이 비율")
     c.add_argument("a")
@@ -119,7 +124,9 @@ def main(argv: list[str] | None = None) -> int:
     ns = ap.parse_args(args)
 
     if ns.cmd == "asr":
-        from .asr import transcribe, validate_asr, write_asr_json
+        from .asr import mark_asr_start, transcribe, validate_asr, write_asr_json
+        if ns.asr_start_ms is not None and ns.asr_start_ms < 0:
+            ap.error("--asr-start-ms 는 0 이상")
         prompt = None
         if ns.prompt_file:
             with open(ns.prompt_file, encoding="utf-8-sig") as f:
@@ -129,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
                          vad=not ns.no_vad, word_timestamps=not ns.no_words, models_dir=ns.models_dir,
                          beam_size=ns.beam_size, measure_vram=ns.measure_vram,
                          allow_cpu_fallback=not ns.no_fallback)
+        if ns.asr_start_ms is not None:
+            mark_asr_start(res, ns.asr_start_ms)
         probs = validate_asr(res)
         write_asr_json(res, ns.out)
         summary = {"out": ns.out, "model": res["model"]["name"], "model_bin_sha256": res["model"]["model_bin_sha256"],

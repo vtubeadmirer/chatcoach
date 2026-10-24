@@ -73,8 +73,10 @@
   후보(수만) → 엔진(엔진 venv 따로 프로세스, 시범이 아니면 derived\\ 에 봉인 없이). 실패하면 멈춘 단계·까닭 코드 한 줄(경고),
   만든 것은 남기고 최근 목록에 넣는다(같은 번호로 다시 하면 이어서). 끝나면 그 프로젝트를 분석 세션으로 열고 작업대 '분석 보기'
   (엔진 반응 띠, derived\\link-*.json)를 켠다(open_engine_view). 시범이면 open_analysis(시범 잠김일 때만). 상태 줄에
-  '새 방송 끝: 채팅 n · 발화 n · 반응(direct) n'. 숨은 설정 settings.ini [new_broadcast] asr_limit_min = N 이면 영상 처음 N분만
-  전사한다(리허설용). main.py --new-broadcast <VOD번호> <영상> 은 두 칸을 채운 대화상자를 연다(시험·리허설).
+  '새 방송 끝: 채팅 n · 발화 n · 반응(direct) n'. 대화상자의 선택 칸 '전사 범위'(08 D-33 '시작 옮기기', 영상 파일 시각
+  '시작-끝' · '시작' 은 끝까지)를 쓰면 그 구간만 전사·판정하고 상태 줄에 '전사 HH:MM:SS~HH:MM:SS' 를 붙인다. 칸을 비우면 처음부터
+  (같은 번호로 다시 하면 있는 전사 그대로). 숨은 설정 settings.ini [new_broadcast] asr_limit_min = N 은 칸을 비웠을 때의 길이(영상
+  처음 N분, 리허설용). main.py --new-broadcast <VOD번호> <영상> 은 두 칸을 채운 대화상자를 연다(시험·리허설).
 
 운영 메뉴 (07 M4):
 - [도움말 → 이전 버전으로 되돌리기…] (04 6-10): updater.rollback_status 로 켜고 끈다. 이번 실행이 _backup 을 지울 차례
@@ -2249,10 +2251,13 @@ class MainWindow(QMainWindow):
             dlg.deleteLater()
         if not vals:
             return None
-        return self.start_new_broadcast(vals["video_no"], vals["video_path"], labeler_id=vals["labeler_id"])
+        return self.start_new_broadcast(vals["video_no"], vals["video_path"], labeler_id=vals["labeler_id"],
+                                        asr_start_ms=vals.get("asr_start_ms"), asr_limit_ms=vals.get("asr_limit_ms"))
 
-    def start_new_broadcast(self, video_no: str, video_path: str, *, labeler_id: str | None = None):
+    def start_new_broadcast(self, video_no: str, video_path: str, *, labeler_id: str | None = None,
+                            asr_start_ms: int | None = None, asr_limit_ms: int | None = None):
         """라벨러를 이 PC 명부·설정에 맞추고, 지금 작업대를 닫고(같은 프로젝트를 고칠 수 있다), 진행기를 돌린 뒤 결과를 연다.
+        asr_start_ms·asr_limit_ms: 대화상자 '전사 범위' 칸(08 D-33). asr_start_ms 가 None(칸을 비움)이면 길이는 숨은 설정.
         engine_run.Result 또는 None(라벨러 문제)."""
         from .. import engine_run
         from .. import session as sess
@@ -2269,9 +2274,10 @@ class MainWindow(QMainWindow):
         self.settings.sync()
         if self.workbench is not None:
             self.show_home()                         # 작업대(잠금·store)를 먼저 닫는다 — 진행기가 project.json 을 고친다
+        limit = asr_limit_ms if asr_start_ms is not None else self.new_broadcast_limit_ms()
         req = engine_run.Request(video_no=str(video_no), video_path=str(video_path), labeler_id=lid,
                                  projects_root=engine_run.default_projects_root(),
-                                 asr_limit_ms=self.new_broadcast_limit_ms())
+                                 asr_limit_ms=limit, asr_start_ms=asr_start_ms)
         self._last_nb_req = req
         res = self.run_new_broadcast(req)
         self.finish_new_broadcast(res)

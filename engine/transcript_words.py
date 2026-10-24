@@ -7,8 +7,10 @@ G 시청자 훈련 채점기(app/core/viewer_score)는 '보낸 시각 앞 60~120
 방법(로컬, AI·외부 호출·모델 없음)
   1. 보정: project.json 의 활성 보정(calibration.active_rev, 03 4-2 '영상 파일 시각 = VOD 시각 + offset_ms')을
      app.core.timecode.video_to_chat_ms 로 쓴다(piecewise_linear 도 같은 함수). 명령줄 --offset-ms·--file-start-ms 가 있으면
-     engine.link 와 같은 규칙으로 그것이 이긴다. 그 **전에** asr 시각에 --asr-start-ms(기본 0)를 더한다:
+     engine.link 와 같은 규칙으로 그것이 이긴다. 그 **전에** asr 시각에 asr_start_ms 를 더한다:
      영상 파일 시각 = asr 시각 + asr_start_ms (asr 를 영상 파일 중간부터 잘라 낸 음성으로 만들었을 때, shift_segments).
+     asr_start_ms 는 asr.json 이 기억하는 값(audio.asr_start_ms — engine asr --asr-start-ms 가 적는다, 08 D-33)이고, 없으면
+     --asr-start-ms(기본 0). 둘 다 있는데 다르면 asr_start_conflict 로 거부한다(resolve_asr_start — 두 번 더하지 않는다).
      --file-start-ms(클립 파일이 VOD 의 어디서 시작하나, project.json 보정과 짝)와 뜻이 다르다.
   2. 낱말: app.core.textnorm.tokens(앱 채점기와 같은 규칙). 2~12자 한글 음절·영문·숫자만 남긴다(더 긴 덩어리는 버리고 센다).
   3. 시각: 낱말 시각(asr words[].start_ms)이 있으면 그 낱말 하나하나를 그 시각의 창에 넣는다. 없으면 구간 낱말 전체를
@@ -65,7 +67,8 @@ class WordsError(Exception):
 
 
 #: 입력 오류 코드(명령줄 종료 2). 그 밖의 WordsError 는 종료 1
-INPUT_ERRORS = ("no_asr", "bad_asr", "bad_project", "bad_calibration", "bad_range", "bad_asr_start")
+INPUT_ERRORS = ("no_asr", "bad_asr", "bad_project", "bad_calibration", "bad_range", "bad_asr_start",
+                "asr_start_conflict")
 
 
 @dataclass(frozen=True)
@@ -171,6 +174,12 @@ def _is_int(v) -> bool:
 
 def read_asr(path: str) -> tuple[list[dict], str]:
     """asr.json → (segments, sha256). 형식이 다르거나 구간 시각이 정수가 아니면 WordsError('bad_asr')."""
+    segs, sha, _rec = read_asr_doc(path)
+    return segs, sha
+
+
+def read_asr_doc(path: str) -> tuple[list[dict], str, int | None]:
+    """asr.json → (segments, sha256, 기억한 asr_start_ms 또는 None). 기억한 값이 0 이상 정수가 아니면 WordsError('bad_asr')."""
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -188,7 +197,11 @@ def read_asr(path: str) -> tuple[list[dict], str]:
         if not isinstance(s, dict) or not _is_int(s.get("start_ms")) or not _is_int(s.get("end_ms")):
             raise WordsError("bad_asr", f"segments[{i}] 시각이 정수가 아닙니다")
         segs.append(s)
-    return segs, _sha256_bytes(raw)
+    try:
+        rec = recorded_asr_start(d)
+    except ValueError as e:
+        raise WordsError("bad_asr", "audio.asr_start_ms 가 0 이상 정수가 아닙니다") from e
+    return segs, _sha256_bytes(raw), rec
 
 
 def check_asr_start(asr_start_ms) -> int:
@@ -196,6 +209,36 @@ def check_asr_start(asr_start_ms) -> int:
     if not _is_int(asr_start_ms) or asr_start_ms < 0:
         raise ValueError("asr_start_ms 는 0 이상 정수")
     return int(asr_start_ms)
+
+
+# asr.json 이 기억하는 '잘라 낸 시작'(08 D-33): audio.asr_start_ms = 이 음성이 영상 파일의 몇 ms 부터인가(engine asr
+# --asr-start-ms 가 적는다). 뜻은 --asr-start-ms 와 같다 — 영상 파일 시각 = asr 시각 + 이 값(보정 전). 칸이 없으면 옛 파일(0).
+ASR_START_KEY = "asr_start_ms"
+
+
+class AsrStartConflict(ValueError):
+    """--asr-start-ms 로 준 값이 asr.json 이 기억하는 값과 다르다(두 번 더하거나 다른 값으로 덮지 않는다)."""
+    code = "asr_start_conflict"
+
+
+def recorded_asr_start(doc) -> int | None:
+    """asr.json dict 가 기억하는 asr_start_ms(audio.asr_start_ms). 칸이 없으면 None. 칸이 있는데 0 이상 정수가 아니면 ValueError."""
+    audio = doc.get("audio") if isinstance(doc, Mapping) else None
+    if not isinstance(audio, Mapping) or ASR_START_KEY not in audio:
+        return None
+    return check_asr_start(audio[ASR_START_KEY])
+
+
+def resolve_asr_start(given, recorded: int | None) -> int:
+    """쓸 asr_start_ms. given(명령줄·호출자 값)이 None 이면 recorded(asr.json 이 기억하는 값, 없으면 0).
+    given 이 있으면 검사하고, recorded 가 있는데 다르면 AsrStartConflict. recorded 가 None(기억 없는 asr — 시범 sealed-work
+    처럼 따로 뽑아 전사한 것)이면 given 그대로. engine.link·topic_vectors·tools/find_anchors 도 이 함수를 쓴다."""
+    if given is None:
+        return recorded or 0
+    a = check_asr_start(given)
+    if recorded is not None and a != recorded:
+        raise AsrStartConflict(f"asr_start_ms {a} 와 asr.json 의 audio.asr_start_ms {recorded} 가 다릅니다")
+    return a
 
 
 def shift_segments(segments: Sequence[Mapping], asr_start_ms: int = 0) -> list:
@@ -394,10 +437,22 @@ def default_out_path(project_dir: str) -> str:
     return os.path.join(project_dir, DEFAULT_OUT_REL)
 
 
-def asr_start_or_error(asr_start_ms) -> int:
-    """check_asr_start 를 WordsError('bad_asr_start') 로(명령줄 종료 2)."""
+def asr_start_or_error(asr_start_ms) -> int | None:
+    """check_asr_start 를 WordsError('bad_asr_start') 로(명령줄 종료 2). None(주지 않음)은 그대로 None."""
+    if asr_start_ms is None:
+        return None
     try:
         return check_asr_start(asr_start_ms)
+    except ValueError as e:
+        raise WordsError("bad_asr_start", "asr_start_ms 는 0 이상 정수입니다") from e
+
+
+def resolve_or_error(given: int | None, recorded: int | None) -> int:
+    """resolve_asr_start 를 WordsError('asr_start_conflict' · 'bad_asr_start') 로(명령줄 종료 2)."""
+    try:
+        return resolve_asr_start(given, recorded)
+    except AsrStartConflict as e:
+        raise WordsError(AsrStartConflict.code, "asr_start_ms 가 asr.json 의 기록과 다릅니다") from e
     except ValueError as e:
         raise WordsError("bad_asr_start", "asr_start_ms 는 0 이상 정수입니다") from e
 
@@ -405,18 +460,19 @@ def asr_start_or_error(asr_start_ms) -> int:
 def from_project(project_dir: str, *, asr_path: str | None = None, offset_ms: int | None = None,
                  file_start_ms: int | None = None, start_ms: int | None = None, end_ms: int | None = None,
                  cfg: WordsConfig = WordsConfig(), now: datetime | None = None, allow_pilot: bool = False,
-                 asr_start_ms: int = 0) -> dict:
+                 asr_start_ms: int | None = None) -> dict:
     """프로젝트 폴더 → transcript-words 문서(메모리, 파일을 쓰지 않음). 시범은 읽기 전에 거부(allow_pilot 은 봉인 경로만).
 
     asr_path 기본 <project>\\derived\\asr.json. asr_start_ms: asr 를 영상 파일의 어느 시각부터 잘라 냈나(보정 전에 더함,
-    shift_segments). 문서의 calibration 칸은 스키마가 키를 고정해 넣지 못하므로 stats.asr_start_ms(숫자)에 남긴다.
+    shift_segments). None 이면 asr.json 이 기억하는 값(없으면 0), 주었는데 그 기억과 다르면 WordsError('asr_start_conflict').
+    문서의 calibration 칸은 스키마가 키를 고정해 넣지 못하므로 stats.asr_start_ms(숫자)에 남긴다.
     결과가 검사를 못 넘으면 WordsError('bad_result')."""
     if not allow_pilot:
         _refuse_pilot(project_dir)
         if inside_pilot(asr_path):
             # 시범 폴더 안의 asr.json 을 다른 프로젝트 이름으로 읽어 평문 낱말 파일을 만드는 길을 막는다(검토 2026-10-23)
             raise WordsError("pilot_locked", "시범 프로젝트 안의 asr.json 은 봉인 경로로만 읽습니다 (D-15 8, D-20 5)")
-    a = asr_start_or_error(asr_start_ms)
+    given = asr_start_or_error(asr_start_ms)
     t0 = time.perf_counter()
     pj = os.path.join(project_dir, "project.json")
     pdata: dict = {}
@@ -425,7 +481,8 @@ def from_project(project_dir: str, *, asr_path: str | None = None, offset_ms: in
             pdata = _read_json(pj)
         except (OSError, UnicodeDecodeError, ValueError) as e:
             raise WordsError("bad_project", "project.json 을 읽지 못했습니다") from e
-    segs, asr_sha = read_asr(asr_path or os.path.join(project_dir, "derived", "asr.json"))
+    segs, asr_sha, rec = read_asr_doc(asr_path or os.path.join(project_dir, "derived", "asr.json"))
+    a = resolve_or_error(given, rec)
     segs = shift_segments(segs, a)                    # asr 시각 → 영상 파일 시각(보정 전)
     cal, fs, src = calibration_for(pdata, offset_ms=offset_ms, file_start_ms=file_start_ms)
     part = build_windows(segs, cal, fs, cfg=cfg, start_ms=start_ms, end_ms=end_ms)
@@ -475,8 +532,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offset-ms", type=int, help="보정 오프셋(명령줄 값이 project.json 보다 앞선다)")
     ap.add_argument("--file-start-ms", type=int,
                     help="클립 파일 0초의 VOD 시각(project.json 보정과 짝). asr 를 잘라 낸 시작이 아니다")
-    ap.add_argument("--asr-start-ms", type=int, default=0,
-                    help="asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인지. 영상 파일 시각 = asr 시각 + 이 값(보정 전). 기본 0")
+    ap.add_argument("--asr-start-ms", type=int, default=None,
+                    help="asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인지. 영상 파일 시각 = asr 시각 + 이 값(보정 전). "
+                         "주지 않으면 asr.json 의 audio.asr_start_ms(없으면 0), 주었는데 그 값과 다르면 거부")
     ap.add_argument("--window-sec", type=int, default=10)
     ns = ap.parse_args(argv)
     out = ns.out or default_out_path(ns.project)
@@ -511,7 +569,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = ["ENGINE_NAME", "ENGINE_VERSION", "SCHEMA", "SCHEMA_VERSION", "DEFAULT_OUT_REL", "WordsConfig", "WordsError",
-           "is_pilot_dir", "inside_pilot", "out_protected", "refuse_unprotected_out", "read_asr", "check_asr_start",
+           "is_pilot_dir", "inside_pilot", "out_protected", "refuse_unprotected_out", "read_asr", "read_asr_doc",
+           "check_asr_start", "ASR_START_KEY", "AsrStartConflict", "recorded_asr_start", "resolve_asr_start",
            "shift_segments", "calibration_for", "calibration_info", "build_windows",
            "build_doc", "validate", "default_out_path", "from_project", "dump", "write_json", "main"]
 

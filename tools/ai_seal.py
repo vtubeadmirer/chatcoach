@@ -31,6 +31,7 @@
                 (파일을 쓰지 않음, tools/engine_to_ai 와 같은 함수 · 엔진 venv). 빠진 짝이 하나도 없으면 엔진을 띄우지 않는다.
                 **판정을 만들 때와 같은 asr·범위·보정**을 준다(시범은 --asr <chatcoach-data\\sealed-work\\…>).
                 --asr-start-ms = asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인가(영상 파일 시각 = asr 시각 + N, 보정 전).
+                  주지 않으면 asr.json 이 기억하는 값(audio.asr_start_ms, 08 D-33, 없으면 0). 기억과 다르면 거부.
                 --file-start-ms = 클립 파일이 VOD 의 어디서 시작하나(project.json 보정과 짝) — asr 시각을 옮기지 않는다.
             --topics F · --words F · --vectors F [--remove-source]
                 받은 파일. 시범 프로젝트(pilot-*)는 전사 낱말·벡터 파일이 <데이터>\\sealed-work\\ 아래에 있어야 한다(아니면 읽기
@@ -245,7 +246,7 @@ def attach_project(project: str, ns) -> tuple[int, dict]:
         raise AttachInputError("--from-engine 또는 짝 파일(--topics·--words·--vectors) 하나 이상을 주세요", "args")
     if ns.remove_source and ns.from_engine:
         raise AttachInputError("--remove-source 는 짝 파일과 함께만 씁니다", "args")
-    a_start = getattr(ns, "asr_start_ms", 0) or 0
+    a_start = getattr(ns, "asr_start_ms", None) or 0
     if a_start < 0 or (a_start and not ns.from_engine):
         raise AttachInputError("--asr-start-ms 는 0 이상이고 --from-engine 과 함께 씁니다", "args")
     if ns.from_engine:
@@ -304,8 +305,9 @@ def _add_engine_args(p) -> None:
     p.add_argument("--from-engine", action="store_true", help="엔진을 메모리로 돌려 짝을 만든다(엔진 venv)")
     p.add_argument("--kinds", help="--from-engine 으로 만들 짝(기본 topics,words,vectors)")
     p.add_argument("--asr", help="판정을 만들 때와 같은 asr.json(시범은 sealed-work 의 것)")
-    p.add_argument("--asr-start-ms", type=int, default=0,
-                   help="asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인지(판정 때와 같은 값). 영상 파일 시각 = asr 시각 + 이 값")
+    p.add_argument("--asr-start-ms", type=int, default=None,
+                   help="asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인지(판정 때와 같은 값). 영상 파일 시각 = asr 시각 + 이 값. "
+                        "주지 않으면 asr.json 의 audio.asr_start_ms(없으면 0)")
     for a in ("--start-ms", "--end-ms", "--offset-ms", "--file-start-ms"):
         p.add_argument(a, type=int)
     p.add_argument("--no-identities", action="store_true")

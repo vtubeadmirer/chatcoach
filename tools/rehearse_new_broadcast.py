@@ -11,9 +11,12 @@
 - 파일 고르기 창(운영체제 창)은 몰 수 없어 대화상자의 choose_file 을 그 파일을 돌려주는 함수로 바꿔 끼우고, 사람 클릭은
   FILE_DIALOG_CLICKS(파일 한 번 + [열기])로 센다. 메뉴는 QAction.trigger 로 열고 2클릭('파일' · '새 방송…')으로 센다.
 - --limit-min N: 숨은 설정 [new_broadcast] asr_limit_min = N(영상 처음 N분만 전사 — 리허설에서만).
+- --range '시작-끝': 대화상자의 '전사 범위' 칸에 글자로 친다(08 D-33 '시작 옮기기', 영상 파일 시각 — 입력 칸 하나로 센다).
+  출력 asr_span 에 전사 구간·판정 구간(영상 시각)과, 시간 정렬 화면 후보의 영상 시각이 그 구간 안인지(숫자만)를 낸다.
 - 출력은 숫자·코드·단계 이름만(경로·제목·채팅 본문·닉네임·전사문 없음). 마지막 줄은 JSON 한 줄.
 
-사용: .venv\\Scripts\\python tools\\rehearse_new_broadcast.py --vod <번호> --video <영상 파일> [--limit-min 20] [--offscreen]
+사용: .venv\\Scripts\\python tools\\rehearse_new_broadcast.py --vod <번호> --video <영상 파일> [--limit-min 20]
+      [--range 0:05:00-0:15:00] [--offscreen]
 종료 코드: 0 분석 화면까지 감·중간 파일 0·데이터 폴더 지움 · 1 그렇지 않음 · 2 입력 거부(시범 자리 등)
 """
 from __future__ import annotations
@@ -90,6 +93,8 @@ def _drive_calibration(win, app, a, rec: dict) -> dict:
     out["find_s"] = round(time.perf_counter() - t0, 2)
     out["candidates"] = len(view.cands)
     out["consistent"] = view.found.consistent
+    out["candidate_video_ms"] = [min((c.video_ms for c in view.cands), default=None),
+                                 max((c.video_ms for c in view.cands), default=None)]
     if a.calibration == "close" or truth is None:
         view._on_close_btn()
         out["clicks"] += 1
@@ -143,11 +148,51 @@ def _drive_calibration(win, app, a, rec: dict) -> dict:
     return out
 
 
+def _asr_span(root: str | None, calib_out: dict | None) -> dict | None:
+    """전사 구간(asr.json 이 기억하는 시작·음성 길이)·판정의 발화 시각 범위(영상 시각, 활성 보정으로)·후보 영상 시각이
+    그 구간 안인지 — 숫자만(08 D-33 리허설). 판정 파일은 시각 칸만 읽는다."""
+    if not root:
+        return None
+    from app import calibration as calib
+    from app import engine_run as er
+    from app.core import timecode as tc
+    from app.project import open_project
+    have = er.asr_summary(er.derived_path(root, er.ASR_REL))
+    if have is None:
+        return None
+    a = int(have.get("asr_start_ms") or 0)
+    dur = have.get("duration_ms")
+    out = {"asr_start_ms": a, "audio_ms": dur, "asr_end_ms": (a + dur) if isinstance(dur, int) else None}
+    try:
+        stamp = json.load(open(er.derived_path(root, er.STAMP_REL), encoding="utf-8"))
+        out["stamp_asr_start_ms"] = stamp.get("asr_start_ms")
+    except (OSError, ValueError):
+        out["stamp_asr_start_ms"] = None
+    link = er.find_link(os.path.join(root, "derived"))
+    if link:
+        cal = calib.active_calibration(open_project(root).data)
+        with open(link, encoding="utf-8") as f:
+            doc = json.load(f)
+        vids = [tc.chat_to_video_ms(int(r["utterance_start_ms"]), cal) for r in doc.get("reactions") or []
+                if isinstance(r, dict) and r.get("result") == "graded" and isinstance(r.get("utterance_start_ms"), int)]
+        if vids:
+            out["utt_video_ms"] = [min(vids), max(vids)]
+            end = out["asr_end_ms"]
+            out["utt_outside_span"] = sum(1 for v in vids if v < a - 1000 or (end is not None and v > end + 1000))
+    cv = (calib_out or {}).get("candidate_video_ms")
+    if cv and cv[0] is not None:
+        end = out["asr_end_ms"]
+        out["candidates_inside_span"] = bool(cv[0] >= a - 1000 and (end is None or cv[1] <= end + 1000))
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="'파일 → 새 방송…' 한 바퀴 리허설(임시 데이터 폴더, 끝에 지움)")
     ap.add_argument("--vod", required=True, help="치지직 VOD 번호")
     ap.add_argument("--video", required=True, help="영상 파일")
     ap.add_argument("--limit-min", type=int, default=None, help="영상 처음 N분만 전사(숨은 설정, 리허설용)")
+    ap.add_argument("--range", dest="asr_range",
+                    help="대화상자 '전사 범위' 칸에 칠 글(영상 파일 시각 '시작-끝', 08 D-33) — 입력 칸 하나로 센다")
     ap.add_argument("--labeler", default="L01", help="라벨러 칸이 나오면 적을 ID (기본 L01)")
     ap.add_argument("--offscreen", action="store_true", help="화면 없이(QT_QPA_PLATFORM=offscreen)")
     ap.add_argument("--keep", action="store_true", help="임시 데이터 폴더를 지우지 않는다(실제 채팅 사본이 남는다 — 디버그만)")
@@ -208,8 +253,8 @@ def main(argv=None) -> int:
     if a.limit_min:
         win.settings.setValue(win.NEW_BROADCAST_LIMIT_KEY, int(a.limit_min))
         win.settings.sync()
-    print(f"== 리허설: 데이터 폴더 새로 만듦 · 전사 범위 {'처음 ' + str(a.limit_min) + '분' if a.limit_min else '전체'}",
-          flush=True)
+    span_txt = (f"칸 '{a.asr_range}'" if a.asr_range else ('처음 ' + str(a.limit_min) + '분' if a.limit_min else '전체'))
+    print(f"== 리허설: 데이터 폴더 새로 만듦 · 전사 범위 {span_txt}", flush=True)
 
     def fill() -> None:
         dlg = win.new_broadcast_dlg
@@ -224,6 +269,9 @@ def main(argv=None) -> int:
         QTest.mouseClick(dlg.btn_pick, Qt.LeftButton)            # [고르기…]
         rec["clicks"] += 1 + FILE_DIALOG_CLICKS
         rec["fields"] += 1                                       # 칸 2: 영상 파일
+        if a.asr_range:                                          # 선택 칸: 전사 범위(글자 입력)
+            QTest.keyClicks(dlg.ed_range, a.asr_range)
+            rec["fields"] += 1
         rec["labeler_field"] = dlg.ed_labeler is not None
         if dlg.ed_labeler is not None:                           # 이 PC 에 라벨러가 없을 때만 칸 3
             QTest.keyClicks(dlg.ed_labeler, a.labeler)
@@ -289,6 +337,7 @@ def main(argv=None) -> int:
         "ok": bool(res is not None and res.ok), "line": win.last_new_broadcast_line,
         "progress_heads": rec["heads"], "steps": steps, "view": view, "blocked": rec["blocked"],
         "cli_needed": 0, "leftover_intermediate": left, "limit_min": a.limit_min, "calibration": calib_out,
+        "asr_span": _asr_span(res.project_root if res is not None else None, calib_out),
     }
     win.close()
     for _ in range(50):

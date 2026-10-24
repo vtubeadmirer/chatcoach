@@ -9,7 +9,7 @@ VOD 번호와 영상 파일 하나로 다섯 단계를 차례로 돈다. 단계�
 | chat 채팅 받기 | app.chzzk_chat.collect (tools/fetch_chat.py 가 부르는 함수, 솔트는 프로젝트의 chat\\protected\\salt.json). 받은 건수만 | chat\\messages.jsonl 이 있으면 건너뜀 |
 | media 영상 연결 | app.media.media_ref(부분 지문·ffprobe) → project.json media.current (작업대 '영상 연결' 의 '처음 연결' 과 같은 규칙). ClipSlicer 이름의 시작이 0 이 아니면(클립) 그 시작만 합친 보정 판(미확인)을 더한다 — tools/calibrate.py --file-start-ms 와 같은 저장 | 같은 파일이면 건너뜀. 다른 파일이 연결돼 있으면 멈춤(media_other — 바꾸기는 작업대에서 사유와 함께) |
 | anchors 보정 앵커 후보 | tools/find_anchors.py --json 을 따로 프로세스로(후보 수만, 파일 안 씀, 창은 활성 보정의 클립 시작 근처). 확정은 사람 | 늘 다시 센다. 실패해도 멈추지 않는다(경고 코드) |
-| engine 엔진 | 엔진 venv(<저장소>\\.venv-engine)를 따로 프로세스로: 음성 뽑기(app.analysis.extract_audio_wav, 영상 처음부터 — 전체 또는 asr_limit_ms) → python -m engine asr → (위치를 모르면 자동 위치 추정, 아래) → tools/engine_to_ai.py --engine v0.3 --topics --words --vectors --out → 도장 | derived\\ 결과가 다 있고 도장이 지금 보정·영상·전사와 같으면 건너뜀(asr.json 만 있으면 전사를 건너뜀, 도장이 다르면 판정만 다시) |
+| engine 엔진 | 엔진 venv(<저장소>\\.venv-engine)를 따로 프로세스로: 음성 뽑기(app.analysis.extract_audio_wav, 영상 파일 asr_start_ms 부터 — 끝까지 또는 asr_limit_ms) → python -m engine asr --asr-start-ms → (위치를 모르면 자동 위치 추정, 아래) → tools/engine_to_ai.py --engine v0.3 --topics --words --vectors --out → 도장 | derived\\ 결과가 다 있고 도장이 지금 보정·영상·전사와 같으면 건너뜀(asr.json 만 있으면 전사를 건너뜀, 도장이 다르면 판정만 다시). 전사 범위를 주었는데 asr.json 의 범위와 다르면 다시 전사 |
 
 자동 위치 추정(08 D-32). 전사 뒤·판정 전에 app.calibration.media_position 이 'unknown'(보정이 만든 그대로이고, ClipSlicer 이름에
 구간이 없고, 영상 길이가 VOD 길이와 다름)이면 tools/find_anchors.py --locate 로 영상이 VOD 의 어디인지 찾는다. 서로 맞는 후보가
@@ -30,9 +30,14 @@ LOCATE_MIN_CONSISTENT 이상이면 '자동 위치 추정' 판(미확인, 앵커 
 그대로 부른다(같은 봉인 길: VOD 20:00~60:00, v0.2·v0.3 + 짝 셋, sealed-work 중간 파일 os.remove). 끝나면 화면은 시범 잠김
 조건이 될 때만 연다(MainWindow.open_analysis).
 
-시각: 음성은 늘 영상 파일 0 초부터 뽑는다(asr_start_ms 0). 그래서 derived\\asr.json 의 시각이 영상 파일 시각과 같고, 시청자 훈련의
-전사 낱말 다시 만들기(engine transcript-words, asr 시작을 받지 않음)도 맞는다. 사용자가 고르는 범위는 '처음 N 분'(asr_limit_ms,
-숨은 설정 settings.ini [new_broadcast] asr_limit_min — 리허설에서 쓴다)뿐이고, 그때 판정·주제 범위는 그 N 분이 덮는 VOD 구간.
+시각(08 D-33 '시작 옮기기'): 전사 범위는 영상 파일 시각 [asr_start_ms, asr_start_ms + asr_limit_ms) — 대화상자의 '전사 범위' 칸
+(parse_range_text). 칸을 비우면 asr_start_ms None(처음부터, 있는 전사는 그대로) · 길이는 숨은 설정 settings.ini [new_broadcast]
+asr_limit_min. 음성을 a 부터 뽑으면 asr.json 의 시각은 a 만큼 앞당겨진다(wav 0 초 기준). 그래서 engine asr --asr-start-ms a 가
+asr.json 에 audio.asr_start_ms = a 를 적고, 이 파일을 읽는 모든 길 — engine_to_ai(판정·주제·전사 낱말·벡터) · find_anchors(앵커
+후보·--locate) · 메인 창의 전사 낱말 다시 만들기(engine transcript-words --project, asr 시작을 명령줄로 받지 않음) — 가 그 값을
+스스로 더한다. 명령줄에 따로 주지 않는다(주었는데 다르면 엔진이 asr_start_conflict 로 거부). 클립 시작(--file-start-ms,
+project.json 보정과 짝)과는 다른 값이라 섞지 않는다(D-28). 도장에도 asr_start_ms 를 남긴다. 판정·주제 범위는 전사한 구간
+[a, a + 음성 길이) 를 활성 보정으로 바꾼 VOD 구간이다(a > 0 이거나 음성이 영상보다 짧을 때만 — 영상 전체면 범위를 넘기지 않는다).
 중간 파일(전사 wav·쓰던 asr)은 성공·실패 모두 끝에 os.remove(휴지통 아님).
 
 네트워크: 영상 정보·채팅 API(치지직 공개 API)만. 엔진 프로세스에는 HF_HUB_OFFLINE=1 을 주고, 전사 모델이 캐시에 없으면 받지 않고
@@ -78,6 +83,7 @@ STAGE_NAME = "asr-link.json"             # engine_to_ai --out (보호 구역 der
 STAGE_SIDES = {"topics": TOPICS_REL, "words": WORDS_REL, "vectors": VECTORS_REL}
 STAMP_REL = ("derived", "engine-stamp.json")   # 판정을 만든 보정·영상·전사(숫자·이름만, D-32 4)
 STAMP_FORMAT = "chatcoach.engine_stamp"
+ASR_START_KEY = "asr_start_ms"            # asr.json audio 칸 — engine/transcript_words.ASR_START_KEY (앱은 엔진을 import 하지 않는다)
 LOCATE_MIN_CONSISTENT = 3                 # 자동 위치 추정 판을 더할 '서로 맞는 후보' 수(timecode.MIN_ANCHORS_VERIFIED 와 같은 값)
 
 ENGINE_VERSION_V03 = "link-v0.3"          # engine.link.ENGINE_VERSION_V03 (글자로 둔다 — 앱은 엔진을 import 하지 않는다)
@@ -88,6 +94,7 @@ E5_FILES = (("multilingual-e5-small", "onnx", "model.onnx"), ("multilingual-e5-s
 ENGINE_VENV_PY = (".venv-engine", "Scripts", "python.exe") if os.name == "nt" else (".venv-engine", "bin", "python")
 SETUP_HINT = "엔진 venv 가 없습니다: tools\\setup_engine.ps1"
 POSITIVE = ("direct", "likely")
+RANGE_TOL_MS = 2000                        # 전사 범위가 '같다' 고 볼 음성 길이 차(02 7-2 의 2초와 같음)
 PROJECT_JSON_MAX = 4 << 20
 ANCHORS_TOP = 20
 ANCHORS_TIMEOUT_S = 600.0
@@ -122,6 +129,7 @@ CODE_KO = {
     "tool_unavailable": "앵커 후보 도구를 띄울 수 없습니다(묶은 exe)",
     "calibration_needed": "영상이 VOD 의 어디인지 찾지 못해 판정하지 않았습니다 — 시간 정렬 화면에서 정하세요",
     "calibration_save": "자동 위치 추정 판을 project.json 에 저장하지 못했습니다",
+    "asr_range": "전사 범위의 시작이 영상 길이보다 뒤입니다",
     "cancelled": "취소했습니다",
 }
 
@@ -301,7 +309,9 @@ def engine_outputs(project_root: str, *, need_vectors: bool = True) -> dict:
 
 
 def asr_summary(path: str) -> dict | None:
-    """asr.json 이 chatcoach.asr 형식이면 {segments, words, duration_ms}(숫자만), 아니면 None."""
+    """asr.json 이 chatcoach.asr 형식이면 {segments, words, duration_ms, asr_start_ms}(숫자만), 아니면 None.
+    asr_start_ms 는 asr.json 이 기억하는 '잘라 낸 시작'(audio.asr_start_ms, 08 D-33 — engine asr --asr-start-ms 가 적는다).
+    칸이 없으면 0(옛 파일은 늘 영상 0 초부터 뽑았다). 칸이 있는데 0 이상 정수가 아니면 형식이 틀린 것으로 본다(None)."""
     try:
         with open(path, "rb") as f:
             d = json.loads(f.read().decode("utf-8-sig"))
@@ -311,8 +321,52 @@ def asr_summary(path: str) -> dict | None:
         return None
     segs = d["segments"]
     words = sum(len(s.get("words") or []) for s in segs if isinstance(s, dict))
-    dur = (d.get("audio") or {}).get("duration_ms") if isinstance(d.get("audio"), dict) else None
-    return {"segments": len(segs), "words": words, "duration_ms": dur if isinstance(dur, int) else None}
+    audio = d.get("audio") if isinstance(d.get("audio"), dict) else {}
+    dur = audio.get("duration_ms")
+    a = audio.get(ASR_START_KEY, 0)
+    if not isinstance(a, int) or isinstance(a, bool) or a < 0:
+        return None
+    return {"segments": len(segs), "words": words, "duration_ms": dur if isinstance(dur, int) else None,
+            "asr_start_ms": a}
+
+
+# ---------------------------------------------------------------------------- 전사 범위 (08 D-33)
+_RANGE_SEP_RE = re.compile(r"\s*[-~–—]\s*")
+
+
+def parse_range_text(text: str | None) -> tuple[int, int | None] | None:
+    """'전사 범위' 칸 → (시작 ms, 끝 ms 또는 None = 영상 끝까지). 영상 파일 시각, 플레이어 형식(1:20:00 · 80:00 · 4800 초).
+    '시작-끝'(또는 '~'), '시작'·'시작-' 은 끝까지. 비었으면 None(처음부터 — 지금처럼). 못 읽거나 끝 ≤ 시작이면 ValueError."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    parts = _RANGE_SEP_RE.split(t, maxsplit=1)
+    a = tc.parse_time(parts[0]) if parts[0] else None
+    if a is None or a < 0 or parts[0][:1] in "+-":
+        raise ValueError("range_start")
+    b = None
+    if len(parts) > 1 and parts[1]:
+        b = tc.parse_time(parts[1])
+        if b is None or parts[1][:1] in "+-":
+            raise ValueError("range_end")
+        if b <= a:
+            raise ValueError("range_order")
+    return int(a), (int(b) if b is not None else None)
+
+
+def range_to_request(rng: tuple[int, int | None] | None) -> tuple[int | None, int | None]:
+    """parse_range_text 결과 → (Request.asr_start_ms, Request.asr_limit_ms). None 이면 (None, None)."""
+    if rng is None:
+        return None, None
+    a, b = rng
+    return a, (b - a if b is not None else None)
+
+
+def fmt_range(start_ms: int, end_ms: int | None) -> str:
+    """'01:20:00~02:00:00' · '01:20:00~끝'(플레이어 형식 HH:MM:SS, 숫자만, 표시용)."""
+    def hms(ms: int) -> str:
+        return tc.fmt_time(int(ms), ms_digits=False, always_hours=True)
+    return f"{hms(start_ms)}~" + (hms(end_ms) if end_ms is not None else "끝")
 
 
 def grade_counts(link_path: str) -> dict:
@@ -509,7 +563,8 @@ class Request:
     video_path: str
     labeler_id: str
     projects_root: str
-    asr_limit_ms: int | None = None          # 처음 N ms 만 전사(None = 영상 전체). 리허설용 숨은 설정
+    asr_limit_ms: int | None = None          # 전사 길이 N ms(None = 영상 끝까지). 범위 칸 '시작-끝' 또는 숨은 설정(처음 N분)
+    asr_start_ms: int | None = None          # 전사 시작(영상 파일 시각, 08 D-33). None = 범위 칸을 비움 — 처음부터, 있는 전사는 그대로
     engine_python: str | None = None         # None → default_engine_python()
     models_dir: str | None = None            # None → default_models_dir()
     device: str = "cuda"
@@ -575,6 +630,12 @@ class Result:
         v = self.number("engine", "calibration")
         return v if v in ("auto", "needed") else None
 
+    @property
+    def span(self) -> tuple[int, int] | None:
+        """판정한 전사 구간(영상 파일 시각 ms) — 영상 일부만 전사했을 때만(08 D-33), 아니면 None."""
+        a, b = self.number("engine", "span_start_s"), self.number("engine", "span_end_s")
+        return (a * 1000, b * 1000) if isinstance(a, int) and isinstance(b, int) else None
+
     def line(self) -> str:
         """상태 줄 한 줄(숫자만): '새 방송 끝: 채팅 n · 발화 n · 반응(direct) n' 또는 멈춘 단계와 까닭."""
         def num(v) -> str:
@@ -585,6 +646,9 @@ class Result:
         if self.ok:
             direct = "봉인됨" if self.pilot else num(self.direct)
             tail = " · 보정: 자동 추정(확인 전)" if self.calibration == "auto" else ""
+            span = self.span
+            if span is not None:
+                tail = f" · 전사 {fmt_range(span[0], span[1])}" + tail
             return f"새 방송 끝: 채팅 {num(self.chats)} · 발화 {num(self.utterances)} · 반응(direct) {direct}{tail}"
         s = self.stopped
         if s is None:
@@ -879,15 +943,45 @@ def _step_anchors(r: _Run, st: Step) -> None:
 
 
 # ---------------------------------------------------------------------------- (e) 엔진
-def _vod_range_for_limit(r: _Run, limit_ms: int) -> tuple[int, int]:
-    """영상 처음 limit_ms 가 덮는 VOD(채팅 시각) 구간 — project.json 활성 보정으로."""
+def _vod_range_for_span(r: _Run, video_a_ms: int, video_b_ms: int) -> tuple[int, int]:
+    """영상 파일 [video_a_ms, video_b_ms) 가 덮는 VOD(채팅 시각) 구간 — project.json 활성 보정으로."""
     try:
         cal = tc.calibration_from_json((r.proj.data or {}).get("calibration")) \
             if (r.proj.data or {}).get("calibration") else tc.Calibration()
     except (KeyError, TypeError, ValueError):
         cal = tc.Calibration()
-    a, b = tc.video_to_chat_ms(0, cal), tc.video_to_chat_ms(int(limit_ms), cal)
+    a, b = tc.video_to_chat_ms(int(video_a_ms), cal), tc.video_to_chat_ms(int(video_b_ms), cal)
     return max(0, min(a, b)), max(0, max(a, b))
+
+
+def _media_ms(r: _Run) -> int | None:
+    return calib.media_duration_ms(r.proj.data)
+
+
+def transcribed_span(have: Mapping | None, limit_ms: int | None,
+                     media_ms: int | None) -> tuple[int, int | None, bool]:
+    """전사한 구간(영상 파일 시각) → (시작, 끝 또는 None, 영상 일부인가). have = asr_summary.
+    끝 = 시작 + min(음성 길이, 요청 길이). 일부 = 시작 > 0 이거나 길이를 줄였거나 음성이 영상보다 RANGE_TOL_MS 넘게 짧음."""
+    a = int((have or {}).get("asr_start_ms") or 0)
+    dur = (have or {}).get("duration_ms")
+    n = [x for x in (dur, limit_ms) if isinstance(x, int) and x > 0]
+    end = a + min(n) if n else None
+    part = a > 0 or bool(limit_ms) or (end is not None and media_ms is not None and end < media_ms - RANGE_TOL_MS)
+    return a, end, part
+
+
+def range_matches(have: Mapping | None, start_ms: int, limit_ms: int | None, media_ms: int | None) -> bool:
+    """있는 asr.json(asr_summary)이 요청한 전사 범위 [start_ms, start_ms + limit_ms 또는 끝) 와 같은가.
+    시작은 그대로 같아야 하고, 길이는 RANGE_TOL_MS 안(음성 길이나 기댈 길이를 모르면 시작만 본다)."""
+    if have is None or int(have.get("asr_start_ms") or 0) != int(start_ms):
+        return False
+    dur = have.get("duration_ms")
+    want = media_ms - start_ms if media_ms is not None else None
+    if limit_ms:
+        want = min(limit_ms, want) if want is not None else limit_ms
+    if not isinstance(dur, int) or want is None:
+        return True
+    return abs(dur - want) <= RANGE_TOL_MS
 
 
 def _remove(paths_: Sequence[str]) -> int:
@@ -908,23 +1002,26 @@ def _transcribe(r: _Run, st: Step, py: str, models: str, asr: str) -> None:
     wav = os.path.join(d, f"asr-audio.{tag}.wav")       # 보호 구역(derived/asr*) 안의 중간 파일
     part = os.path.join(d, f"asr.{tag}.part.json")
     limit = r.req.asr_limit_ms if r.req.asr_limit_ms and r.req.asr_limit_ms > 0 else None
+    start = int(r.req.asr_start_ms or 0)
     try:
         r.say(sub="음성 뽑기", frac=0.02)
         t = time.monotonic()
         try:
-            ex = EXTRACT(os.path.normpath(r.req.video_path), wav, sample_rate=16000, start_ms=None, dur_ms=limit,
-                         cancel=r.tick_cancel)
+            ex = EXTRACT(os.path.normpath(r.req.video_path), wav, sample_rate=16000, start_ms=start or None,
+                         dur_ms=limit, cancel=r.tick_cancel)
         except analysis.Cancelled:
             raise _Cancelled() from None
         except (analysis.AnalysisError, OSError, ValueError):
             raise StepError("extract") from None
         audio_ms = int(ex.get("duration_ms") or 0)
         st.numbers.update(audio_s=audio_ms // 1000, extract_s=round(time.monotonic() - t, 1),
-                          limit_s=(limit // 1000) if limit else None)
+                          limit_s=(limit // 1000) if limit else None, asr_start_s=start // 1000)
         r.check()
         r.say(f"음성 {fmt_s(audio_ms / 1000)}", sub="전사", frac=0.1)
+        # --asr-start-ms: asr.json 이 '영상 파일 몇 ms 부터 뽑은 음성인가' 를 기억한다(audio.asr_start_ms, 08 D-33). 읽는 쪽
+        # (engine_to_ai·find_anchors·전사 낱말 다시 만들기)은 그 값을 스스로 더한다 — 0 도 적어 둔다(다른 값이 끼어들면 거부)
         cmd = [py, "-m", "engine", "asr", wav, "--out", part, "--model", ASR_MODEL, "--device", r.req.device,
-               "--compute-type", r.req.compute_type, "--models-dir", models]
+               "--compute-type", r.req.compute_type, "--models-dir", models, "--asr-start-ms", str(start)]
         t = time.monotonic()
         p = RUN_PROCESS(cmd, cancelled=r.cancelled, tick=r.tick, timeout_s=1800.0 + 4.0 * audio_ms / 1000,
                         env=engine_env())
@@ -956,7 +1053,7 @@ def _transcribe(r: _Run, st: Step, py: str, models: str, asr: str) -> None:
         st.numbers["removed"] = st.numbers.get("removed", 0) + _remove(left)
 
 
-def _link(r: _Run, st: Step, py: str, models: str, e5: bool) -> str:
+def _link(r: _Run, st: Step, py: str, models: str, e5: bool, span_limit_ms: int | None = None) -> str:
     d = os.path.join(r.root, "derived")
     stage = os.path.join(d, STAGE_NAME)
     stem = os.path.splitext(stage)[0]
@@ -966,10 +1063,14 @@ def _link(r: _Run, st: Step, py: str, models: str, e5: bool) -> str:
            "--engine", "v0.3", "--topics", "--words", "--models-dir", models]
     if e5:
         cmd.append("--vectors")
-    limit = r.req.asr_limit_ms if r.req.asr_limit_ms and r.req.asr_limit_ms > 0 else None
-    if limit:
-        a, b = _vod_range_for_limit(r, limit)
+    # 전사한 구간만 판정한다(08 D-33): 영상 [asr 시작, asr 시작 + 음성 길이) → 활성 보정(자동 위치 추정 뒤)으로 VOD 구간.
+    # asr 시작은 명령줄로 넘기지 않는다 — engine_to_ai 가 asr.json 의 audio.asr_start_ms 를 읽는다(--file-start-ms 와 다른 값)
+    # span_limit_ms: 이번에 전사했거나 범위를 골랐을 때만 요청 길이 — 있는 전사를 그대로 쓰면 그 음성 길이가 범위다
+    va, vb, part_span = transcribed_span(asr_summary(derived_path(r.root, ASR_REL)), span_limit_ms, _media_ms(r))
+    if part_span and vb is not None:
+        a, b = _vod_range_for_span(r, va, vb)
         cmd += ["--start-ms", str(a), "--end-ms", str(b)]
+        st.numbers.update(span_start_s=va // 1000, span_end_s=vb // 1000)
     r.say(sub="판정·주제·낱말·벡터" if e5 else "판정·주제·낱말", frac=0.8)
     t = time.monotonic()
     p = RUN_PROCESS(cmd, cancelled=r.cancelled, tick=r.tick, timeout_s=LINK_TIMEOUT_S, env=engine_env())
@@ -1002,12 +1103,16 @@ def _link(r: _Run, st: Step, py: str, models: str, e5: bool) -> str:
     return dst
 
 
-def _numbers_from_outputs(project_root: str) -> dict:
+def _numbers_from_outputs(project_root: str, limit_ms: int | None = None, media_ms: int | None = None) -> dict:
     a = asr_summary(derived_path(project_root, ASR_REL)) or {}
     link = find_link(os.path.join(os.path.abspath(project_root), "derived"))
     g = grade_counts(link) if link else {}
-    return {"utterances": a.get("segments"), "words": a.get("words"), "reactions": g.get("graded"),
-            "direct": g.get("direct"), "likely": g.get("likely")}
+    out = {"utterances": a.get("segments"), "words": a.get("words"), "reactions": g.get("graded"),
+           "direct": g.get("direct"), "likely": g.get("likely")}
+    va, vb, part = transcribed_span(a or None, limit_ms, media_ms)
+    if a and part and vb is not None:
+        out.update(span_start_s=va // 1000, span_end_s=vb // 1000)
+    return out
 
 
 # ---------------------------------------------------------------------------- 도장 (D-32 4)
@@ -1024,12 +1129,14 @@ def _sha256_path(path: str) -> str | None:
 
 
 def stamp_doc(project_root: str, data: Mapping | None, link_name: str | None) -> dict:
-    """판정을 만든 보정 판·저장 오프셋·영상 판·전사 sha256·판정 파일 이름(숫자·이름만)."""
+    """판정을 만든 보정 판·저장 오프셋·영상 판·전사 sha256·전사 시작(asr_start_ms, 08 D-33)·판정 파일 이름(숫자·이름만)."""
     act = calib.active_rev((data or {}).get("calibration") if isinstance(data, Mapping) else None) or {}
     m = (data or {}).get("media") if isinstance(data, Mapping) else None
+    have = asr_summary(derived_path(project_root, ASR_REL))
     return {"format": STAMP_FORMAT, "version": 1, "calibration_rev": act.get("rev"), "offset_ms": act.get("offset_ms"),
             "media_rev": (m or {}).get("media_rev") if isinstance(m, Mapping) else None,
-            "asr_sha256": _sha256_path(derived_path(project_root, ASR_REL)), "link": link_name}
+            "asr_sha256": _sha256_path(derived_path(project_root, ASR_REL)),
+            "asr_start_ms": have.get("asr_start_ms") if have else None, "link": link_name}
 
 
 def write_stamp(project_root: str, data: Mapping | None, link_name: str) -> None:
@@ -1052,7 +1159,10 @@ def stamp_matches(project_root: str, data: Mapping | None) -> bool:
             not os.path.isfile(os.path.join(os.path.abspath(project_root), "derived", name)):
         return False
     now = stamp_doc(project_root, data, name)
-    return all(old.get(k) == now[k] for k in ("calibration_rev", "offset_ms", "media_rev", "asr_sha256"))
+    if not all(old.get(k) == now[k] for k in ("calibration_rev", "offset_ms", "media_rev", "asr_sha256")):
+        return False
+    # 전사 시작: 이 칸이 없는 옛 도장(D-32)은 늘 영상 0 초부터 뽑았을 때라 0 으로 읽는다
+    return int(old.get("asr_start_ms") or 0) == int(now.get("asr_start_ms") or 0)
 
 
 # ---------------------------------------------------------------------------- 자동 위치 추정 (D-32)
@@ -1101,13 +1211,26 @@ def _step_engine(r: _Run, st: Step) -> None:
     st.numbers["position"] = pos
     if pos == "estimated":
         st.numbers["calibration"] = "auto"           # 앞 실행의 자동 추정 판이 아직 사람 확인 전 — 끝에 확인 화면
-    if pos != "unknown" and engine_outputs(r.root, need_vectors=e5)["complete"] and stamp_matches(r.root, r.proj.data):
-        st.status = "skipped"
-        st.numbers.update(_numbers_from_outputs(r.root))
-        return
-    os.makedirs(os.path.join(r.root, "derived"), exist_ok=True)
     asr = derived_path(r.root, ASR_REL)
     have = asr_summary(asr)
+    redo = False
+    if r.req.asr_start_ms is not None:
+        # 전사 범위를 골랐다(08 D-33) — 시작이 영상 안이어야 하고, 있는 전사가 다른 범위면 다시 전사한다
+        media_ms = _media_ms(r)
+        if r.req.asr_start_ms < 0 or (media_ms is not None and r.req.asr_start_ms >= media_ms):
+            raise StepError("asr_range")
+        redo = have is not None and not range_matches(have, r.req.asr_start_ms, r.req.asr_limit_ms, media_ms)
+        st.numbers["asr_redo"] = 1 if redo else 0
+    if not redo and pos != "unknown" and engine_outputs(r.root, need_vectors=e5)["complete"] \
+            and stamp_matches(r.root, r.proj.data):
+        st.status = "skipped"
+        st.numbers.update(_numbers_from_outputs(r.root, r.req.asr_limit_ms if r.req.asr_start_ms is not None else None,
+                                                _media_ms(r)))
+        return
+    os.makedirs(os.path.join(r.root, "derived"), exist_ok=True)
+    if redo:
+        have = None                                  # 새 범위로 다시 전사(asr.json 을 바꾸면 도장이 달라져 판정도 다시)
+    span_limit = r.req.asr_limit_ms if (have is None or r.req.asr_start_ms is not None) else None
     if have is None:
         if not whisper_present(models):
             raise StepError("whisper_model_missing")
@@ -1115,7 +1238,8 @@ def _step_engine(r: _Run, st: Step) -> None:
             raise StepError("ffmpeg_missing")
         _transcribe(r, st, py, models, asr)
     else:
-        st.numbers.update(utterances=have["segments"], words=have["words"], asr_kept=1)
+        st.numbers.update(utterances=have["segments"], words=have["words"], asr_kept=1,
+                          asr_start_s=int(have.get("asr_start_ms") or 0) // 1000)
     r.check()
     if pos == "unknown" and not _auto_locate(r, st):
         st.numbers["calibration"] = "needed"
@@ -1123,7 +1247,7 @@ def _step_engine(r: _Run, st: Step) -> None:
         r.say("판정 전 — 영상이 VOD 의 어디인지 정해야 합니다", frac=1.0, force=True)
         st.status = "done"
         return
-    dst = _link(r, st, py, models, e5)
+    dst = _link(r, st, py, models, e5, span_limit)
     write_stamp(r.root, r.proj.data, os.path.basename(dst))
     if not e5:
         st.code = "e5_missing"
@@ -1134,8 +1258,11 @@ def _step_engine(r: _Run, st: Step) -> None:
 
 
 def _engine_pilot(r: _Run, st: Step) -> None:
-    """시범: tools/pilot_engine_run.py 를 엔진 venv 로(봉인 길 그대로). 짝이 모두 붙은 유효한 봉인이 있으면 건너뜀."""
+    """시범: tools/pilot_engine_run.py 를 엔진 venv 로(봉인 길 그대로). 짝이 모두 붙은 유효한 봉인이 있으면 건너뜀.
+    전사 범위는 시범 고정(VOD 20:00~60:00)이라 대화상자의 범위 칸은 쓰지 않는다(numbers.range_ignored)."""
     from . import seal
+    if r.req.asr_start_ms is not None or r.req.asr_limit_ms:
+        st.numbers["range_ignored"] = 1
     try:
         status = seal.seal_status(r.root)
         full = [e for e in status.entries if e.check == "valid"
@@ -1171,6 +1298,7 @@ _STEP_FN = {"project": _step_project, "chat": _step_chat, "media": _step_media, 
 
 
 __all__ = ["STEPS", "STEP_KO", "Request", "Result", "Step", "ProcResult", "run", "run_process", "find_projects",
+           "parse_range_text", "range_to_request", "fmt_range", "transcribed_span", "range_matches",
            "parse_video_file_name", "title_from_file_name", "default_projects_root", "default_engine_python",
            "default_models_dir", "engine_outputs", "find_link", "asr_summary", "grade_counts", "is_pilot",
            "ASR_REL", "TOPICS_REL", "WORDS_REL", "VECTORS_REL", "LINK_GLOB", "LINK_NAME", "STAGE_NAME", "SETUP_HINT",
