@@ -93,6 +93,9 @@ def test_analysis_menu_flow_seal_refuse_unseal_side_by_side_report(win, proj, tm
     root = proj["root"]
     eng = tmp_path / "engine-out.json"                 # 프로젝트 밖의 합성 엔진 결과
     eng.write_bytes(_engine_bytes())
+    # 봉인 시각을 합성 첫 1차 잠금(2026-10-24 12:00) 앞으로 고정한다 — 실제 시계를 쓰면 그 시각이 지난 날부터
+    # 5) 의 '사전 봉인' 이 거짓이 된다(3) 의 monkeypatch.undo 가 풀지만 봉인은 1) 에서 끝난다)
+    monkeypatch.setattr(seal, "_now_iso", lambda now=None: "2026-10-24T10:00:00.000+09:00")
 
     # 1) 보기 전용: 가져오기(봉인)만 켜진다
     _open(win, root, None)
