@@ -21,6 +21,7 @@
 끝에 tools/calibrate.py --anchor <영상시각>=<채팅시각> 모양으로도 찍는다.
 시각 형식: --from/--to 는 1:02:03(.5) 형식, 정수는 ms (tools/chat_window.py 와 같다).
 출력은 화면에만 한다. 이 도구는 파일을 쓰지 않는다.
+--json: 표·본문 없이 숫자만 JSON 한 줄(candidate_counts — 앱 '파일 → 새 방송…' 이 후보 수만 센다, 08 D-31 2).
 종료 코드: 0 정상 · 1 입력 오류
 """
 from __future__ import annotations
@@ -311,6 +312,39 @@ def print_question_table(rows: list[tuple[float, dict]], vno: dict, *, show_text
         print(line)
 
 
+def candidate_counts(project: str, *, asr: str | None = None, top: int = 20, asr_start_ms: int = 0,
+                     file_start_ms: int = 0, lag_before_ms: int = 120_000, lag_after_ms: int = 30_000,
+                     t_from: int | None = None, t_to: int | None = None, use_identities: bool = True) -> dict:
+    """(a)·(b) 후보를 main 과 같은 함수로 고르고 **숫자만** 돌려준다(본문·닉네임·시각 목록 없음).
+
+    {"mode": "asr"|"question", "chats": text 채팅 수, "utterances": 발화 수(asr 일 때), "candidates": 후보 수,
+     "consistent": 차이 중앙값 ±3초 안 후보 수(asr 일 때), "median_diff_ms": 그 중앙값(asr 일 때), "warnings": 읽기 경고 수,
+     "elapsed_s"}. 채팅 파일이 없으면 FileNotFoundError, asr 를 읽지 못하면 ValueError·OSError."""
+    t0 = time.perf_counter()
+    records, warns = cw.load_messages(project)
+    records = cw.sort_messages(records)
+    chats = text_chats(records, t_from, t_to)
+    out: dict = {"mode": "asr" if asr else "question", "chats": len(chats), "warnings": len(warns)}
+    if asr:
+        utts = load_asr(asr)
+        identities = None
+        if use_identities:
+            try:
+                identities = cw.load_identities(project)
+            except FileNotFoundError:
+                identities = None
+        cands = asr_candidates(chats, utts, identities=identities, asr_start_ms=asr_start_ms,
+                               file_start_ms=file_start_ms, lag_before_ms=lag_before_ms, lag_after_ms=lag_after_ms,
+                               top=top)
+        med, cons = consistent_subset(cands, file_start_ms)
+        out.update(utterances=len(utts), candidates=len(cands), consistent=len(cons), median_diff_ms=med,
+                   identities=identities is not None)
+    else:
+        out.update(candidates=len(question_candidates(chats, top=top)))
+    out["elapsed_s"] = round(time.perf_counter() - t0, 2)
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="시각 보정 앵커 후보를 제안한다 (후보일 뿐, 확정은 사람)")
     ap.add_argument("--project", required=True, help="프로젝트 폴더")
@@ -324,19 +358,40 @@ def main(argv=None) -> int:
     ap.add_argument("--to", dest="t_to", help="이 채팅 시각까지")
     ap.add_argument("--no-identities", action="store_true", help="(a) 보호 구역 닉네임 목록을 쓰지 않는다")
     ap.add_argument("--no-text", action="store_true", help="본문·발화 글을 화면에도 찍지 않는다")
+    ap.add_argument("--json", action="store_true",
+                    help="표·본문 없이 후보 수 같은 숫자만 JSON 한 줄로 낸다(candidate_counts)")
     a = ap.parse_args(argv)
 
+    def bad(msg: str, code: str) -> int:
+        if a.json:
+            print(json.dumps({"error": code}, ensure_ascii=False))
+        else:
+            print(msg, file=sys.stderr)
+        return 1
+
     if a.top <= 0:
-        print("오류: --top 은 1 이상", file=sys.stderr)
-        return 1
+        return bad("오류: --top 은 1 이상", "top")
     if a.asr_start_ms < 0 or a.file_start_ms < 0 or a.lag_before < 0 or a.lag_after < 0:
-        print("오류: 시작 시각·창은 0 이상", file=sys.stderr)
-        return 1
+        return bad("오류: 시작 시각·창은 0 이상", "negative")
     t_from = cw.parse_at(a.t_from) if a.t_from else None
     t_to = cw.parse_at(a.t_to) if a.t_to else None
     if (a.t_from and t_from is None) or (a.t_to and t_to is None):
-        print("오류: --from / --to 시각을 읽지 못했다", file=sys.stderr)
-        return 1
+        return bad("오류: --from / --to 시각을 읽지 못했다", "time")
+
+    if a.json:
+        if a.asr and not os.path.isfile(a.asr):
+            return bad("", "asr_missing")
+        try:
+            doc = candidate_counts(a.project, asr=a.asr, top=a.top, asr_start_ms=a.asr_start_ms,
+                                   file_start_ms=a.file_start_ms, lag_before_ms=int(a.lag_before * 1000),
+                                   lag_after_ms=int(a.lag_after * 1000), t_from=t_from, t_to=t_to,
+                                   use_identities=not a.no_identities)
+        except FileNotFoundError:
+            return bad("", "messages_missing")
+        except (OSError, ValueError):
+            return bad("", "asr_unreadable")
+        print(json.dumps(doc, ensure_ascii=False))
+        return 0
 
     t_start = time.perf_counter()
     try:

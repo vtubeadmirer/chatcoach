@@ -355,19 +355,40 @@ def http_get(url: str, http: HttpFn, cancel: CancelCb | None = None,
     raise ChatFetchError(f"채팅 서버 응답 없음: {last}")
 
 
-def fetch_video_duration_ms(video_no: str, http: HttpFn | None = None,
-                            sleep: Callable[[float], None] = time.sleep) -> int | None:
-    """VOD 길이(ms). 영상 정보 API 의 content.duration(초). 모르면 None (상한은 48시간이 된다)."""
+TITLE_MAX = 300                        # project.json broadcast.title 상한과 같다
+
+
+def fetch_video_info(video_no: str, http: HttpFn | None = None,
+                     sleep: Callable[[float], None] = time.sleep) -> dict:
+    """영상 정보 API 한 번 → {"duration_ms": VOD 길이 ms 또는 None, "title": 방송 제목 또는 None}.
+
+    content.duration(초)·content.videoTitle. 네트워크·형식 문제면 두 값 모두 None(예외 없음). 번호가 아니면 ValueError.
+    제목은 제어 문자를 빼고 앞뒤 공백을 지운 뒤 TITLE_MAX 자까지(로그에는 남기지 않는다)."""
     no = parse_video_no(video_no)
     if not no:
         raise ValueError(f"치지직 영상 번호가 아닙니다: {video_no!r}")
+    out: dict = {"duration_ms": None, "title": None}
     try:
         _st, body, _ = http_get(VIDEO_API.format(video_no=no), http or urllib_http, sleep=sleep)
         obj = json.loads(body)
-        dur = _as_int((obj.get("content") or {}).get("duration")) if obj.get("code") == 200 else None
+        content = obj.get("content") if obj.get("code") == 200 else None
     except (ChatFetchError, ValueError, AttributeError):
-        return None
-    return dur * 1000 if dur and dur > 0 else None
+        return out
+    if not isinstance(content, dict):
+        return out
+    dur = _as_int(content.get("duration"))
+    out["duration_ms"] = dur * 1000 if dur and dur > 0 else None
+    title = content.get("videoTitle")
+    if isinstance(title, str):
+        title = "".join(ch for ch in title if ch.isprintable()).strip()[:TITLE_MAX]
+        out["title"] = title or None
+    return out
+
+
+def fetch_video_duration_ms(video_no: str, http: HttpFn | None = None,
+                            sleep: Callable[[float], None] = time.sleep) -> int | None:
+    """VOD 길이(ms). 영상 정보 API 의 content.duration(초). 모르면 None (상한은 48시간이 된다)."""
+    return fetch_video_info(video_no, http, sleep)["duration_ms"]
 
 
 # --------------------------------------------------------------------------- 수집 + 저장

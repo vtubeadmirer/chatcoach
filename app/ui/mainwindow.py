@@ -66,6 +66,16 @@
   구역, ID·판정·숫자만). 노출로 세지 않는다. 시범(잠기기 전)·라벨링 세션(1차·재라벨·조정·출처 판정)이면 메뉴를 끄고
   scenarios\\ 를 열지 않는다(discern_block_reason). 시나리오가 없으면 '가상 채팅 만들기' 를 먼저 하라고 메뉴 안에 한 줄.
 
+새 방송 한 번에 (08 D-31 2·3·4):
+- [파일 → 새 방송…(&N)] 대화상자(app/ui/new_broadcast_dialog)에 VOD 번호(또는 다시보기 주소)와 영상 파일만 넣고 [시작] 하나.
+  라벨러 ID 는 앱 설정의 마지막 라벨러(없을 때만 칸 하나 더 — 이 PC 명부에 더한다). 진행기 app/engine_run.run 을 JobWorker 로
+  run_job_modal(show_text=True — 단계 이름·경과 시간·숫자 글)에서 돌린다: 프로젝트 만들기 → 채팅 받기 → 영상 연결 → 보정 앵커
+  후보(수만) → 엔진(엔진 venv 따로 프로세스, 시범이 아니면 derived\\ 에 봉인 없이). 실패하면 멈춘 단계·까닭 코드 한 줄(경고),
+  만든 것은 남기고 최근 목록에 넣는다(같은 번호로 다시 하면 이어서). 끝나면 그 프로젝트를 분석 세션으로 열고 작업대 '분석 보기'
+  (엔진 반응 띠, derived\\link-*.json)를 켠다(open_engine_view). 시범이면 open_analysis(시범 잠김일 때만). 상태 줄에
+  '새 방송 끝: 채팅 n · 발화 n · 반응(direct) n'. 숨은 설정 settings.ini [new_broadcast] asr_limit_min = N 이면 영상 처음 N분만
+  전사한다(리허설용). main.py --new-broadcast <VOD번호> <영상> 은 두 칸을 채운 대화상자를 연다(시험·리허설).
+
 운영 메뉴 (07 M4):
 - [도움말 → 이전 버전으로 되돌리기…] (04 6-10): updater.rollback_status 로 켜고 끈다. 이번 실행이 _backup 을 지울 차례
   (main.py 9단계, delete_backup_pending)면 처음부터 끈다. 확인(RollbackDialog) → 워커에서 updater.stage_rollback(관문) →
@@ -399,6 +409,16 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- 프로젝트 · 화면 전환
     def _build_project_menu(self, m_file) -> None:
+        # 새 방송 한 번에 (08 D-31 2): VOD 번호 + 영상 파일 → 프로젝트·채팅·영상·앵커 후보·엔진 → 분석 화면
+        self.a_new_broadcast = QAction(tr("새 방송…(&N)"), self)
+        self.a_new_broadcast.setToolTip(tr("VOD 번호와 영상 파일로 프로젝트 만들기·채팅 받기·엔진까지 한 번에"))
+        self.a_new_broadcast.triggered.connect(lambda: self.new_broadcast_dialog())
+        m_file.addAction(self.a_new_broadcast)
+        self.new_broadcast_dlg = None            # 열려 있는 새 방송 대화상자(리허설·시험이 칸을 채운다)
+        self.new_broadcast_runner = None         # 시험: engine_run.run 대신 부를 함수 (req, progress=, cancelled=) -> Result
+        self.last_new_broadcast = None           # 마지막 engine_run.Result
+        self.last_new_broadcast_line: str | None = None
+        self.last_progress_text = ""             # run_job_modal(show_text) 의 마지막 진행 글
         a_open = QAction(tr("프로젝트 열기(&O)…"), self)
         a_open.setShortcut("Ctrl+O")
         a_open.triggered.connect(self.project_view.choose_and_open)
@@ -2068,7 +2088,11 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- 한 번에 열기 (main.py --project … --analysis --confirm)
     def run_start_request(self, req: dict) -> str | None:
         """main.py 시작 인자: {project, analysis, confirm}. analysis(또는 confirm)이면 open_analysis, 아니면 보통 열기
-        (세션 화면). 막혔으면 까닭 한 줄."""
+        (세션 화면). {new_broadcast: {video_no, video_path}} 면 두 칸을 채운 '새 방송' 대화상자(08 D-31 2). 막혔으면 까닭 한 줄."""
+        nb = req.get("new_broadcast")
+        if isinstance(nb, dict):
+            self.new_broadcast_dialog(video_no=nb.get("video_no"), video_path=nb.get("video_path"))
+            return None
         path = req.get("project")
         if not isinstance(path, str) or not path:
             return None
@@ -2171,6 +2195,164 @@ class MainWindow(QMainWindow):
         dlg = self.side_by_side_view(show=req["show"], confirm=req["confirm"])
         if dlg is None:
             self.last_open_block = self.statusBar().currentMessage() or tr("나란히 보기를 열지 못했습니다")
+
+    # ---------------------------------------------------------------- 새 방송 한 번에 (08 D-31 2·3·4)
+    NEW_BROADCAST_LIMIT_KEY = "new_broadcast/asr_limit_min"   # 숨은 설정: 영상 처음 N분만 전사(리허설용, 없으면 전체)
+
+    def _new_broadcast_labeler(self) -> str | None:
+        """앱 설정의 마지막 라벨러(형식이 맞을 때). 없으면 None → 대화상자에 라벨러 칸이 하나 더 나온다."""
+        from .. import session as sess
+        last = self.settings.value(LAST_LABELER_KEY, "")
+        if not isinstance(last, str) or not last:
+            return None
+        try:
+            return sess.check_labeler_id(last)
+        except ValueError:
+            return None
+
+    def new_broadcast_limit_ms(self) -> int | None:
+        """settings.ini [new_broadcast] asr_limit_min(양의 정수 분) → ms. 없거나 틀리면 None(영상 전체를 전사)."""
+        v = self.settings.value(self.NEW_BROADCAST_LIMIT_KEY, "")
+        try:
+            m = int(str(v).strip())
+        except (TypeError, ValueError):
+            return None
+        return m * 60_000 if m > 0 else None
+
+    def new_broadcast_dialog(self, *, video_no: str | None = None, video_path: str | None = None, run=None):
+        """'파일 → 새 방송…' (08 D-31 2). 입력은 VOD 번호와 영상 파일 둘(라벨러를 모를 때만 하나 더) → [시작] →
+        start_new_broadcast. run(dlg) 을 주면 exec() 대신(시험). 끝난 engine_run.Result 또는 None(취소·막힘)."""
+        if self.jobs_busy():
+            self.statusBar().showMessage(tr("작업이 도는 중입니다 — 끝난 뒤에 하세요"), 5000)
+            return None
+        from .new_broadcast_dialog import NewBroadcastDialog
+        dlg = NewBroadcastDialog(self, settings=self.settings, labeler_id=self._new_broadcast_labeler(),
+                                 video_no=video_no, video_path=video_path)
+        self.new_broadcast_dlg = dlg
+        try:
+            rc = (run or (lambda d: d.exec()))(dlg)
+            vals = dlg.values() if rc == NewBroadcastDialog.Accepted else None
+        finally:
+            self.new_broadcast_dlg = None
+            dlg.deleteLater()
+        if not vals:
+            return None
+        return self.start_new_broadcast(vals["video_no"], vals["video_path"], labeler_id=vals["labeler_id"])
+
+    def start_new_broadcast(self, video_no: str, video_path: str, *, labeler_id: str | None = None):
+        """라벨러를 이 PC 명부·설정에 맞추고, 지금 작업대를 닫고(같은 프로젝트를 고칠 수 있다), 진행기를 돌린 뒤 결과를 연다.
+        engine_run.Result 또는 None(라벨러 문제)."""
+        from .. import engine_run
+        from .. import session as sess
+        title = tr("새 방송")
+        lid = labeler_id or self._new_broadcast_labeler()
+        try:
+            lid = sess.check_labeler_id(lid or "")
+            if sess.load_labelers(self.data_root).get(lid) is None:
+                sess.add_labeler(self.data_root, lid)
+        except (OSError, ValueError) as e:
+            self.warn(title, tr("라벨러를 정하지 못했습니다: {0}").format(type(e).__name__))
+            return None
+        self.settings.setValue(LAST_LABELER_KEY, lid)
+        self.settings.sync()
+        if self.workbench is not None:
+            self.show_home()                         # 작업대(잠금·store)를 먼저 닫는다 — 진행기가 project.json 을 고친다
+        req = engine_run.Request(video_no=str(video_no), video_path=str(video_path), labeler_id=lid,
+                                 projects_root=engine_run.default_projects_root(),
+                                 asr_limit_ms=self.new_broadcast_limit_ms())
+        res = self.run_new_broadcast(req)
+        self.finish_new_broadcast(res)
+        return res
+
+    def run_new_broadcast(self, req):
+        """진행기(app.engine_run.run)를 워커로, run_job_modal(show_text) 아래에서. engine_run.Result 또는 None."""
+        from .. import engine_run
+        from ..workers import JobWorker
+        box: dict = {}
+        runner = self.new_broadcast_runner or engine_run.run
+
+        def job(ctx):
+            box["res"] = runner(req, progress=ctx.progress, cancelled=ctx.cancelled)
+        w = JobWorker.single("new_broadcast", job, name="새 방송", parent=self)
+        outcome = self.run_job_modal(w, title=tr("새 방송"), label=tr("새 방송: 시작하는 중…"), show_text=True)
+        w.deleteLater()
+        res = box.get("res")
+        if res is None:
+            LOG.warning("새 방송: 진행기가 결과 없이 끝남 (%s)", outcome)
+        return res
+
+    def finish_new_broadcast(self, res) -> str:
+        """결과 한 줄을 상태 줄에. 끝났으면 그 프로젝트를 분석 화면으로(시범: open_analysis · 아니면 open_engine_view),
+        멈췄으면 까닭 한 줄 경고 — 만든 프로젝트는 남기고 최근 목록에 넣는다(같은 번호로 다시 하면 이어서)."""
+        import json as _json
+        title = tr("새 방송")
+        if res is None:
+            line = tr("새 방송: 진행이 결과 없이 멈췄습니다")
+            self.last_new_broadcast_line = line
+            self.statusBar().showMessage(line, 15_000)
+            self.warn(title, line)
+            return line
+        self.last_new_broadcast = res
+        line = res.line()
+        LOG.info("새 방송 결과: %s", _json.dumps(res.summary(), ensure_ascii=False))
+        root = res.project_root
+        if not res.ok:
+            if root and os.path.isfile(os.path.join(root, "project.json")):
+                from .project_view import push_recent
+                push_recent(self.settings, root)
+                self.project_view.refresh()
+            self.last_new_broadcast_line = line
+            self.statusBar().showMessage(line)
+            if not res.cancelled:
+                self.warn(title, line + "\n" + tr("만든 것은 남겨 두었습니다 — 같은 번호로 다시 '새 방송' 을 하면 이어서 합니다."))
+            return line
+        why = self.open_analysis(root) if res.pilot else self.open_engine_view(root)
+        if why:
+            line = f"{line} · {why}"
+        self.last_new_broadcast_line = line
+        self.statusBar().showMessage(line, 60_000)
+        wb = self.workbench
+        if wb is not None and wb.jobs_busy():
+            # 작업대가 막 열려 채팅·영상 일을 하는 동안 다른 문장이 상태 줄을 덮는다 — 일이 끝나면 한 번 더 보인다
+            def again(busy: bool, wb=wb, line=line) -> None:
+                if busy:
+                    return
+                try:
+                    wb.jobsBusyChanged.disconnect(again)
+                except (RuntimeError, TypeError):
+                    pass
+                if self.workbench is wb:
+                    self.statusBar().showMessage(line, 60_000)
+            wb.jobsBusyChanged.connect(again)
+        return line
+
+    def open_engine_view(self, root: str) -> str | None:
+        """새 방송 끝(시범 아님): 그 프로젝트를 분석 세션(라벨링 세션 없이)으로 열고 작업대 '분석 보기'(엔진 반응 띠 —
+        derived\\link-*.json)를 켠다. 세션은 마지막 라벨러의 이어 쓸 분석 세션, 없으면 새로(analysis_session_for).
+        막은 까닭 또는 None."""
+        from ..project import open_project
+        self.last_open_block = None
+        try:
+            data = open_project(root).data
+        except Exception:  # noqa: BLE001
+            data = None
+        ctx, why = self.analysis_session_for(root, data)
+        if why:
+            return self._block_open(why)
+        self._pending_session = ctx                  # None 이면 세션 화면(라벨러를 모름 — start_new_broadcast 가 맞춰 둠)
+        try:
+            outcome = self.project_view.open_path(root)
+        finally:
+            self._pending_session = None
+        wb = self.workbench
+        if outcome is None or not getattr(outcome, "ok", False) or wb is None:
+            return self._block_open(tr("새 방송: 프로젝트를 열지 못했습니다"))
+        act = getattr(wb, "analysis_action", None)
+        if act is not None and act.isVisible() and act.isEnabled() and not act.isChecked():
+            act.setChecked(True)                     # 작업대 '분석 보기' — 엔진 반응을 타임라인에
+        if act is None or not act.isChecked():
+            return self._block_open(tr("새 방송: 분석 보기를 켜지 못했습니다 (분석 세션·엔진 결과를 확인하세요)"))
+        return None
 
     def ai_compare_dialog(self, *, run_id: str | None = None, out_root: str | None = None, gate=None):
         """'보고 → AI 비교 보고서…' (06 6-3~6-7). 세션 밖·조정 세션에서 해제된 run 하나로 보고서를 프로젝트 밖에 쓴다
@@ -2364,32 +2546,47 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(tr("세션 {0} 를 잠갔습니다").format(doc.get("session_id")), 5000)
         return doc
 
-    def run_job_modal(self, worker, *, title: str, label: str) -> str | None:
+    def run_job_modal(self, worker, *, title: str, label: str, show_text: bool = False) -> str | None:
         """JobWorker 를 UI 스레드 밖에서 돌리는 동안 바쁨 표시(진행 대화상자·바쁨 커서)와 [취소] 를 보인다(14 6-1 의 1).
 
         끝날 때까지 이 자리에서 기다리되 이벤트 루프는 돈다(화면이 멈추지 않음). 끝난 결과 worker.outcome
-        ('done'·'failed'·'cancelled')를 돌려준다. 취소는 일과 일 사이(또는 일이 ctx.check() 를 부를 때) 먹힌다."""
+        ('done'·'failed'·'cancelled')를 돌려준다. 취소는 일과 일 사이(또는 일이 ctx.check() 를 부를 때) 먹힌다.
+        show_text: 일 안의 진행(JobContext.progress(비율, 글))을 막대와 글로 그대로 보인다 — 단계 이름·경과 시간·숫자만 담는
+        글이어야 한다(새 방송, 08 D-31 2). 마지막 글은 self.last_progress_text."""
         from PySide6.QtCore import QEventLoop
-        prog = QProgressDialog(label, tr("취소"), 0, max(1, len(worker.jobs)), self)
+        top = 1000 if show_text else max(1, len(worker.jobs))
+        prog = QProgressDialog(label, tr("취소"), 0, top, self)
         prog.setWindowTitle(title)
         prog.setWindowModality(Qt.WindowModal)
         prog.setMinimumDuration(0)              # 처음부터 띄워 WindowModal 이 바로 걸리게(메인 창 입력을 막는다)
         prog.setAutoClose(False)
         prog.setAutoReset(False)
         prog.setValue(0)
+        if show_text:
+            prog.setMinimumWidth(560)
         prog.show()
         loop = QEventLoop(self)
         ended = {"v": False}
+        cancel_asked = {"v": False}
 
         def end(*_a):
             ended["v"] = True
             loop.quit()
-        worker.progress.connect(lambda n, _total, _key: prog.setValue(n))
+        if show_text:
+            def on_sub(frac: float, _key: str, text: str) -> None:
+                prog.setValue(int(max(0.0, min(1.0, float(frac))) * 1000))
+                if text and not cancel_asked["v"]:
+                    self.last_progress_text = text
+                    prog.setLabelText(text)
+            worker.subprogress.connect(on_sub)
+        else:
+            worker.progress.connect(lambda n, _total, _key: prog.setValue(n))
         worker.done.connect(end)
         worker.failed.connect(end)
         worker.cancelled.connect(end)
 
         def on_cancel():
+            cancel_asked["v"] = True
             worker.cancel()
             prog.setLabelText(tr("취소하는 중… (지금 하던 일이 끝나면 멈춥니다)"))
         prog.canceled.connect(on_cancel)
@@ -2557,6 +2754,8 @@ class MainWindow(QMainWindow):
         wb.messageShown.connect(lambda t: self.statusBar().showMessage(t))
         self.m_view.clear()
         self.m_view.addAction(wb.analysis_action)
+        if hasattr(wb, "likely_action"):
+            self.m_view.addAction(wb.likely_action)      # 'likely 도 반응으로 보기' (08 D-31 1, 기본 꺼짐)
         self.m_view.menuAction().setVisible(wb.analysis_action.isVisible())
         self.a_close_project.setEnabled(True)
         self.a_export.setEnabled(self.session is not None)

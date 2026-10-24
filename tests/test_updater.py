@@ -531,7 +531,8 @@ def test_parse_args_selftest(main_mod):
 def test_parse_args_defaults_and_base_url(main_mod):
     a = main_mod.parse_args([])
     assert a == {"selftest": None, "expect_version": None, "expect_channel": None, "data_dir": None,
-                 "update_base_url": None, "flags": set(), "project": None, "analysis": False, "confirm": False}
+                 "update_base_url": None, "flags": set(), "project": None, "analysis": False, "confirm": False,
+                 "new_broadcast": None}
     assert main_mod.parse_args(["--update-base-url", "http://127.0.0.1:1234/"])["update_base_url"] == "http://127.0.0.1:1234/"
     # 값이 없는 옵션은 무시
     assert main_mod.parse_args(["--data-dir"])["data_dir"] is None

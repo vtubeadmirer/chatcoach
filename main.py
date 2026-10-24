@@ -17,9 +17,12 @@ def parse_args(argv: list[str]) -> dict:
     """아주 작은 인자 파서. argparse 는 Qt 인자와 섞이면 불편하다.
 
     한 번에 열기(08 D-16·D-29 3): --project <폴더> 는 그 프로젝트를 연다(마지막 작업 이어서 열기 대신). --analysis 는 분석
-    세션으로 열고 나란히 보기를 띄운다. --confirm 은 거기에 'AI 확인 큐' 필터까지(--analysis 를 뜻한다). 없으면 메뉴 길 그대로."""
+    세션으로 열고 나란히 보기를 띄운다. --confirm 은 거기에 'AI 확인 큐' 필터까지(--analysis 를 뜻한다). 없으면 메뉴 길 그대로.
+    --new-broadcast <VOD번호> <영상> (08 D-31 2, 시험·리허설용): 두 칸을 채운 '파일 → 새 방송…' 대화상자를 연다. 값이 둘 다
+    있어야 받는다(하나뿐이면 무시)."""
     a: dict = {"selftest": None, "expect_version": None, "expect_channel": None, "data_dir": None,
-               "update_base_url": None, "flags": set(), "project": None, "analysis": False, "confirm": False}
+               "update_base_url": None, "flags": set(), "project": None, "analysis": False, "confirm": False,
+               "new_broadcast": None}
     i = 0
     while i < len(argv):
         x = argv[i]
@@ -28,6 +31,12 @@ def parse_args(argv: list[str]) -> dict:
             a["selftest"] = nxt or "selftest.json"
             i += 2 if nxt else 1
             continue
+        if x == "--new-broadcast":
+            nxt2 = argv[i + 2] if i + 2 < len(argv) else None
+            if nxt is not None and nxt2 is not None and not nxt.startswith("--") and not nxt2.startswith("--"):
+                a["new_broadcast"] = [nxt, nxt2]
+                i += 3
+                continue
         if x in ("--expect-version", "--expect-channel", "--data-dir", "--update-base-url", "--project") \
                 and nxt is not None:
             a[x[2:].replace("-", "_")] = nxt
@@ -44,7 +53,11 @@ def parse_args(argv: list[str]) -> dict:
 
 
 def start_request(args: dict) -> dict | None:
-    """parse_args 결과 → MainWindow.start_request ({project, analysis, confirm}) 또는 None(--project 없음 = 메뉴 길)."""
+    """parse_args 결과 → MainWindow.start_request ({project, analysis, confirm}) 또는 None(--project 없음 = 메뉴 길).
+    --new-broadcast 가 있으면 {new_broadcast: {video_no, video_path}}(--project 보다 앞선다)."""
+    nb = args.get("new_broadcast")
+    if nb:
+        return {"new_broadcast": {"video_no": str(nb[0]).strip(), "video_path": os.path.abspath(nb[1])}}
     if not args.get("project"):
         return None
     return {"project": os.path.abspath(args["project"]), "analysis": bool(args.get("analysis")),
