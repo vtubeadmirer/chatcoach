@@ -2034,8 +2034,15 @@ class MainWindow(QMainWindow):
         mw = avail.width() - dw - gap
         if self.isMaximized() or self.isFullScreen():
             self.showNormal()
-        self.setGeometry(avail.x(), avail.y(), mw, avail.height() - 40)
-        dlg.setGeometry(avail.x() + mw + gap, avail.y(), dw, avail.height() - 40)
+        # 제목 줄(X 단추)이 화면 위로 밀려 나가지 않게: 창 **테두리 포함** 크기로 놓는다(setGeometry 는 안쪽 크기라
+        # y=0 에 두면 제목 줄이 화면 밖으로 간다 — 2026-10-24 사용자 '창에 X 가 안 보임')
+        for win, x, w in ((self, avail.x(), mw), (dlg, avail.x() + mw + gap, dw)):
+            fg, g = win.frameGeometry(), win.geometry()
+            side = max(0, g.x() - fg.x())
+            extra_h = max(0, fg.height() - g.height())
+            win.move(x, avail.y())   # move 는 테두리 포함 위치
+            win.resize(max(300, w - 2 * side), max(300, avail.height() - 40 - extra_h))
+            win.move(x, avail.y())   # 크기를 바꾸면 틀이 다시 잡혀 한 번 더
         dlg.raise_()
         return True
 
