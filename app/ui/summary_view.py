@@ -9,13 +9,20 @@
     시작 start_ms · t0_ms · start / 끝 end_ms · t1_ms · end / 아이디 topic_id · id
     이름 name · label · title · topic / 키워드 keywords · tags · terms (문자열 목록, (단어, 점수) 목록, {단어: 점수})
     채팅 수 chat_count · n_chats · chats(정수) / 반응률 reply_rate · reaction_rate · response_rate
-      (0~1. 1 보다 크고 100 이하이면 백분율로 본다. 없으면 replied_count · reacted_count ÷ 채팅 수)
+      (0~1. 1 보다 크고 100 이하이면 백분율로 본다. 없으면 reacted · replied_count · reacted_count ÷ 채팅 수)
     놓친 질문 수 missed_questions · missed_question_count · missed
     본문(화면에만) text · excerpt · transcript · body · summary_text
   숫자 칸은 덩어리 안의 'stats' dict 에 있어도 된다.
 - sealed: True 면 '봉인됨 n건' 만 보이고 topics 는 읽지도 않는다(D-15 8, D-17 5 — 시범 프로젝트의 주제 흐름은 봉인 경로).
   sealed_count: 봉인 건수(app.analysis_flow.BroadcastSummaryData.sealed_count). 봉인 표시는 어디서나 '봉인됨 n건'
   (08 D-18 3 — 나란히 보기·메뉴 안내와 같은 말). 건수를 넘기지 않은 옛 부르는 쪽만 '봉인됨' 으로 둔다.
+
+엔진 likely 보기 (08 D-31 1, 규칙은 app.core.engine_grades 한 곳)
+- 반응을 사람 최종 세트로 센 요약은 그대로다(사람 등급은 건드리지 않는다).
+- 반응을 엔진 판정으로 센 요약(analysis_flow.broadcast_summary 의 reaction_source = 'engine')은 덩어리마다 엔진 likely 를
+  따로 싣는다(likely_reacted · reaction_rate_with_likely). 기본은 direct 만 반응률에 넣고, 위 한 줄에
+  '엔진 반응 direct n · likely m(흐림)' 처럼 둘 다 보인다. 그때만 보기 옵션 'likely 도 반응으로 보기'(나란히 보기·작업대
+  엔진 띠와 같은 설정 키)가 보이고, 켜면 반응률에 likely 도 넣는다. 저장·내보내기 줄(export_rows)은 바꾸지 않는다.
 
 화면 (D-16 클릭 한 번 원칙: 열면 바로 보이고 입력 칸이 없다)
 - 위 한 줄: 합계(주제 수 · 채팅 수 · 반응률(채팅 수로 가중) · 놓친 질문 수).
@@ -34,9 +41,10 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QLabel, QSplitter, QStackedWidget, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QLabel, QSplitter,
+                               QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
+from ..core import engine_grades as eg
 from ..core.timecode import fmt_display
 from ..i18n import tr
 
@@ -55,8 +63,12 @@ _KW_KEYS = ("keywords", "tags", "terms")
 _CHAT_KEYS = ("chat_count", "n_chats", "chats")
 _RATE_KEYS = ("reply_rate", "reaction_rate", "response_rate")
 _REPLIED_KEYS = ("replied_count", "reacted_count")
+_REACTED_KEYS = ("reacted",) + _REPLIED_KEYS          # 반응 채팅 수 (app.core.topics.SummaryRow.reacted)
 _MISSED_KEYS = ("missed_questions", "missed_question_count", "missed")
 _BODY_KEYS = ("text", "excerpt", "transcript", "body", "summary_text")
+# 엔진 판정으로 센 요약에만 있는 칸(08 D-31 1, analysis_flow.broadcast_summary): 엔진 likely 채팅 수 · likely 도 넣은 반응률
+_LIKELY_KEYS = ("likely_reacted",)
+_RATE_LIKELY_KEYS = ("reaction_rate_with_likely",)
 
 
 # ---------------------------------------------------------------------------- 순수 계산 (Qt 없음)
@@ -138,7 +150,9 @@ def _as_keywords(v) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class TopicRow:
-    """요약 표 한 줄. body 는 화면에만(D-17 8) — export_rows 에 나가지 않는다."""
+    """요약 표 한 줄. body 는 화면에만(D-17 8) — export_rows 에 나가지 않는다.
+    likely·rate_with_likely 는 반응을 엔진 판정으로 센 요약에만 있다(08 D-31 1): reply_rate 는 direct 만, rate_with_likely 는
+    likely 도 넣은 반응률. 사람 최종 세트로 센 요약이면 None."""
     index: int                      # 시작 시각 순서(0부터)
     topic_id: str | None
     start_ms: int
@@ -149,6 +163,9 @@ class TopicRow:
     reply_rate: float | None        # 0~1
     missed_questions: int | None
     body: str | None = None
+    reacted: int | None = None      # 반응 채팅 수(엔진 판정이면 direct 만)
+    likely: int | None = None       # 엔진 likely 채팅 수(흐림)
+    rate_with_likely: float | None = None
 
     @property
     def duration_ms(self) -> int:
@@ -236,7 +253,7 @@ def normalize_topics(data: Any) -> TopicTable:
         chat = pick(_CHAT_KEYS, _as_count)
         rate = pick(_RATE_KEYS, _as_rate)
         if rate is None and chat:
-            replied = pick(_REPLIED_KEYS, _as_count)
+            replied = pick(_REACTED_KEYS, _as_count)
             if replied is not None and replied <= chat:
                 rate = replied / chat
         name = _get(item, _NAME_KEYS)
@@ -248,25 +265,50 @@ def normalize_topics(data: Any) -> TopicTable:
                 break
         tid = _get(item, _ID_KEYS)
         body = _get(item, _BODY_KEYS)
+        reacted = pick(_REACTED_KEYS, _as_count)
+        likely = pick(_LIKELY_KEYS, _as_count)
+        rate_l = pick(_RATE_LIKELY_KEYS, _as_rate) if likely is not None else None
+        if rate_l is None and likely is not None and chat and reacted is not None and reacted + likely <= chat:
+            rate_l = (reacted + likely) / chat
         rows.append(TopicRow(index=idx, topic_id=str(tid) if tid is not None else None, start_ms=s, end_ms=e,
                              name=name, keywords=kw, chat_count=chat, reply_rate=rate,
                              missed_questions=pick(_MISSED_KEYS, _as_count),
-                             body=body if isinstance(body, str) and body.strip() else None))
+                             body=body if isinstance(body, str) and body.strip() else None,
+                             reacted=reacted, likely=likely, rate_with_likely=rate_l))
     return TopicTable(rows=tuple(rows), invalid=invalid)
 
 
-def summary_totals(rows: Sequence[TopicRow]) -> dict:
-    """합계: 주제 수 · 채팅 수 · 반응률(채팅 수로 가중, 둘 다 있는 덩어리만) · 놓친 질문 수 · 전체 길이."""
+def has_engine_likely(rows: Sequence[TopicRow]) -> bool:
+    """반응을 엔진 판정으로 세며 likely 를 따로 실은 요약인가(08 D-31 1) — 한 줄이라도 likely 칸이 있으면."""
+    return any(r.likely is not None for r in rows)
+
+
+def row_rate(r: TopicRow, *, include_likely: bool) -> float | None:
+    """보일 반응률. likely 를 따로 실은 줄은 옵션을 켜면 likely 도 넣은 비율, 끄면(기본) direct 만(08 D-31 1)."""
+    if include_likely and r.likely is not None:
+        return r.rate_with_likely
+    return r.reply_rate
+
+
+def summary_totals(rows: Sequence[TopicRow], *, include_likely: bool = eg.DEFAULT_INCLUDE_LIKELY) -> dict:
+    """합계: 주제 수 · 채팅 수 · 반응률(채팅 수로 가중, 둘 다 있는 덩어리만) · 놓친 질문 수 · 전체 길이.
+    반응률은 row_rate(엔진 likely 를 따로 실은 줄은 include_likely 일 때만 likely 도 넣음, 08 D-31 1).
+    reacted·likely: 반응 채팅 수 합(엔진 판정이면 direct 만)·엔진 likely 합 — 칸이 없으면 None."""
     chats = [r.chat_count for r in rows if r.chat_count is not None]
     missed = [r.missed_questions for r in rows if r.missed_questions is not None]
-    w = [(r.reply_rate, r.chat_count) for r in rows if r.reply_rate is not None and r.chat_count]
+    w = [(row_rate(r, include_likely=include_likely), r.chat_count) for r in rows]
+    w = [(rt, c) for rt, c in w if rt is not None and c]
     n_w = sum(c for _r, c in w)
+    reacted = [r.reacted for r in rows if r.reacted is not None]
+    likely = [r.likely for r in rows if r.likely is not None]
     return {
         "topics": len(rows),
         "chat_count": sum(chats) if chats else None,
         "reply_rate": (sum(rt * c for rt, c in w) / n_w) if n_w else None,
         "missed_questions": sum(missed) if missed else None,
         "duration_ms": sum(r.duration_ms for r in rows),
+        "reacted": sum(reacted) if reacted else None,
+        "likely": sum(likely) if likely else None,
     }
 
 
@@ -347,13 +389,19 @@ class SummaryView(QWidget):
     seekRequested = Signal(int)
     topicActivated = Signal(int)
 
-    def __init__(self, topics: Any = None, *, sealed: bool = False, sealed_count: int | None = None, parent=None):
+    def __init__(self, topics: Any = None, *, sealed: bool = False, sealed_count: int | None = None, parent=None,
+                 settings: Any = None, include_likely: bool | None = None):
+        """settings·include_likely: 엔진 likely 보기(08 D-31 1) — 나란히 보기와 같다(없으면 담은 창의 settings)."""
         super().__init__(parent)
         self._rows: tuple[TopicRow, ...] = ()
         self._invalid = 0
         self._sealed = False
         self._sealed_count: int | None = None
+        self._settings = settings if settings is not None else eg.find_settings(self)
+        self._include_likely = bool(include_likely) if include_likely is not None \
+            else eg.read_include_likely(self._settings)
         self._build()
+        eg.subscribe(self._on_likely_setting)       # 다른 화면에서 바꾸면 따라간다(약한 참조)
         self.set_data(topics, sealed=sealed, sealed_count=sealed_count)
 
     def _build(self) -> None:
@@ -383,9 +431,18 @@ class SummaryView(QWidget):
         self.table_page = QWidget()
         tl = QVBoxLayout(self.table_page)
         tl.setContentsMargins(4, 4, 4, 4)
+        top = QHBoxLayout()
         self.totals_label = QLabel()
         self.totals_label.setWordWrap(True)
-        tl.addWidget(self.totals_label)
+        top.addWidget(self.totals_label, 1)
+        # 보기 옵션 (08 D-31 1): 반응을 엔진 판정으로 센 요약에서만 보인다
+        self.likely_box = QCheckBox(tr(eg.OPTION_LABEL))
+        self.likely_box.setToolTip(tr(eg.OPTION_TIP))
+        self.likely_box.setChecked(self._include_likely)
+        self.likely_box.toggled.connect(self._on_likely_box)
+        self.likely_box.setVisible(False)
+        top.addWidget(self.likely_box)
+        tl.addLayout(top)
         split = QSplitter(Qt.Vertical)
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setHorizontalHeaderLabels([tr(COLUMN_KO[c]) for c in COLUMNS])
@@ -419,6 +476,7 @@ class SummaryView(QWidget):
         self.table.setRowCount(0)
         self.detail_label.clear()
         self.totals_label.clear()
+        self.likely_box.setVisible(False)
         n = sealed_count if isinstance(sealed_count, int) and not isinstance(sealed_count, bool) else None
         self._sealed_count = max(0, n) if n is not None else None
         if sealed:
@@ -440,14 +498,21 @@ class SummaryView(QWidget):
         LOG.info("방송 요약: 주제 %d개 (뺀 것 %d)", len(self._rows), self._invalid)
 
     def _fill(self) -> None:
-        tot = summary_totals(self._rows)
+        inc = self._include_likely
+        eng = has_engine_likely(self._rows)
+        tot = summary_totals(self._rows, include_likely=inc)
         parts = [tr("주제 {n}개").format(n=tot["topics"]), tr("길이 {d}").format(d=fmt_span(tot["duration_ms"])),
-                 tr("채팅 {n}").format(n=fmt_count(tot["chat_count"])),
-                 tr("반응률 {r}").format(r=fmt_rate(tot["reply_rate"])),
-                 tr("놓친 질문 {n}").format(n=fmt_count(tot["missed_questions"]))]
+                 tr("채팅 {n}").format(n=fmt_count(tot["chat_count"]))]
+        if eng:
+            # 08 D-31 1: 엔진 판정으로 센 반응 — direct·likely 둘 다 보이고, 꺼짐이면 likely 는 '(흐림)'
+            parts.append(tr("엔진 반응 {0}").format(
+                tr(eg.count_text(tot["reacted"] or 0, tot["likely"] or 0, include_likely=inc))))
+        parts += [tr("반응률 {r}").format(r=fmt_rate(tot["reply_rate"])),
+                  tr("놓친 질문 {n}").format(n=fmt_count(tot["missed_questions"]))]
         if self._invalid:
             parts.append(tr("시각이 없어 뺀 덩어리 {n}").format(n=self._invalid))
         self.totals_label.setText(" · ".join(parts))
+        self.likely_box.setVisible(eng)
         self.table.setRowCount(len(self._rows))
         for i, r in enumerate(self._rows):
             label = r.display_name
@@ -461,7 +526,11 @@ class SummaryView(QWidget):
             self.table.setItem(i, 1, QTableWidgetItem(
                 f"{fmt_display(r.start_ms)} ~ {fmt_display(r.end_ms)} ({fmt_span(r.duration_ms)})"))
             self.table.setItem(i, 2, _NumItem(fmt_count(r.chat_count)))
-            self.table.setItem(i, 3, _NumItem(fmt_rate(r.reply_rate)))
+            rate = _NumItem(fmt_rate(row_rate(r, include_likely=inc)))
+            if r.likely is not None:
+                rate.setToolTip(tr("엔진 반응 {0}").format(
+                    tr(eg.count_text(r.reacted or 0, r.likely, include_likely=inc))))
+            self.table.setItem(i, 3, rate)
             self.table.setItem(i, 4, _NumItem(fmt_count(r.missed_questions)))
 
     def _show_detail(self, row: int) -> None:
@@ -489,6 +558,44 @@ class SummaryView(QWidget):
         if i is not None and i != self.table.currentRow():
             self.table.setCurrentCell(i, 0)
             self.table.scrollToItem(self.table.item(i, 0))
+
+    # ------------------------------------------------------------------ 엔진 likely 보기 (08 D-31 1)
+    def include_likely(self) -> bool:
+        return self._include_likely
+
+    def set_include_likely(self, on: bool, *, save: bool = True) -> bool:
+        """'likely 도 반응으로 보기' 를 바꾼다(나란히 보기와 같은 설정 키). save 면 남기고 열린 다른 화면에 알린다.
+        엔진 판정으로 센 요약이면 반응률·위 한 줄을 다시 채운다(고른 행은 그대로, 시그널 없음). 바뀌었으면 True."""
+        on = bool(on)
+        if self.likely_box.isChecked() != on:
+            self.likely_box.blockSignals(True)
+            self.likely_box.setChecked(on)
+            self.likely_box.blockSignals(False)
+        if on == self._include_likely:
+            return False
+        self._include_likely = on
+        if save:
+            eg.write_include_likely(self._settings, on, source=self)
+        if not self._sealed and self._rows:
+            cur = self.table.currentRow()
+            self.table.blockSignals(True)
+            self._fill()
+            if 0 <= cur < len(self._rows):
+                self.table.setCurrentCell(cur, 0)
+            self.table.blockSignals(False)
+        LOG.info("방송 요약: 엔진 likely %s", "반응으로 봄" if on else "흐림 (direct 만 반응)")
+        return True
+
+    def _on_likely_box(self, checked: bool) -> None:
+        self.set_include_likely(bool(checked))
+
+    def _on_likely_setting(self, on: bool) -> None:
+        """다른 화면에서 옵션을 바꿨다(engine_grades.notify). 남기지는 않는다."""
+        self.set_include_likely(on, save=False)
+
+    def totals_text(self) -> str:
+        """위 한 줄(시험·점검용)."""
+        return self.totals_label.text()
 
     # ------------------------------------------------------------------ 조회
     def is_sealed(self) -> bool:

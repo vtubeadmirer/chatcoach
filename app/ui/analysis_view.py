@@ -42,6 +42,16 @@
   나란히 둔다. 다른 판은 받은 run_loader 로만 읽는다(이 파일은 디스크를 열지 않는다). 다른 곳 규칙과 대상 영상 검사는
   app.ai_compare.diff_results 와 같다(graded 인데 등급 없는 줄은 뺀다, 08 D-17 1).
 
+엔진 likely 보기 (08 D-31 1, 규칙은 app.core.engine_grades 한 곳)
+- 필터 줄 옆 보기 옵션 **'likely 도 반응으로 보기'**(기본 꺼짐, settings.ini 의 engine_grades.SETTINGS_KEY — 방송 요약·
+  작업대 엔진 띠와 같은 키). 설정은 넘긴 settings, 없으면 담은 창을 따라 올라가 만난 settings(메인 창의 settings.ini)에 남긴다.
+- 꺼짐: 사람 최종과 견줄 때 엔진 likely 를 '반응 미확인' 처럼 다룬다(Side.dim — 값은 'likely' 그대로, 글에 '(흐림)').
+  같음·등급 다름·엔진만·사람만·짝 없음과 합계 표·타임라인 점을 그 기준으로 다시 세고, 엔진 트랙의 그 점은 속 빈 회색이다.
+  혼동표는 원래 등급(likely 줄)으로 센다. 머리 줄 아래 한 줄 'direct 만 · likely n건 흐림'. 켜면 전과 같다.
+- AI 확인 큐 필터는 옵션과 무관하다(D-30 1 — 큐는 direct·likely 둘 다 판정 대상, 목록·점·고른 건 칸도 전과 같다).
+  판끼리 견주기도 두 판의 등급을 그대로 본다(ai_compare.diff_results 와 같은 규칙). 두 경우 옵션 상자는 꺼 둔다.
+- 점수(ai_compare)는 사전 정의(direct·likely = 반응 있음)대로다 — 옵션이 꺼져 있으면 점수 칸에 그 한 줄을 붙인다.
+
 비교 규칙(이 화면의 표시용. 점수는 ai_compare 가 낸다)
 - 같음: 두 쪽 모두 판정이 있고 값(등급, 또는 반응 미확인)이 같다.
 - 등급 다름: 두 쪽 모두 등급이 있는데(반응 후보 있음) 다르다.
@@ -63,13 +73,14 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-                               QPushButton, QScrollArea, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget,
+                               QListWidgetItem, QPushButton, QScrollArea, QSplitter, QStackedWidget, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import ai_compare
 from .. import ai_confirm as acf
 from .. import analysis_flow as af
+from ..core import engine_grades as eg
 from ..core.rules import EVIDENCE_KEYS, V0_1_STRENGTH
 from ..core.timecode import fmt_display
 from ..i18n import tr
@@ -125,6 +136,9 @@ STATUS_COLORS = {
 }
 ENGINE_TRACK = "engine"
 HUMAN_TRACK = "final"
+# 흐린 엔진 likely (08 D-31 1, 'likely 도 반응으로 보기' 꺼짐) — 엔진 트랙의 속 빈 회색 점
+DIM_COLOR = QColor(158, 158, 158)
+DIM_MARK = "an_dim"
 
 
 def _is_int(v) -> bool:
@@ -135,9 +149,16 @@ def _t(ms) -> str:
     return fmt_display(ms) if _is_int(ms) else "—"
 
 
+def _val_text(side) -> str:
+    """판정 값 글. 흐린 엔진 likely 는 '높음(흐림)'(08 D-31 1)."""
+    text = tr(VAL_KO.get(side.value, side.value))
+    return f"{text}({tr(eg.DIM_TEXT)})" if getattr(side, "dim", False) else text
+
+
 @dataclass(frozen=True)
 class Side:
-    """한쪽(엔진 또는 사람)의 판정. present = 그쪽 자료에 이 채팅이 있음."""
+    """한쪽(엔진 또는 사람)의 판정. present = 그쪽 자료에 이 채팅이 있음.
+    dim = 엔진 likely 를 '반응 미확인' 처럼 흐리게 본다(08 D-31 1, 'likely 도 반응으로 보기' 꺼짐). value 는 'likely' 그대로."""
     present: bool = False
     value: str = ABSENT                       # CONFUSION_VALUES 또는 GRADED_NO_GRADE
     reaction_time_ms: int | None = None
@@ -146,10 +167,16 @@ class Side:
     rationale: str | None = None
     t_ms: int | None = None                   # 이쪽 자료에 적힌 채팅 시각
     extra: Mapping[str, Any] = field(default_factory=dict)
+    dim: bool = False
 
     @property
     def graded(self) -> bool:
-        return self.present and self.value not in (UNCONFIRMED, ABSENT)
+        return self.present and not self.dim and self.value not in (UNCONFIRMED, ABSENT)
+
+    @property
+    def cmp_value(self) -> str:
+        """견줄 때 쓰는 값: 흐린 likely 는 '반응 미확인' 처럼(08 D-31 1). 그 밖은 value 그대로."""
+        return UNCONFIRMED if self.dim else self.value
 
 
 @dataclass(frozen=True)
@@ -309,9 +336,10 @@ def human_sides(rows: Iterable | None) -> tuple[dict[str, Side], dict]:
 
 
 def classify(engine: Side, human: Side) -> str | None:
-    """두 판정의 비교 결과. 한쪽에만 있고 그쪽도 반응 미확인이면 None(목록에 넣지 않음)."""
+    """두 판정의 비교 결과. 한쪽에만 있고 그쪽도 반응 미확인이면 None(목록에 넣지 않음).
+    흐린 엔진 likely(Side.dim)는 반응 미확인처럼 본다(08 D-31 1)."""
     if engine.present and human.present:
-        if engine.value == human.value:
+        if engine.cmp_value == human.cmp_value:
             return SAME
         if engine.graded and human.graded:
             return GRADE_DIFF
@@ -331,12 +359,18 @@ class Comparison:
 
 
 def compare(run: Mapping | None, final_rows: Iterable[Mapping] | None,
-            chat_times: Mapping[str, int] | None = None, *, against: Mapping | None = None) -> Comparison:
+            chat_times: Mapping[str, int] | None = None, *, against: Mapping | None = None,
+            include_likely: bool = eg.DEFAULT_INCLUDE_LIKELY) -> Comparison:
     """엔진 결과와 최종 세트를 chat_id 로 맞춘다. 목록은 시각 순(시각 없는 것은 뒤, chat_id 순).
 
+    include_likely: 엔진 likely 를 '반응 있음' 으로 볼지(08 D-31 1, app.core.engine_grades). False(기본)면 사람 최종과
+    견줄 때 엔진 likely 를 '반응 미확인' 처럼 흐리게(Side.dim) 다룬다 — 같음·등급 다름·엔진만·사람만·짝 없음이 그 기준으로
+    다시 세진다. 혼동표는 원래 등급(likely 줄)으로 센다. True 면 전과 같다.
     against: 다른 엔진 판(봉인 해제된 결과 dict). 주면 판끼리 견준다(17 6-1 4번) — 위(engine) = run, 아래(human) = against,
     ref = 사람 최종(참고). 이때 graded 인데 등급이 없는 줄은 양쪽 모두 뺀다(08 D-17 1, ai_compare.diff_results 와 같은 규칙).
-    summary 의 키는 같고 뜻만 바뀐다(engine_rows = A, human_rows = B, engine_unevaluated = B 에만, human_missing = A 에만)."""
+    판끼리는 include_likely 와 상관없이 두 판의 등급을 그대로 본다(diff_results 와 같은 다른 곳).
+    summary 의 키는 같고 뜻만 바뀐다(engine_rows = A, human_rows = B, engine_unevaluated = B 에만, human_missing = A 에만).
+    더한 키: engine_direct·engine_likely(엔진 쪽 등급 수), likely_dimmed(흐리게 본 수), include_likely(이 비교의 규칙)."""
     eng, est = engine_sides(run)
     ref: dict[str, Side] | None = None
     if against is not None:
@@ -345,8 +379,12 @@ def compare(run: Mapping | None, final_rows: Iterable[Mapping] | None,
         hum = {k: v for k, v in hum.items() if v.value != GRADED_NO_GRADE}
         hst = {"duplicates": hst["duplicates"], "skipped": hst["invalid"]}
         ref, _rst = human_sides(final_rows)
+        include_likely = True                   # 판끼리는 등급 그대로
     else:
         hum, hst = human_sides(final_rows)
+        if not include_likely:
+            eng = {k: (_dc_replace(v, dim=True) if eg.is_dimmed(v.value, include_likely=False) else v)
+                   for k, v in eng.items()}
     absent = Side()
     items: list[CompareItem] = []
     conf = {a: {b: 0 for b in CONFUSION_VALUES} for a in CONFUSION_VALUES}
@@ -376,6 +414,7 @@ def compare(run: Mapping | None, final_rows: Iterable[Mapping] | None,
         items.append(CompareItem(cid, t, status, e, h, None if ref is None else ref.get(cid, absent)))
     items.sort(key=lambda it: (it.t_ms is None, it.t_ms if it.t_ms is not None else 0, it.chat_id))
     both = sum(1 for c in eng if c in hum)
+    grades = eg.count_grades(v.value for v in eng.values())
     summary = {
         "engine_rows": len(eng), "human_rows": len(hum), "both": both,
         "engine_unevaluated": sum(1 for c in hum if c not in eng),   # 사람에게만 있음 (AI 미평가)
@@ -384,6 +423,9 @@ def compare(run: Mapping | None, final_rows: Iterable[Mapping] | None,
         "engine_duplicates": est["duplicates"], "engine_invalid": est["invalid"],
         "human_duplicates": hst["duplicates"], "human_skipped": hst["skipped"],
         "no_time": sum(1 for it in items if it.t_ms is None),
+        # 08 D-31 1: 엔진 direct·likely 수(둘 다 늘 보인다)와 흐리게 본 likely 수
+        "engine_direct": grades[eg.DIRECT], "engine_likely": grades[eg.LIKELY],
+        "likely_dimmed": sum(1 for v in eng.values() if v.dim), "include_likely": bool(include_likely),
         **counts,
     }
     if ref is not None:
@@ -611,11 +653,19 @@ class AnalysisView(QWidget):
                  confirm_rows: Iterable[Mapping] | None = None,
                  confirm_loader: Callable[[str], Mapping] | None = None,
                  confirm_writer: Callable[[str, str, str], Any] | None = None,
-                 chat_text: Callable[[str], tuple | None] | None = None):
+                 chat_text: Callable[[str], tuple | None] | None = None,
+                 settings: Any = None, include_likely: bool | None = None):
+        """settings: '엔진 likely 보기'(08 D-31 1)를 남길 설정(QSettings 같은 것). 없으면 담은 창을 따라 올라가 만난
+        settings(메인 창의 settings.ini), 그것도 없으면 남기지 않는다. include_likely: 주면 설정 대신 그 값으로 연다."""
         super().__init__(parent)
         self._title_base: str | None = title_base if isinstance(title_base, str) and title_base else None
         self._title = ""
+        # 엔진 likely 보기 (08 D-31 1) — 규칙·설정은 app.core.engine_grades
+        self._settings = settings if settings is not None else eg.find_settings(self)
+        self._include_likely = bool(include_likely) if include_likely is not None \
+            else eg.read_include_likely(self._settings)
         self._cmp = Comparison([], {}, {})
+        self._cmp_full = self._cmp                  # likely 도 반응으로 본 비교(AI 확인 큐 필터가 쓴다, D-30 1)
         self._visible: list[CompareItem] = []
         self._filter = FILTER_ALL
         self._current: CompareItem | None = None
@@ -640,6 +690,7 @@ class AnalysisView(QWidget):
         self._queue: list[acf.QueueItem] = []
         self._build()
         self._install_shortcuts()
+        eg.subscribe(self._on_likely_setting)       # 다른 화면에서 바꾸면 따라간다(약한 참조 — 이 화면을 붙잡지 않음)
         self.set_data(run=run, final_rows=final_rows, sealed_count=sealed_count, scores=scores,
                       chat_times=chat_times, duration_ms=duration_ms, runs=runs, run_loader=run_loader, run_id=run_id,
                       pick_default=pick_default, confirm_rows=confirm_rows, confirm_loader=confirm_loader,
@@ -697,10 +748,15 @@ class AnalysisView(QWidget):
         self.header = QLabel()
         self.header.setWordWrap(True)
         cl.addWidget(self.header)
+        # 엔진 likely 보기 한 줄 (08 D-31 1): 'direct 만 · likely n건 흐림'
+        self.rule_label = QLabel()
+        self.rule_label.setWordWrap(True)
+        cl.addWidget(self.rule_label)
         self.timeline = Timeline(self.content)
         for s, c in STATUS_COLORS.items():
             self.timeline.set_marker_style(f"an_{s}", c, False)
             self.timeline.set_marker_style(f"an_{s}_n", c, True)
+        self.timeline.set_marker_style(DIM_MARK, DIM_COLOR, True)      # 흐린 엔진 likely — 속 빈 회색
         self.timeline.set_fixed_tracks_visible(segments=False, density=False, waveform=False)   # 마커 두 줄만 쓴다
         self.timeline.seekRequested.connect(self._on_timeline_seek)
         cl.addWidget(self.timeline)
@@ -724,6 +780,12 @@ class AnalysisView(QWidget):
         # 프로세스 끝(QApplication 뒤)까지 남아 종료 때 접근 위반을 낸다(18 4-2, D-18 10)
         self.filter_box.currentIndexChanged.connect(self._on_filter_box)
         fl.addWidget(self.filter_box, 1)
+        # 보기 옵션 (08 D-31 1): 기본 꺼짐 = 엔진 direct 만 반응, likely 는 흐리게
+        self.likely_box = QCheckBox(tr(eg.OPTION_LABEL))
+        self.likely_box.setToolTip(tr(eg.OPTION_TIP))
+        self.likely_box.setChecked(self._include_likely)
+        self.likely_box.toggled.connect(self._on_likely_box)
+        fl.addWidget(self.likely_box)
         ll.addLayout(fl)
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self._on_row)
@@ -880,6 +942,62 @@ class AnalysisView(QWidget):
     def _on_unsure_clicked(self, _checked: bool = False) -> None:
         self.judge(acf.UNSURE)
 
+    # ------------------------------------------------------------------ 엔진 likely 보기 (08 D-31 1)
+    def include_likely(self) -> bool:
+        """'likely 도 반응으로 보기' 가 켜졌나(기본 꺼짐 = 엔진 direct 만 반응)."""
+        return self._include_likely
+
+    def set_include_likely(self, on: bool, *, save: bool = True) -> bool:
+        """보기 옵션을 바꾼다. save 면 settings 에 남기고(engine_grades.SETTINGS_KEY) 열린 다른 화면(방송 요약·작업대
+        엔진 띠)에 알린다. 고른 건은 그대로 두고(재생 위치·반복 재생 시그널 없이) 같음·다름·합계·타임라인을 다시 센다.
+        AI 확인 큐는 바뀌지 않는다(D-30 1). 바뀌었으면 True."""
+        on = bool(on)
+        if self.likely_box.isChecked() != on:
+            self.likely_box.blockSignals(True)
+            self.likely_box.setChecked(on)
+            self.likely_box.blockSignals(False)
+        if on == self._include_likely:
+            return False
+        self._include_likely = on
+        if save:
+            eg.write_include_likely(self._settings, on, source=self)
+        if not self._sealed:
+            self._render(quiet=True)
+        LOG.info("나란히 보기: 엔진 likely %s", "반응으로 봄" if on else "흐림 (direct 만 반응)")
+        return True
+
+    def _on_likely_box(self, checked: bool) -> None:
+        self.set_include_likely(bool(checked))
+
+    def _on_likely_setting(self, on: bool) -> None:
+        """다른 화면에서 옵션을 바꿨다(engine_grades.notify). 남기지는 않는다(바꾼 화면이 남겼다)."""
+        self.set_include_likely(on, save=False)
+
+    def _dims(self) -> bool:
+        """지금 보이는 목록에 흐린 likely 규칙이 걸리나 — 사람 최종과 견주는 중이고(큐·판끼리 아님) 옵션이 꺼졌을 때."""
+        return not self._sealed and not self._include_likely and self._against is None and \
+            self._filter != FILTER_CONFIRM
+
+    def rule_text(self) -> str:
+        """머리 줄 아래 한 줄(08 D-31 1): 'direct 만 · likely n건 흐림' 등. 봉인이면 빈 글."""
+        return self.rule_label.text()
+
+    def _fill_rule(self) -> None:
+        if self._sealed:
+            self.rule_label.clear()
+            self.likely_box.setEnabled(False)
+            return
+        if self.is_runs_mode():
+            text = tr("판끼리 견주기: 두 판의 등급을 그대로 봅니다 (likely 포함 — 보기 옵션과 무관)")
+        elif self._filter == FILTER_CONFIRM:
+            text = tr("AI 확인 큐: direct·likely 모두 판정 대상입니다 (보기 옵션과 무관, D-30 1)")
+        else:
+            text = tr(eg.rule_text(include_likely=self._include_likely,
+                                   likely=int(self._cmp.summary.get("engine_likely", 0) or 0)))
+        self.rule_label.setText(text)
+        # 판끼리·AI 확인 큐에서는 옵션이 아무것도 바꾸지 않으므로 꺼 둔다(누르면 바뀌는 것이 보이는 곳에서만)
+        self.likely_box.setEnabled(not self.is_runs_mode() and self._filter != FILTER_CONFIRM)
+
     # ------------------------------------------------------------------ 자료
     def set_data(self, *, run: Mapping | None = None, final_rows: Iterable[Mapping] | None = None,
                  sealed_count: int = 0, scores: Mapping | None = None, chat_times: Mapping[str, int] | None = None,
@@ -906,12 +1024,14 @@ class AnalysisView(QWidget):
         if run is None:
             self._sealed = True
             self._cmp = Comparison([], {}, {})
+            self._cmp_full = self._cmp
             self._visible = []
             self._runs, self._loader, self._run_id = [], None, None
             self._versions = {}
             self._final_rows, self._chat_times, self._duration = [], None, None
             self._confirm_rows, self._confirm_loader, self._confirm_writer = None, None, None
             self._clear_content()
+            self._fill_legend()                     # 흐린 likely 줄도 뗀다(봉인 중에는 엔진 쪽 표시가 없다)
             self._fill_run_bar()
             self._sync_confirm_box()
             self.sealed_label.setText(tr("봉인됨 {n}건").format(n=self._sealed_count))
@@ -1130,12 +1250,14 @@ class AnalysisView(QWidget):
         self.compare_with(rid if isinstance(rid, str) and rid else None)
 
     # ------------------------------------------------------------------ 그리기
-    def _render(self) -> bool:
-        """지금 고른 판(들)로 다시 그린다. 판끼리 견주기에 실패하면(대상 영상이 다름 등) False."""
+    def _render(self, *, quiet: bool = False) -> bool:
+        """지금 고른 판(들)로 다시 그린다. 판끼리 견주기에 실패하면(대상 영상이 다름 등) False.
+        quiet: 보기 옵션만 바꿨을 때 — 고른 채팅이 남아 있으면 시그널(재생 위치·반복 재생) 없이 다시 고른다."""
         cur = self._loaded.get(self._run_id or "")
         if cur is None:
             return False
         run = cur["run"]
+        keep_id = self._current.chat_id if quiet and self._current is not None else None
         self._current = None
         b = self._loaded.get(self._against) if self._against else None
         if self._against and b is None:
@@ -1150,30 +1272,34 @@ class AnalysisView(QWidget):
             self._cmp = compare(run, self._final_rows, self._chat_times, against=b["run"])
             self._cmp.summary.update(graded_no_grade_a=diff["a"]["graded_no_grade"],
                                      graded_no_grade_b=diff["b"]["graded_no_grade"])
+            self._cmp_full = self._cmp                      # 판끼리는 등급 그대로(옵션과 무관)
             self.header.setText(tr("판 A = {a} ↔ 판 B = {b} · 사람 = 최종 세트(참고)").format(
                 a=self._run_title(run), b=self._run_title(b["run"])))
         else:
-            self._cmp = compare(run, self._final_rows, self._chat_times)
+            self._cmp = compare(run, self._final_rows, self._chat_times, include_likely=self._include_likely)
+            # AI 확인 큐 필터는 옵션과 무관하게 likely 도 반응으로 본 비교로 보인다(D-30 1 — 전과 같은 목록·점·고른 건 칸)
+            self._cmp_full = self._cmp if self._include_likely else \
+                compare(run, self._final_rows, self._chat_times, include_likely=True)
             eng = run.get("engine") if isinstance(run.get("engine"), Mapping) else {}
             rid = run.get("run_id") if isinstance(run.get("run_id"), str) else "?"
             self.header.setText(tr("엔진 실행 {rid} · {name} {ver} · 사람 = 최종 세트").format(
                 rid=rid, name=eng.get("name", "?"), ver=eng.get("version", "?")))
         self._rebuild_queue(None if b is not None else run)
-        times = [it.t_ms for it in self._cmp.items if it.t_ms is not None]
+        # 길이는 likely 도 넣은 비교로 잡는다(옵션을 바꾸거나 AI 확인 큐로 가도 축이 그대로)
+        times = [it.t_ms for it in self._cmp_full.items if it.t_ms is not None]
         self.timeline.set_duration(self._duration or (max(times, default=0) + 10_000))
-        self._fill_legend()
         self._fill_filter_labels()
         self._fill_summary()
         if b is not None:
             self._fill_scores_pair(cur.get("scores"), b.get("scores"))
         else:
             self._fill_scores(cur.get("scores"))
-        self._apply_filter()
+        self._apply_filter(keep_id=keep_id, quiet=quiet)
         self.stack.setCurrentWidget(self.content)
         s = self._cmp.summary
-        LOG.info("분석 나란히 보기%s: 위 %d · 아래 %d · 같음 %d · 등급 다름 %d · 위만 %d · 아래만 %d",
+        LOG.info("분석 나란히 보기%s: 위 %d · 아래 %d · 같음 %d · 등급 다름 %d · 위만 %d · 아래만 %d · likely 흐림 %d",
                  " (판끼리)" if b is not None else "", s["engine_rows"], s["human_rows"], s[SAME], s[GRADE_DIFF],
-                 s[ENGINE_ONLY], s[HUMAN_ONLY])
+                 s[ENGINE_ONLY], s[HUMAN_ONLY], s.get("likely_dimmed", 0))
         return True
 
     @staticmethod
@@ -1192,8 +1318,11 @@ class AnalysisView(QWidget):
         return (tr("판 A"), tr("판 B")) if self.is_runs_mode() else (tr("엔진"), tr("사람 최종"))
 
     def _fill_legend(self) -> None:
-        self.legend.setText("  ".join(f"<span style='color:{STATUS_COLORS[s].name()}'>●</span> {self.status_ko(s)}"
-                                      for s in STATUSES) + "  " + tr("○ = 그쪽 판정이 반응 미확인"))
+        text = "  ".join(f"<span style='color:{STATUS_COLORS[s].name()}'>●</span> {self.status_ko(s)}"
+                         for s in STATUSES) + "  " + tr("○ = 그쪽 판정이 반응 미확인")
+        if self._dims():
+            text += f"  <span style='color:{DIM_COLOR.name()}'>○</span> " + tr("= 엔진 likely 흐림 (반응으로 안 셈)")
+        self.legend.setText(text)
 
     def _fill_filter_labels(self) -> None:
         names = dict(FILTER_KO)
@@ -1214,6 +1343,7 @@ class AnalysisView(QWidget):
         self.list.clear()
         self.list.blockSignals(False)
         self.header.clear()
+        self._fill_rule()                    # 봉인이면 비운다(엔진 등급 수도 해제 전에는 보이지 않는다)
         self.timeline.clear_markers(ENGINE_TRACK)
         self.timeline.clear_markers(HUMAN_TRACK)
         self.summary_table.setRowCount(0)
@@ -1274,12 +1404,16 @@ class AnalysisView(QWidget):
         """큐 줄: 시각 · 엔진 등급 · 판정(대기/맞음/아님/모름)만."""
         return f"{_t(it.t_ms)}  {tr('엔진')} {tr(VAL_KO.get(q.grade, q.grade))}  [{tr(VERDICT_KO[q.verdict])}]"
 
-    def _apply_filter(self) -> None:
+    def _apply_filter(self, *, keep_id: str | None = None, quiet: bool = False) -> None:
+        """목록·타임라인을 지금 필터로. 고른 채팅(keep_id, 없으면 지금 고른 것)이 새 목록에도 있으면 다시 고른다 —
+        quiet 면 시그널 없이(보기 옵션만 바꿨을 때). AI 확인 큐는 likely 도 반응으로 본 비교(_cmp_full)로 보인다(D-30 1)."""
         if self._sealed:
             return
-        keep = self._current
+        if keep_id is None and self._current is not None:
+            keep_id = self._current.chat_id
         confirm = self.is_confirm_mode()
-        self._visible = filter_items(self._cmp.items, self._filter, self._queue if confirm else None)
+        base = self._cmp_full.items if confirm else self._cmp.items
+        self._visible = filter_items(base, self._filter, self._queue if confirm else None)
         self.list.blockSignals(True)
         self.list.clear()
         runs = self.is_runs_mode()
@@ -1292,8 +1426,8 @@ class AnalysisView(QWidget):
                 li.setForeground(VERDICT_COLORS[q.verdict])
                 self.list.addItem(li)
                 continue
-            text = f"{_t(it.t_ms)}  {a} {tr(VAL_KO.get(it.engine.value, it.engine.value))} · " \
-                   f"{b} {tr(VAL_KO.get(it.human.value, it.human.value))}  [{self.status_ko(it.status)}]"
+            text = f"{_t(it.t_ms)}  {a} {_val_text(it.engine)} · {b} {_val_text(it.human)}  " \
+                   f"[{self.status_ko(it.status)}]"
             if runs and it.ref is not None and it.ref.present:
                 text += f"  {tr('사람')} {tr(VAL_KO.get(it.ref.value, it.ref.value))}"
             li = QListWidgetItem(text)
@@ -1302,10 +1436,16 @@ class AnalysisView(QWidget):
             self.list.addItem(li)
         self.list.blockSignals(False)
         self._fill_timeline()
+        self._fill_rule()
+        self._fill_legend()
         self._current = None
         self._confirm_say("")
-        if keep is not None and keep in self._visible:
-            self.select_index(self._visible.index(keep))
+        k = next((i for i, it in enumerate(self._visible) if it.chat_id == keep_id), None) if keep_id else None
+        if k is not None:
+            if quiet:
+                self._select_quiet(k)
+            else:
+                self.select_index(k)
         elif confirm and self._queue:
             j = acf.next_pending_index(self._queue, None)
             if j is not None:
@@ -1433,7 +1573,9 @@ class AnalysisView(QWidget):
             if it.t_ms is None:
                 continue
             if it.engine.present:
-                e_marks.append((it.t_ms, f"an_{it.status}" + ("" if it.engine.graded else "_n")))
+                # 흐린 엔진 likely(08 D-31 1)는 속 빈 회색 점, 그 밖은 비교 결과 색(반응 미확인이면 속 빈 점)
+                e_marks.append((it.t_ms, DIM_MARK if it.engine.dim
+                                else f"an_{it.status}" + ("" if it.engine.graded else "_n")))
             if it.human.present:
                 h_marks.append((it.t_ms, f"an_{it.status}" + ("" if it.human.graded else "_n")))
         a, b = self._side_names()
@@ -1476,6 +1618,20 @@ class AnalysisView(QWidget):
             w = self._queue[qi].play_window() if qi is not None else None
             if w is not None:
                 self.loopRequested.emit(w[0], w[1])     # 채팅 − 5초 ~ 발화 끝 + 3초 반복 (D-16 클릭 0)
+            self._sync_confirm_box()
+
+    def _select_quiet(self, i: int) -> None:
+        """i 번째를 다시 고르되 재생 위치·반복 재생 시그널은 내지 않는다(보기 옵션만 바꿨을 때 — 영상이 튀지 않게).
+        고른 건 칸(채팅 본문 줄 포함)·목록 줄·타임라인 위치만 다시 맞춘다."""
+        it = self._visible[i]
+        self._current = it
+        self.list.blockSignals(True)
+        self.list.setCurrentRow(i)
+        self.list.blockSignals(False)
+        self._fill_detail(it)
+        if it.t_ms is not None:
+            self.timeline.set_position(it.t_ms)
+        if self.is_confirm_mode():
             self._sync_confirm_box()
 
     def _cur_index(self) -> int | None:
@@ -1535,8 +1691,8 @@ class AnalysisView(QWidget):
             return self._detail_rows_runs(it)
         e, h = it.engine, it.human
         rows = [
-            (tr("판정"), tr(VAL_KO.get(e.value, e.value)) if e.present else tr("평가 안 함"),
-             tr(VAL_KO.get(h.value, h.value)) if h.present else tr("최종 세트에 없음")),
+            (tr("판정"), _val_text(e) if e.present else tr("평가 안 함"),
+             _val_text(h) if h.present else tr("최종 세트에 없음")),
             (tr("확신도"), tr(CONF_KO.get(e.confidence, "—")), tr(CONF_KO.get(h.confidence, "—"))),
             (tr("반응 시각"), _t(e.reaction_time_ms), _t(h.reaction_time_ms)),
         ]
@@ -1616,8 +1772,9 @@ class AnalysisView(QWidget):
                 lab.setTextFormat(Qt.PlainText)
                 lab.setWordWrap(True)
                 lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                if r == 1 and c in (1, 2):    # 판정 줄은 비교 결과 색
-                    lab.setStyleSheet(f"color: {STATUS_COLORS[it.status].name()};")
+                if r == 1 and c in (1, 2):    # 판정 줄은 비교 결과 색(흐린 엔진 likely 는 회색, 08 D-31 1)
+                    col = DIM_COLOR if c == 1 and it.engine.dim else STATUS_COLORS[it.status]
+                    lab.setStyleSheet(f"color: {col.name()};")
                 self.detail.addWidget(lab, r, c)
 
     # ------------------------------------------------------------------ 합계·점수
@@ -1637,10 +1794,14 @@ class AnalysisView(QWidget):
                 (tr("등급 없는 graded 뺌 (B)"), s.get("graded_no_grade_b", 0)),
                 (tr("A 중복 chat_id"), s["engine_duplicates"]), (tr("B 중복 chat_id"), s["human_duplicates"]),
             ]
+        # 08 D-31 1: 엔진 direct·likely 는 옵션과 상관없이 둘 다 센다(꺼짐이면 likely 는 '흐림')
+        likely_name = tr("엔진 likely (반응으로 셈)") if s.get("include_likely", True) \
+            else tr("엔진 likely (흐림 — 반응으로 안 셈)")
         return [
             (tr("엔진 판정 채팅"), s["engine_rows"]), (tr("사람 최종 채팅"), s["human_rows"]), (tr("두 쪽 모두"), s["both"]),
             (tr(STATUS_KO[SAME]), s[SAME]), (tr(STATUS_KO[GRADE_DIFF]), s[GRADE_DIFF]),
             (tr(STATUS_KO[ENGINE_ONLY]), s[ENGINE_ONLY]), (tr(STATUS_KO[HUMAN_ONLY]), s[HUMAN_ONLY]),
+            (tr("엔진 direct (반응 있음)"), s.get("engine_direct", 0)), (likely_name, s.get("engine_likely", 0)),
             (tr("엔진 미평가 (사람에게만)"), s["engine_unevaluated"]), (tr("최종 세트 밖 (엔진에게만)"), s["human_missing"]),
             (tr("짝 없음 (반응 없음)"), s["unpaired_no_reaction"]), (tr("시각 없음"), s["no_time"]),
             (tr("등급 없는 graded (혼동표 밖)"), s["graded_no_grade"]),
@@ -1655,6 +1816,12 @@ class AnalysisView(QWidget):
             it = QTableWidgetItem(str(n))
             it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.summary_table.setItem(r, 1, it)
+        # 혼동표는 원래 등급으로 센다. 흐리게 본 엔진 likely 줄은 줄 이름에 '(흐림)'(08 D-31 1)
+        names = [tr(VAL_KO[v]) for v in CONFUSION_VALUES]
+        if self._cmp.summary.get("likely_dimmed"):
+            i = CONFUSION_VALUES.index(eg.LIKELY)
+            names[i] = f"{names[i]}({tr(eg.DIM_TEXT)})"
+        self.confusion_table.setVerticalHeaderLabels(names)
         conf = self._cmp.confusion
         for r, a in enumerate(CONFUSION_VALUES):
             for c, b in enumerate(CONFUSION_VALUES):
@@ -1698,6 +1865,9 @@ class AnalysisView(QWidget):
             notes = []
             if scores.get("dev_only") is True or scores.get("preregistered") is False:
                 notes.append(tr("사전 봉인 아님 — 개발용 점수"))
+            if not self._include_likely:
+                # 점수는 06 4-3 사전 정의 그대로(direct·likely = 반응 있음) — 보기 옵션은 점수를 바꾸지 않는다(08 D-31 1)
+                notes.append(tr("점수는 사전 정의대로 direct·likely 를 반응으로 셉니다 (보기 옵션과 무관)"))
             for w in scores.get("warnings") or []:
                 if isinstance(w, str):
                     notes.append(w)

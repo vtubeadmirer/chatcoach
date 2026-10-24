@@ -89,6 +89,7 @@ MARK_STYLES: dict[str, tuple[QColor, bool]] = {
     "unconfirmed": (QColor(150, 150, 160), False),    # 반응 미확인
     "engine": (QColor(38, 198, 218), False),
     "engine_weak": (QColor(38, 198, 218), True),
+    "engine_dim": (QColor(158, 158, 158), True),      # 흐린 엔진 likely — 속 빈 회색 (08 D-31 1)
     "primary": (QColor(186, 104, 200), False),       # 잠긴 1차 반응 라벨(보라, 엔진의 청록과 구분)
     "primary_weak": (QColor(186, 104, 200), True),   # 잠긴 1차의 반응 미확인·재확인 모자람
     "anchor": (QColor(255, 213, 79), False),
@@ -506,6 +507,16 @@ class Timeline(QWidget):
         if new_track:
             self._update_height()
         self._data_changed()
+
+    def set_track_label(self, name: str, label: str | None) -> None:
+        """마커 트랙 이름만 바꾼다(None·빈 글이면 기본 이름). 마커는 그대로 — 작업대 엔진 띠의 'direct n · likely m(흐림)'
+        (08 D-31 1)처럼 숫자만 바뀔 때 쓴다."""
+        if label:
+            self._track_labels[name] = str(label)
+        else:
+            self._track_labels.pop(name, None)
+        self._data_rev += 1          # 정적 그림(트랙 이름 포함)을 다시 그리게
+        self.update()
 
     def clear_markers(self, name: str):
         if name in self._tracks:

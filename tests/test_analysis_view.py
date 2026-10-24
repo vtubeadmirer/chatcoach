@@ -86,7 +86,9 @@ def fixture_pair():
 # ---------------------------------------------------------------------------- 순수 계산
 def test_compare_statuses():
     run, rows = fixture_pair()
-    c = av.compare(run, rows)
+    # 08 D-31 1 로 compare 기본이 'direct 만 반응'(엔진 likely 흐림)이 됐다. 이 시험은 likely 도 반응으로 보는 비교
+    # 규칙(옵션 켬 = 전과 같음)을 보므로 include_likely=True 로 연다. 기본(꺼짐)의 상태는 test_d31_default_dims_engine_likely
+    c = av.compare(run, rows, include_likely=True)
     st = {it.chat_id: it.status for it in c.items}
     assert st == {cid(1): av.SAME, cid(2): av.GRADE_DIFF, cid(3): av.ENGINE_ONLY, cid(4): av.ENGINE_ONLY,
                   cid(5): av.HUMAN_ONLY, cid(6): av.HUMAN_ONLY, cid(8): av.SAME}
@@ -152,7 +154,9 @@ def test_chat_times_priority_and_missing_time():
 
 def test_filters_and_next_diff_index():
     run, rows = fixture_pair()
-    items = av.compare(run, rows).items
+    # 08 D-31 1: 기본(꺼짐)이면 채팅 2(엔진 likely · 사람 직접)가 '사람만' 이 되어 놓침만이 셋이 된다. 이 시험은 필터·건너뛰기
+    # 규칙을 전과 같은 비교(옵션 켬)로 본다
+    items = av.compare(run, rows, include_likely=True).items
     assert len(av.filter_items(items, av.FILTER_ALL)) == 7
     assert all(it.status != av.SAME for it in av.filter_items(items, av.FILTER_DIFF))
     assert len(av.filter_items(items, av.FILTER_DIFF)) == 5
@@ -228,7 +232,9 @@ def test_chat_text_never_shown(qapp):
 
 def test_tracks_list_filter_and_navigation(qapp):
     run, rows = fixture_pair()
-    v = av.AnalysisView(run=run, final_rows=rows)
+    # 08 D-31 1: 화면 기본은 엔진 likely 흐림(채팅 2 가 '사람만' 이 되어 놓침만 필터가 셋). 이 시험은 트랙·필터·건너뛰기를
+    # 전과 같은 비교(옵션 켬)로 본다. 기본(꺼짐) 화면은 test_d31_view_default_off_and_toggle
+    v = av.AnalysisView(run=run, final_rows=rows, include_likely=True)
     assert v.list.count() == 7
     em, hm = v.timeline.markers(av.ENGINE_TRACK), v.timeline.markers(av.HUMAN_TRACK)
     assert len(em) == 6 and len(hm) == 6          # 엔진 없음 1건(6), 사람 없음 1건(4)
@@ -271,7 +277,8 @@ def test_detail_rows_and_list_click(qapp):
     v.list.setCurrentRow(1)                       # 채팅 2: 엔진 높음 / 사람 직접
     assert v.current_item().chat_id == cid(2)
     d = {r[0]: r[1:] for r in v.detail_rows()}
-    assert d["판정"] == ("높음", "직접")
+    # 08 D-31 1: 기본은 엔진 likely 흐림 — 판정 칸에 '(흐림)' 이 붙는다(옵션을 켜면 '높음')
+    assert d["판정"] == ("높음(흐림)", "직접")
     assert d["확신도"] == ("아마도", "확실함")
     assert d["근거"] == ("r-engine", "r-human")
     assert "엄격 포함" in d["평가"][1] and "참고 포함" in d["평가"][1]
@@ -296,7 +303,9 @@ def test_timeline_click_selects_nearest(qapp):
 
 def test_summary_and_scores_tables(qapp):
     run, rows = fixture_pair()
-    v = av.AnalysisView(run=run, final_rows=rows)
+    # 08 D-31 1: 기본(꺼짐)이면 채팅 2 가 '사람만' 으로 세져 사람만이 3 이 된다. 이 시험은 옵션을 켠(전과 같은) 합계·점수
+    # 표를 본다. 기본의 합계는 test_d31_view_default_off_and_toggle
+    v = av.AnalysisView(run=run, final_rows=rows, include_likely=True)
     sr = dict(v.summary_rows())
     assert sr["같음"] == 2 and sr["사람만"] == 2 and sr["엔진 미평가 (사람에게만)"] == 1
     assert v.summary_table.rowCount() == len(v.summary_rows())

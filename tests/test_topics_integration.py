@@ -133,14 +133,20 @@ def test_topic_flow_and_broadcast_summary(proj, monkeypatch):  # noqa: F811
     assert [r["keywords"] for r in s.rows] == [["게임", "보스"], ["요리", "라면"]]
     blob = json.dumps(s.rows, ensure_ascii=False)
     assert "합성 본문" not in blob and "시**" not in blob           # 숫자·주제 이름만 (D-17 8)
-    # 최종 세트를 만들 수 없으면 해제된 엔진 판정으로 센다(직접·높음 5건)
+    # 최종 세트를 만들 수 없으면 해제된 엔진 판정으로 센다(합성 엔진: 직접 3 · 높음 2).
+    # 08 D-31 1 로 엔진 판정의 기본 반응은 direct 만이 됐다 — 전에는 직접·높음 5건을 반응으로 셌다(그 값은 이제
+    # summary_with_likely, 보기 옵션 'likely 도 반응으로 보기' 를 켰을 때). likely 2건은 덩어리마다 따로 싣는다.
     from app import export
 
     def boom(*a, **k):
         raise export.ExportError("합성 실패")
     monkeypatch.setattr(export, "build_final_set", boom)
     s2 = af.broadcast_summary(root, reader_kind="analysis")
-    assert s2.reaction_source == "engine" and s2.summary.total.reacted == 5 and s2.warnings
+    assert s2.reaction_source == "engine" and s2.summary.total.reacted == 3 and s2.warnings
+    assert s2.engine_counts == {"direct": 3, "likely": 2} and s2.summary_with_likely.total.reacted == 5
+    assert sum(r["likely_reacted"] for r in s2.rows) == 2
+    assert all(r["reaction_rate_with_likely"] >= r["reaction_rate"] for r in s2.rows)
+    assert s.summary_with_likely is None and s.engine_counts is None and "likely_reacted" not in s.rows[0]
 
 
 # ---------------------------------------------------------------------------------------------- 3. 메인 창·작업대

@@ -475,7 +475,12 @@ def topic_flow(project_root: str, *, reader_kind: str | None, run_id: str | None
 
 @dataclass
 class BroadcastSummaryData:
-    """방송 요약 화면(app/ui/summary_view.SummaryView)에 넘길 것. rows 는 덩어리마다 숫자·주제 이름·키워드만(D-17 8)."""
+    """방송 요약 화면(app/ui/summary_view.SummaryView)에 넘길 것. rows 는 덩어리마다 숫자·주제 이름·키워드만(D-17 8).
+
+    reaction_source = 'engine' 이면(08 D-31 1) summary·rows 의 반응은 엔진 **direct 만**이고, 엔진 likely 는 따로 싣는다:
+    rows 마다 likely_reacted(그 덩어리의 likely 채팅 수)·reaction_rate_with_likely(likely 도 넣은 반응률), summary_with_likely
+    (likely 도 반응으로 센 요약), engine_counts({'direct', 'likely'} — 덩어리 안 채팅). 화면은 보기 옵션
+    'likely 도 반응으로 보기'(app.core.engine_grades)에 따라 고른다. 'final_set'(사람 등급)이면 이 칸들은 없다(None)."""
     sealed_count: int
     sealed: bool
     topic_run_id: str | None = None
@@ -485,6 +490,8 @@ class BroadcastSummaryData:
     question_source: str | None = None                         # 'missed_check'(놓친 후보 판정의 질문 표시) · None
     warnings: list[str] = field(default_factory=list)
     topic_engine_version: str | None = None                    # topic_run_id 의 해제 기록 엔진 판(없으면 판 모름)
+    summary_with_likely: object | None = None                  # 'engine' 일 때만: likely 도 반응으로 센 요약(D-31 1)
+    engine_counts: dict | None = None                          # 'engine' 일 때만: {'direct': n, 'likely': m}
 
     @property
     def sealed_text(self) -> str:
@@ -518,8 +525,9 @@ def broadcast_summary(project_root: str, *, reader_kind: str | None, run_id: str
                       ai_root: str | None = None, flow: TopicFlowView | None = None) -> BroadcastSummaryData:
     """방송 요약 숫자 (17 6-1 2번): 주제 덩어리별 채팅 수·분당 채팅·반응 수·반응률·질문·놓친 질문.
 
-    - 반응: 사람 최종 세트(set=final, 직접·높음)의 채팅. 최종 세트를 만들 수 없으면 해제된 엔진 판정(직접·높음)으로
-      대신하고 reaction_source='engine' 과 경고를 남긴다.
+    - 반응: 사람 최종 세트(set=final, 직접·높음 — 사람 등급은 그대로)의 채팅. 최종 세트를 만들 수 없으면 해제된 엔진
+      판정으로 대신하고 reaction_source='engine' 과 경고를 남긴다. 이때 반응은 엔진 **direct 만**(08 D-31 1, 같은 chat_id 는
+      첫 줄 — 06 6-2)이고 likely 는 따로 센다(BroadcastSummaryData 설명 — rows 의 likely_reacted 등).
     - 질문: 최종 세트의 놓친 후보 판정 가운데 '질문' 표시(check_question)가 있는 채팅 → 반응이 없으면 놓친 질문.
       앱은 채팅 본문으로 질문을 고르지 않는다(엔진 몫).
     해제 전이면 아무 파일도 더 열지 않고 sealed=True 만."""
@@ -531,8 +539,10 @@ def broadcast_summary(project_root: str, *, reader_kind: str | None, run_id: str
         return out
     from . import export
     from .core import agreement as ag
+    from .core import engine_grades as eg
     from .core import topics as T
     reacted: set[str] = set()
+    likely_ids: set[str] = set()       # 엔진 판정으로 셀 때만: likely 채팅(흐리게 따로, 08 D-31 1)
     questions: dict[str, bool | None] = {}
     try:
         fx = export.build_final_set(project_root, reader_kind=reader_kind, ai_root=ai_root)
@@ -554,18 +564,36 @@ def broadcast_summary(project_root: str, *, reader_kind: str | None, run_id: str
             run = seal.read_run(project_root, tf.run_id, ai_root=ai_root, reader_kind=reader_kind)
         except (seal.SealError, OSError, ValueError):
             run = {}
+        seen: set[str] = set()
         for x in run.get("reactions") or []:
-            if isinstance(x, Mapping) and x.get("result") == "graded" and x.get("grade") in ag.POSITIVE \
-                    and isinstance(x.get("chat_id"), str):
-                reacted.add(x["chat_id"])
+            cid = x.get("chat_id") if isinstance(x, Mapping) else None
+            if not isinstance(cid, str) or cid in seen:
+                continue
+            seen.add(cid)                                # 같은 chat_id 는 첫 줄만(06 6-2)
+            if x.get("result") != "graded":
+                continue
+            if eg.counts_as_reaction(x.get("grade"), include_likely=False):
+                reacted.add(cid)                         # 기본은 direct 만 반응(08 D-31 1)
+            elif x.get("grade") == eg.LIKELY:
+                likely_ids.add(cid)                      # likely 는 흐리게 따로
         out.reaction_source = "engine"
     for cid in questions:
         questions[cid] = cid in reacted
-    summary = T.summarize(tf.blocks, _chat_times_kinds(project_root), reacted_chat_ids=reacted, questions=questions)
+    msgs = _chat_times_kinds(project_root)
+    summary = T.summarize(tf.blocks, msgs, reacted_chat_ids=reacted, questions=questions)
     out.summary = summary
     out.rows = [{**r.as_dict(), "keywords": list(b.keywords)} for r, b in zip(summary.rows, tf.blocks)]
-    LOG.info("방송 요약: 덩어리 %d개 · 채팅 %d · 반응 %d (%s) · 질문 %d", len(out.rows), summary.total.chats,
-             summary.total.reacted, out.reaction_source, summary.total.questions)
+    if out.reaction_source == "engine":
+        only_likely = T.summarize(tf.blocks, msgs, reacted_chat_ids=likely_ids)
+        with_likely = T.summarize(tf.blocks, msgs, reacted_chat_ids=reacted | likely_ids, questions=questions)
+        for row, rl, rw in zip(out.rows, only_likely.rows, with_likely.rows):
+            row["likely_reacted"] = rl.reacted
+            row["reaction_rate_with_likely"] = rw.reaction_rate
+        out.summary_with_likely = with_likely
+        out.engine_counts = {eg.DIRECT: summary.total.reacted, eg.LIKELY: only_likely.total.reacted}
+    LOG.info("방송 요약: 덩어리 %d개 · 채팅 %d · 반응 %d (%s) · likely 따로 %s · 질문 %d", len(out.rows),
+             summary.total.chats, summary.total.reacted, out.reaction_source,
+             out.engine_counts[eg.LIKELY] if out.engine_counts else "-", summary.total.questions)
     return out
 
 

@@ -23,6 +23,8 @@
 블라인드 (안내서 원칙 3, 03 12장)
 - 라벨링 세션(primary·relabel_*)에서는 엔진 결과·다른 세션 라벨·AI 등급 제안을 어디에도 보이지 않는다.
   '분석 보기'(엔진 마커)는 visibility.can_show(engine_results) 가 허락하는 분석 세션에서만 메뉴에 나온다.
+  엔진 띠는 direct 만 채운 점이고 likely 는 흐린 속 빈 회색 점이다(08 D-31 1 — 나란히 보기·방송 요약과 같은 설정 키의
+  'likely 도 반응으로 보기' 를 켜면 채운 점). 띠 이름에 'direct n · likely m(흐림)'. 옵션 동작은 likely_action.
 - 폼은 store 가 읽은 자기 세션 기록만 받는다(store 는 다른 세션 파일을 디스크에서 읽지 않는다).
 
 영상이 덮는 범위 (08 D-10 3, app.core.timecode.media_coverage)
@@ -68,6 +70,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialo
 
 from .. import jsonl, media
 from .. import project as project_mod
+from ..core import engine_grades as eg
 from ..core import phase as ph
 from ..core import rules
 from ..core import timecode as tc
@@ -94,8 +97,10 @@ PRIMARY_TRACK = "primary"         # 분석 세션의 잠긴 1차 라벨 트랙 (
 OWN_MARK_TEXT = {"direct": "✓ 직접", "likely": "✓ 높음", "related_only": "✓ 관련", "unclear": "✓ 불명확",
                  "unconfirmed": "✓ 미확인"}
 RELABEL_KINDS = ("relabel_same", "relabel_second")
-# 엔진 등급 → timeline.MARK_STYLES 의 종류 (강한 판정은 채운 표시, 약한 판정은 속이 빈 표시)
+# 엔진 등급 → timeline.MARK_STYLES 의 종류 (강한 판정은 채운 표시, 약한 판정은 속이 빈 표시).
+# likely 는 'likely 도 반응으로 보기' 를 켰을 때만 이 표의 'engine', 끄면(기본) ENGINE_DIM_KIND (08 D-31 1, engine_mark_kind)
 ENGINE_MARK_KIND = {"direct": "engine", "likely": "engine", "related_only": "engine_weak", "unclear": "engine_weak"}
+ENGINE_DIM_KIND = "engine_dim"    # 흐린 엔진 likely — 속 빈 회색 점 (timeline.MARK_STYLES)
 LINK_MAX_BYTES = 64 * 1024 * 1024
 ENGINE_ITEM = "engine_results"    # app.core.visibility.ENGINE_RESULTS (엔진 판정, 분석 모드). 봉인 AI 결과(ai_results)와 다르다
 # 작업대가 들고 있는 현재 유효 라벨 종류(타임라인·폼에 넘긴다). retract 는 대상을 지운다.
@@ -244,6 +249,14 @@ def engine_markers(obj: dict) -> list[tuple[int, str]]:
         out.append((t, str(r.get("grade") or "graded")))
     out.sort()
     return out
+
+
+def engine_mark_kind(grade, *, include_likely: bool) -> str:
+    """엔진 등급 → 엔진 띠 표시 종류 (08 D-31 1, 규칙은 app.core.engine_grades): direct = 채운 점, likely = 옵션을
+    켜면 채운 점·끄면(기본) 흐린 속 빈 회색 점(ENGINE_DIM_KIND), 관련성만·불명확·모르는 값 = 속 빈 점."""
+    if eg.is_dimmed(grade, include_likely=include_likely):
+        return ENGINE_DIM_KIND
+    return ENGINE_MARK_KIND.get(grade, "engine_weak")
 
 
 def analysis_view_allowed(session_kind, phase) -> bool:
@@ -1236,6 +1249,17 @@ class Workbench(QWidget):
         self.analysis_action.setCheckable(True)
         self.analysis_action.toggled.connect(self.set_analysis_view)
         self.analysis_action.setVisible(analysis_view_allowed(self.session_kind, self.phase))
+        # 엔진 띠의 likely 보기 (08 D-31 1): 나란히 보기·방송 요약과 같은 설정 키. 메뉴에 붙이는 것은 메인 창 몫이고,
+        # 어느 화면에서 바꾸든 _on_likely_setting 으로 띠를 다시 그린다
+        self._engine_items: list[tuple[int, str]] | None = None     # 마지막으로 읽은 엔진 반응 [(ms, 등급)]
+        self._include_likely: bool | None = None                    # None = 아직 설정을 읽지 않음
+        self.engine_counts_text = ""                                # 엔진 띠 이름 '엔진 · direct n · likely m(흐림)'
+        self.likely_action = QAction(tr(eg.OPTION_LABEL), self)
+        self.likely_action.setCheckable(True)
+        self.likely_action.setToolTip(tr(eg.OPTION_TIP))
+        self.likely_action.toggled.connect(self._on_likely_action)
+        self.likely_action.setVisible(analysis_view_allowed(self.session_kind, self.phase))
+        eg.subscribe(self._on_likely_setting)
 
         self._install_shortcuts()
         self._refresh_notes()
@@ -1404,6 +1428,7 @@ class Workbench(QWidget):
         self._link_path = find_link_file(proj.paths.derived_dir)
         self.analysis_action.setEnabled(self._link_path is not None)
         self.analysis_action.setToolTip("" if self._link_path else tr("derived\\link-*.json 이 없습니다"))
+        self.likely_action.setEnabled(self._link_path is not None)
 
         if self.session is not None:
             self._open_store(outcome, proj, sync)
@@ -3704,6 +3729,8 @@ class Workbench(QWidget):
     def set_analysis_view(self, on: bool) -> None:
         if not on:
             self.timeline.clear_markers(ENGINE_TRACK)
+            self._engine_items = None
+            self.engine_counts_text = ""
             return
         if not analysis_view_allowed(self.session_kind, self.phase):
             self.analysis_action.setChecked(False)
@@ -3723,8 +3750,62 @@ class Workbench(QWidget):
             self._note(tr("엔진 결과를 읽지 못했습니다: {0}").format(err[:200]))
             return
         if self.analysis_action.isChecked() and analysis_view_allowed(self.session_kind, self.phase):
-            self.timeline.set_markers(ENGINE_TRACK, [(t, ENGINE_MARK_KIND.get(g, "engine_weak")) for t, g in items])
+            self._engine_items = list(items)
+            text = self._draw_engine()
+            self._say(tr("분석 보기: {0}").format(text))
             LOG.info("분석 보기: 엔진 반응 %d개", len(items))
+
+    # ---- 엔진 띠의 likely 보기 (08 D-31 1, 규칙은 app.core.engine_grades)
+    def include_likely(self) -> bool:
+        """'likely 도 반응으로 보기' (기본 꺼짐). 처음 부를 때 settings(메인 창의 settings.ini)에서 읽는다."""
+        if self._include_likely is None:
+            self._include_likely = eg.read_include_likely(eg.find_settings(self))
+            self._sync_likely_action()
+        return self._include_likely
+
+    def set_include_likely(self, on: bool, *, save: bool = True) -> bool:
+        """옵션을 바꾼다. save 면 settings 에 남기고 열린 다른 화면(나란히 보기·방송 요약)에 알린다. 엔진 띠가 그려져
+        있으면 다시 그린다(파일을 다시 읽지 않음). 바뀌었으면 True."""
+        on = bool(on)
+        changed = on != self.include_likely()
+        self._include_likely = on
+        self._sync_likely_action()
+        if not changed:
+            return False
+        if save:
+            eg.write_include_likely(eg.find_settings(self), on, source=self)
+        if self._engine_items is not None and self.analysis_action.isChecked():
+            self._say(tr("분석 보기: {0}").format(self._draw_engine()))
+        return True
+
+    def _sync_likely_action(self) -> None:
+        if self.likely_action.isChecked() != bool(self._include_likely):
+            self.likely_action.blockSignals(True)
+            self.likely_action.setChecked(bool(self._include_likely))
+            self.likely_action.blockSignals(False)
+
+    def _on_likely_action(self, checked: bool) -> None:
+        self.set_include_likely(bool(checked))
+
+    def _on_likely_setting(self, on: bool) -> None:
+        """다른 화면에서 옵션을 바꿨다(engine_grades.notify). 닫힌 작업대는 아무것도 하지 않는다."""
+        if self._closed:
+            return
+        self.set_include_likely(on, save=False)
+
+    def _draw_engine(self) -> str:
+        """읽어 둔 엔진 반응으로 띠를 그린다: direct = 채운 점, likely = 옵션에 따라 채운 점·흐린 속 빈 회색 점,
+        관련성만·불명확 = 속 빈 점. 띠 이름에 'direct n · likely m(흐림)' (둘 다 늘 보인다). 그 글을 돌려준다."""
+        items = self._engine_items or []
+        inc = self.include_likely()
+        self.timeline.set_markers(ENGINE_TRACK, [(t, engine_mark_kind(g, include_likely=inc)) for t, g in items])
+        c = eg.count_grades(g for _t, g in items)
+        text = tr("엔진 · {0}").format(tr(eg.count_text(c[eg.DIRECT], c[eg.LIKELY], include_likely=inc)))
+        label = getattr(self.timeline, "set_track_label", None)       # 진짜 Timeline 만(02 3-3 계약 밖의 덤)
+        if callable(label):
+            label(ENGINE_TRACK, text)
+        self.engine_counts_text = text
+        return text
 
     # ------------------------------------------------------------ 상태 · 띠
     def _note(self, line: str) -> None:
