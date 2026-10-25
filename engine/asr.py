@@ -389,6 +389,16 @@ def transcribe(wav_path: str, model: str = DEFAULT_MODEL, device: str = "cuda", 
     }
 
 
+def mark_asr_start(result: dict, asr_start_ms: int) -> dict:
+    """asr.json dict 에 '이 음성이 영상 파일의 몇 ms 부터인가' 를 적는다: audio.asr_start_ms (08 D-34).
+    뜻은 engine link 등의 --asr-start-ms 와 같다(영상 파일 시각 = asr 시각 + 이 값, 보정 전). 읽는 쪽은 이 값을 쓰고,
+    다른 --asr-start-ms 를 주면 거부한다(engine.transcript_words.resolve_asr_start). 0 이상 정수만."""
+    if not isinstance(asr_start_ms, int) or isinstance(asr_start_ms, bool) or asr_start_ms < 0:
+        raise ValueError("asr_start_ms 는 0 이상 정수")
+    result.setdefault("audio", {})["asr_start_ms"] = int(asr_start_ms)
+    return result
+
+
 def write_asr_json(result: dict, out_path: str) -> None:
     """임시 파일에 쓰고 os.replace 로 바꾼다 (중간에 끊겨도 반쪽 파일이 남지 않게). NaN 은 거부."""
     d = os.path.dirname(os.path.abspath(out_path))

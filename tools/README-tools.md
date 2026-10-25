@@ -11,7 +11,7 @@
 | `adopt_project.py` | project.json 이 없는 기존 채팅 수집 폴더를, 그 솔트를 그대로 쓰는 앱 프로젝트로 들인다. |
 | `fetch_chat.py` | 치지직 VOD 채팅을 프로젝트 폴더에 받는다 (`app.chzzk_chat.collect` 의 명령줄 껍데기). |
 | `chat_window.py` | 어느 시각 주변의 채팅을 화면에 보여 주는 로컬 도우미 (손라벨·앵커 찾기용). |
-| `find_anchors.py` | 시각 보정 앵커 '후보' 를 제안한다. 사람이 다시보기에서 확인한 것만 `calibrate.py` 에 넣는다. `--json` 은 표·본문 없이 후보 수 같은 숫자만 JSON 한 줄, `--list` 를 더하면 후보 rows(chat_id·시각·근거 코드·점수, 본문 없음). `--locate`(`--asr` 필요)는 영상이 VOD 의 어디인지 모를 때 먼저 자리를 찾는다(08 D-32 — 13시간·채팅 2만6천 건에서 약 1초). |
+| `find_anchors.py` | 시각 보정 앵커 '후보' 를 제안한다. 사람이 다시보기에서 확인한 것만 `calibrate.py` 에 넣는다. `--json` 은 표·본문 없이 후보 수 같은 숫자만 JSON 한 줄, `--list` 를 더하면 후보 rows(chat_id·시각·근거 코드·점수, 본문 없음). `--locate`(`--asr` 필요)는 영상이 VOD 의 어디인지 모를 때 먼저 자리를 찾는다(08 D-32 — 13시간·채팅 2만6천 건에서 약 1초). asr 시작은 asr.json 이 기억하는 값(아래 '시각 입력 두 가지', 08 D-34). |
 | `calibrate.py` | 영상 시각 = 채팅 시각 앵커로 시각 보정을 기록한다(차이 중앙값 그대로 — 읽기 지연을 빼지 않는다). 앱의 '파일 → 시간 정렬(보정)…' 은 앵커를 들어 확정하고 읽기 지연 6.7초를 뺀다(08 D-32). |
 | `extract_audio.py` | 영상에서 STT 용 16kHz 모노 WAV 를 뽑고 걸린 시간을 출력한다. |
 | `export_labels.py` | 프로젝트의 현재 유효 라벨을 zip 하나로 내보낸다 (`app.export.export_labels`). |
@@ -19,9 +19,9 @@
 | `gen_e2e.py` | **H-3 생성 끝에서 끝까지 스모크(가짜 LLM, 사람 클릭 0)**: 원 프로젝트(기본 개발용 `p15767532`, 읽기만)의 필요한 파일만 `%LOCALAPPDATA%\ChatCoachSmoke\gen-e2e-*` 사본으로 → `engine generate --fake`(고정 합성 응답) · `engine generate --model … --url http://127.0.0.1:<가짜 서버>`(`engine.llm_local` → `engine.llm_fake.FakeLLMServer`, 받은 자료 낱말로 합성 줄) → `make_scenario --generated` → 스트리머 훈련 화면에 섞여 흐름(가·생 표시) → 시나리오·생성 후보·보낸 기록·보낸 요청·훈련 기록 바이트 검사(실제 닉네임·viewer_id·user_id_hash·가림 닉네임·본문 0건). 소켓 연결은 가짜 서버 포트만(그 밖은 막고 셈). 시범(pilot-*·시범 기록)은 아무것도 열기 전에 종료 2. 끝나면 `shutil.rmtree`. 출력은 숫자·코드만. 종료 0 = 검사 모두 통과. |
 | `discern_report.py` | **H-5 가려내기 관문(대표값)**: `--projects-root <…\projects>`(또는 `--project` 여러 번) `[--labeler L01] [--sessions]` — 프로젝트(= 방송)마다의 `discern\*.jsonl` 을 다시 읽어(정답은 판정 키 → start 줄이 가리킨 시나리오 파일의 source, 바이트 해시가 다르면 그 세션을 뺌) `app.core.discern.evaluate_sessions` 로 혼동표·κ·탐지율·관문(pass·fail·low_n·unknown)을 낸다. 화면은 세션 하나라 늘 '표본 적음' 이라 통과·실패는 이 도구로만 나온다. 다시 봄 세션은 뺀다. 시범(`pilot-*`)은 기본으로 폴더를 열지 않고 건너뜀(`--allow-locked-pilot` 이면 모두 잠긴 것만). 읽기만, 출력은 JSON 한 줄(숫자·ID·코드만). 종료 0 계산함 · 1 입력 오류. |
 | `viewer_score_calib.py` | 시청자 훈련 채점 보정 자료: 반응받은 채팅과 같은 구간 다른 채팅의 세 축 분포·lift·정밀도·문턱 후보(기본값은 바꾸지 않음). 손라벨 길과 시범 최종 세트 길(`--final-set`, D-22). 출력은 숫자·코드만. |
-| `rehearse_new_broadcast.py` | **'파일 → 새 방송…' 한 바퀴 리허설**(08 D-31 4): 실제 MainWindow 를 임시 데이터 폴더(`%LOCALAPPDATA%\ChatCoachSmoke\rehearsal-<시각>`)로 띄워 메뉴 → 대화상자(번호 글자 입력·[고르기…]) → [시작] → 분석 화면까지 몰고 클릭 수·칸 수·단계별 초·막힌 곳을 JSON 한 줄로. 실제 채팅 받기·엔진 venv 를 쓴다. 끝에 데이터 폴더를 `shutil.rmtree`(휴지통 금지). `--limit-min N` = 처음 N분만 전사. |
+| `rehearse_new_broadcast.py` | **'파일 → 새 방송…' 한 바퀴 리허설**(08 D-31 4): 실제 MainWindow 를 임시 데이터 폴더(`%LOCALAPPDATA%\ChatCoachSmoke\rehearsal-<시각>`)로 띄워 메뉴 → 대화상자(번호 글자 입력·[고르기…]) → [시작] → 분석 화면까지 몰고 클릭 수·칸 수·단계별 초·막힌 곳을 JSON 한 줄로. 실제 채팅 받기·엔진 venv 를 쓴다. 끝에 데이터 폴더를 `shutil.rmtree`(휴지통 금지). `--limit-min N` = 처음 N분만 전사. `--range '시작-끝'` = 대화상자 '전사 범위' 칸에 글자로(08 D-34, 입력 칸 하나로 셈) — 출력 `asr_span` 에 asr 가 기억한 시작·음성 길이·도장의 시작·판정 발화의 영상 시각 범위·후보가 전사 구간 안인지. |
 
-- **앱에서는 `파일 → 새 방송…` 으로 같은 일을 한다**(08 D-31 2·3, `app/engine_run.py`): 위 `new_project`·`fetch_chat`·영상 연결·`find_anchors`(후보 수만) 다음에 엔진(엔진 venv 따로 프로세스: 음성 뽑기 → `engine asr` → (영상이 VOD 의 어디인지 모르면 `find_anchors.py --locate` 로 자동 위치 추정, 08 D-32) → `engine_to_ai.py --engine v0.3 --topics --words --vectors`)까지. 판정 도장 `derived\engine-stamp.json` 이 지금 보정과 다르면 판정만 다시 한다. 시범이 아니면 봉인 없이 그 프로젝트 `derived\`(asr.json · link-v0.3.json · asr-topic-flow.json · asr-words.json · asr-topic-vectors.json), 시범이면 `pilot_engine_run.py` 봉인 길. 명령줄은 개발·시험용이다.
+- **앱에서는 `파일 → 새 방송…` 으로 같은 일을 한다**(08 D-31 2·3, `app/engine_run.py`): 위 `new_project`·`fetch_chat`·영상 연결·`find_anchors`(후보 수만) 다음에 엔진(엔진 venv 따로 프로세스: 음성 뽑기(대화상자 '전사 범위' 칸 — 영상 파일 시각 `시작-끝`, 비우면 처음부터, 08 D-34) → `engine asr --asr-start-ms <시작>`(asr.json 이 시작을 기억) → (영상이 VOD 의 어디인지 모르면 `find_anchors.py --locate` 로 자동 위치 추정, 08 D-32) → `engine_to_ai.py --engine v0.3 --topics --words --vectors`)까지. 판정 도장 `derived\engine-stamp.json` 이 지금 보정과 다르면 판정만 다시 한다. 시범이 아니면 봉인 없이 그 프로젝트 `derived\`(asr.json · link-v0.3.json · asr-topic-flow.json · asr-words.json · asr-topic-vectors.json), 시범이면 `pilot_engine_run.py` 봉인 길. 명령줄은 개발·시험용이다.
 
 ### 가상 채팅 생성 (H-3) — `python -m engine generate` 와 LM Studio
 
@@ -61,7 +61,13 @@
 - **시각 입력 두 가지**(엔진 `link`·`topics`·`transcript-words`·`topic-vectors`, `engine_to_ai.py`, `ai_seal.py attach-pairs --from-engine`
   모두 같다. 뜻이 달라 서로 대신 쓸 수 없다 — 2026-10-24 시범 봉인에서 `--file-start-ms` 로 대신 써 발화가 20분 밀렸다):
   - `--file-start-ms N` = **클립 파일이 VOD 의 어디서 시작하나**(project.json 보정과 짝). project.json 보정이 있으면 상쇄되어 asr 시각을 옮기지 않는다.
-  - `--asr-start-ms N` = **asr 가 영상 파일의 어디서 잘라 낸 음성인가**(`extract_audio.py --start-ms N`). 영상 파일 시각 = asr 시각 + N, 보정 전에 더한다. 기본 0.
+  - `--asr-start-ms N` = **asr 가 영상 파일의 어디서 잘라 낸 음성인가**(`extract_audio.py --start-ms N`). 영상 파일 시각 = asr 시각 + N, 보정 전에 더한다.
+  - **asr.json 이 그 값을 기억한다**(08 D-34 '시작 옮기기'): `python -m engine asr … --asr-start-ms N` 이 asr.json `audio.asr_start_ms = N`
+    을 적고, 위 읽는 명령들과 `find_anchors.py`(후보·`--locate`)는 `--asr-start-ms` 를 주지 않으면 그 값(칸이 없는 옛 파일은 0)을 쓴다.
+    주었는데 기억과 다르면 `asr_start_conflict` 로 거부한다(엔진 명령·`engine_to_ai.py` 종료 2, `find_anchors.py` 종료 1 — 두 번 더하지
+    않는다). 앱 '파일 → 새 방송…' 의 '전사 범위' 칸이 이 길을 쓴다 — 그래서 메인 창이 보정이 바뀌어 전사 낱말을 다시 만들 때
+    (`engine transcript-words --project`, asr 시작을 명령줄로 주지 않음)도 시각이 맞다. 기억이 없는 asr(시범 `sealed-work` 처럼 따로
+    뽑아 전사한 것)는 전처럼 `--asr-start-ms` 로 준다.
   - 시범처럼 VOD 전체 파일에서 20:00 부터 40분 wav 를 뽑아 전사했으면:
     `tools\engine_to_ai.py --from-project <P> --asr <sealed-work\…asr.json> --asr-start-ms 1200000 --start-ms 1200000 --end-ms 3600000 …`
   - 시범 봉인은 손으로 치지 않고 `pilot_engine_run.py` 한 줄로 한다(뽑기 시작 = `--asr-start-ms` = `--start-ms` 를 도구가 맞춘다, D-28 5).

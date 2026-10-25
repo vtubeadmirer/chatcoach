@@ -39,7 +39,9 @@
 
 시각 입력 두 가지(뜻이 다르다, 2026-10-24 시범 봉인의 함정)
   --asr-start-ms N   asr.json 이 **영상 파일의 N ms 부터 잘라 낸 음성**이다(extract_audio --start-ms N). 영상 파일 시각 =
-                     asr 시각 + N 으로 보정 전에 옮긴다. 판정·주제 흐름·전사 낱말·벡터 모두 같은 값을 쓴다. 기본 0.
+                     asr 시각 + N 으로 보정 전에 옮긴다. 판정·주제 흐름·전사 낱말·벡터 모두 같은 값을 쓴다. 주지 않으면
+                     asr.json 이 기억하는 값(audio.asr_start_ms — engine asr --asr-start-ms, 08 D-34, 없으면 0). 주었는데
+                     그 기억과 다르면 asr_start_conflict(종료 2) — 두 번 더하지 않는다.
   --file-start-ms N  **클립 파일이 VOD 의 N ms 에서 시작한다**(project.json 보정과 짝). project.json 보정이 있으면 되돌려
                      넣어 상쇄되므로 asr 시각을 옮기지 않는다.
   --file-start-ms 를 주고(project.json 보정이 있을 때) --asr-start-ms 가 0 인데 asr 음성 길이가 영상 길이(project.json
@@ -167,9 +169,22 @@ def _inside_pilot(path: str | None) -> bool:
     return any(p.lower().startswith("pilot-") for p in parts)
 
 
-def asr_start_of(ns) -> int:
-    """ns.asr_start_ms(없으면 0). 판정·주제 흐름·전사 낱말·벡터가 모두 이 값을 쓴다."""
-    return getattr(ns, "asr_start_ms", None) or 0
+def asr_start_of(ns) -> int | None:
+    """ns.asr_start_ms(주지 않았으면 None — 엔진이 asr.json 이 기억하는 값, 없으면 0 을 쓴다). 판정·주제 흐름·전사 낱말·벡터가
+    모두 이 값을 쓴다."""
+    v = getattr(ns, "asr_start_ms", None)
+    return None if v is None else v
+
+
+def _asr_start_conflict() -> type:
+    """engine.transcript_words.AsrStartConflict(엔진이 없으면 잡을 것이 없는 빈 예외 — --in 길은 엔진을 쓰지 않는다)."""
+    try:
+        from engine.transcript_words import AsrStartConflict
+    except ImportError:
+        class _Never(Exception):
+            pass
+        return _Never
+    return AsrStartConflict
 
 
 def warn_asr(inp) -> int:
@@ -187,7 +202,8 @@ def _run_engine(project_dir: str, ns, topics_out: dict | None = None) -> dict:
     ns.engine: 'v0.2'(기본, 글자·시간 규칙) 또는 'v0.3'(로컬 문장 임베딩 의미 비교, D-17 6 — 모델이 없으면 v0.2 로 물러나고
     결과의 engine.components.other 에 '물러남' 이 남는다). topics_out 에 dict 를 주면 같은 입력으로 주제 흐름(engine.topics,
     D-17 5)도 메모리로 만들어 topics_out['doc'] 에 넣는다 — 파일을 쓰지 않는다.
-    ns.asr_start_ms(없으면 0): asr 를 영상 파일의 어느 시각부터 잘라 냈나(보정 전에 더함). asr 경고는 표준 오류에."""
+    ns.asr_start_ms(없으면 asr.json 이 기억하는 값): asr 를 영상 파일의 어느 시각부터 잘라 냈나(보정 전에 더함). asr 경고는
+    표준 오류에."""
     import time
     from datetime import datetime
     from engine import link as L
@@ -360,9 +376,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offset-ms", type=int)
     ap.add_argument("--file-start-ms", type=int,
                     help="클립 파일이 VOD 몇 ms 에서 시작하는지(project.json 보정과 짝). asr 를 잘라 낸 시작이 아니다")
-    ap.add_argument("--asr-start-ms", type=int, default=0,
+    ap.add_argument("--asr-start-ms", type=int, default=None,
                     help="--from-project 의 asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인지(extract_audio --start-ms 값). "
-                         "영상 파일 시각 = asr 시각 + 이 값(보정 전). 판정·주제 흐름·낱말·벡터 모두에 쓴다. 기본 0")
+                         "영상 파일 시각 = asr 시각 + 이 값(보정 전). 판정·주제 흐름·낱말·벡터 모두에 쓴다. 주지 않으면 "
+                         "asr.json 의 audio.asr_start_ms(없으면 0), 주었는데 그 값과 다르면 거부(asr_start_conflict)")
     ap.add_argument("--no-identities", action="store_true")
     ap.add_argument("--asr", help="--from-project 의 asr.json 경로(기본 <project>\\derived\\asr.json). 시범은 프로젝트 밖 "
                                   "작업 폴더(chatcoach-data\\sealed-work)의 것을 준다(D-15 8)")
@@ -393,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
     if ns.vectors and not ns.from_project:
         print(json.dumps({"error": "args", "detail": "--vectors 는 --from-project 와 함께 씁니다"}, ensure_ascii=False))
         return 2
-    if ns.asr_start_ms < 0 or (ns.asr_start_ms and not ns.from_project):
+    if ns.asr_start_ms is not None and (ns.asr_start_ms < 0 or (ns.asr_start_ms and not ns.from_project)):
         print(json.dumps({"error": "args", "detail": "--asr-start-ms 는 0 이상이고 --from-project 와 함께 씁니다"},
                          ensure_ascii=False))
         return 2
@@ -461,6 +478,9 @@ def main(argv: list[str] | None = None) -> int:
     except (air.AiResultError, ConvertError) as e:
         print(json.dumps({"error": type(e).__name__, "detail": str(e)[:300]}, ensure_ascii=False))
         return 1
+    except _asr_start_conflict():
+        print(json.dumps({"error": "asr_start_conflict"}, ensure_ascii=False))
+        return 2
     except (OSError, ValueError, KeyError) as e:
         print(json.dumps({"error": type(e).__name__}, ensure_ascii=False))
         return 2

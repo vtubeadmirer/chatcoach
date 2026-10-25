@@ -426,10 +426,12 @@ def build_doc(part: Mapping, *, cfg: TopicConfig, run_id: str, created_at: str, 
 # ── 입력 · 출력 ──────────────────────────────────────────────────────────
 
 def inputs_from_project(project_dir: str, *, asr_path: str | None = None, offset_ms: int | None = None,
-                        file_start_ms: int | None = None, use_identities: bool = True, asr_start_ms: int = 0):
+                        file_start_ms: int | None = None, use_identities: bool = True,
+                        asr_start_ms: int | None = None):
     """engine.link 의 읽기를 그대로 쓴다. 발화 시각은 VOD 로 바꾼다. (utts, msgs, nicknames, inp)
 
-    asr_start_ms: asr 를 영상 파일의 어느 시각부터 잘라 냈나(L.load_project 가 보정 전에 더한다)."""
+    asr_start_ms: asr 를 영상 파일의 어느 시각부터 잘라 냈나(L.load_project 가 보정 전에 더한다). None 이면 asr.json 이
+    기억하는 값(없으면 0)."""
     from . import link as L
     inp = L.load_project(project_dir, use_identities=use_identities, offset_ms=offset_ms,
                          file_start_ms=file_start_ms, asr_path=asr_path, asr_start_ms=asr_start_ms)
@@ -508,8 +510,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offset-ms", type=int)
     ap.add_argument("--file-start-ms", type=int,
                     help="클립 파일이 VOD 몇 ms 에서 시작하는지(project.json 보정과 짝). asr 를 잘라 낸 시작이 아니다")
-    ap.add_argument("--asr-start-ms", type=int, default=0,
-                    help="asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인지. 영상 파일 시각 = asr 시각 + 이 값(보정 전). 기본 0")
+    ap.add_argument("--asr-start-ms", type=int, default=None,
+                    help="asr 가 영상 파일의 몇 ms 부터 잘라 낸 음성인지. 영상 파일 시각 = asr 시각 + 이 값(보정 전). "
+                         "주지 않으면 asr.json 의 audio.asr_start_ms(없으면 0), 주었는데 그 값과 다르면 거부")
     ap.add_argument("--window-sec", type=int, default=60)
     ap.add_argument("--min-block-sec", type=int, default=180)
     ap.add_argument("--no-identities", action="store_true", help="닉네임 목록으로 키워드를 거르지 않음")
@@ -526,13 +529,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if ns.window_sec <= 0 or ns.min_block_sec < 0:
         ap.error("--window-sec 는 양수, --min-block-sec 는 0 이상")
-    if ns.asr_start_ms < 0:
+    if ns.asr_start_ms is not None and ns.asr_start_ms < 0:
         ap.error("--asr-start-ms 는 0 이상")
 
     t0 = time.perf_counter()
-    utts, msgs, nicks, inp = inputs_from_project(ns.project, asr_path=ns.asr, offset_ms=ns.offset_ms,
-                                                 file_start_ms=ns.file_start_ms,
-                                                 use_identities=not ns.no_identities, asr_start_ms=ns.asr_start_ms)
+    from .transcript_words import AsrStartConflict
+    try:
+        utts, msgs, nicks, inp = inputs_from_project(ns.project, asr_path=ns.asr, offset_ms=ns.offset_ms,
+                                                     file_start_ms=ns.file_start_ms,
+                                                     use_identities=not ns.no_identities, asr_start_ms=ns.asr_start_ms)
+    except AsrStartConflict:
+        print(json.dumps({"error": AsrStartConflict.code}, ensure_ascii=False))
+        return 2
     from . import link as L
     for w in inp.asr_meta.get("warnings") or []:
         print(L.format_asr_warning(w), file=sys.stderr)

@@ -40,7 +40,7 @@ BASIS_KO = {"text": "채팅 읽음", "name": "닉네임 호명", "name?": "닉�
 KEYS = {Qt.Key_1: calib.YES, Qt.Key_2: calib.NO, Qt.Key_3: calib.UNSURE}
 VKEYS = {0x31: calib.YES, 0x32: calib.NO, 0x33: calib.UNSURE,          # 위 숫자 줄
          0x61: calib.YES, 0x62: calib.NO, 0x63: calib.UNSURE}          # 숫자 패드
-WARN_KO = {"too_few_anchors": "맞음이 3개보다 적습니다", "spread_large": "맞음끼리 3초 넘게 어긋납니다",
+WARN_KO = {"too_few_anchors": "맞음이 3개보다 적습니다", "spread_large": "맞음끼리 15초 넘게 어긋납니다 — 틀린 맞음이 섞였는지 다시 들어 보세요",
            "outliers": "혼자 크게 어긋난 맞음이 있습니다(표에 표시) — 다시 들어 보세요"}
 
 
@@ -462,7 +462,9 @@ class CalibrationView(QWidget):
             off = calib.lag_corrected(f.offset_ms)
             tail = tr("확정하면 영상 0초 = VOD {0} (차이 중앙값에서 읽기 지연 {1:.1f}초를 뺌) · 흩어짐 {2}").format(
                 file_start_text(off), calib.READ_LAG_MS / 1000, tc.fmt_offset(f.spread_ms))
-            warns = [tr(WARN_KO.get(w, w)) for w in f.warnings]
+            # 3초 흩어짐은 읽기 지연이라 막지 않는다(calibration.ready) — 15초를 넘을 때만 알린다
+            warns = [tr(WARN_KO.get(w, w)) for w in f.warnings
+                     if w != "spread_large" or f.spread_ms > calib.READ_SPREAD_OK_MS]
             if warns:
                 tail += " · " + " · ".join(warns)
             yes = [i for i, c in enumerate(self.cands) if c.verdict == calib.YES]

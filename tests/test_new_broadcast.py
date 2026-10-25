@@ -278,6 +278,7 @@ def test_run_steps_in_order_and_derived_names(tmp_path, monkeypatch):
     with open(os.path.join(d, "engine-stamp.json"), encoding="utf-8") as f:
         stamp = json.load(f)
     assert set(stamp) == {"format", "version", "calibration_rev", "offset_ms", "media_rev", "asr_sha256", "range",
+                          "asr_start_ms",
                           "link"}
     assert (stamp["calibration_rev"], stamp["offset_ms"], stamp["media_rev"], stamp["link"]) == (0, 0, 1,
                                                                                                 "link-v0.3.json")
@@ -537,7 +538,8 @@ def test_dialog_extracts_number_and_fills_from_file_name(qapp, tmp_path):
     assert dlg.problems() == []
     dlg.btn_start.click()
     assert dlg.result() == NewBroadcastDialog.Accepted
-    assert dlg.values() == {"video_no": VNO, "video_path": os.path.normpath(video), "labeler_id": "L01"}
+    assert dlg.values() == {"video_no": VNO, "video_path": os.path.normpath(video), "labeler_id": "L01",
+                            "asr_start_ms": None, "asr_limit_ms": None}        # 전사 범위 칸을 비움(08 D-34)
     dlg.deleteLater()
 
 

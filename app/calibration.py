@@ -34,6 +34,8 @@ FULL_TOL_MS = 2000                 # 02 7-2 '길이 차 2초 넘으면 경고' �
 # 읽기 지연 시작값: 참값(클립 시작)을 아는 실제 클립 2편에서 잰 '서로 맞는 후보' 차이 중앙값 5.3초 · 8.1초의 평균(D-32 측정).
 # 두 편 모두 이 값을 빼면 참값과 ±1.4초. 편이 늘면 다시 잰다
 READ_LAG_MS = 6700
+# '맞음' 끼리 흩어짐 허용 폭: 실제 클립 2편의 진짜 읽은 장면 지연 4.1~7.5초 · 6.2~13.7초(폭 3.4 · 7.5초)를 넉넉히 덮는다(D-35)
+READ_SPREAD_OK_MS = 15_000
 AUTO_NOTE = "자동 위치 추정"        # 자동 추정 판의 note 머리(사람 확인 없음)
 UI_NOTE = "보정 확정 화면"          # 이 화면이 더한 판의 note 머리
 CANDIDATES_TOP = 20
@@ -217,8 +219,12 @@ def fit_yes(cands: Sequence[Candidate]) -> tc.OffsetFit | None:
 
 
 def ready(fit: tc.OffsetFit | None) -> bool:
-    """확정할 수 있나: 앵커 3개 이상이고 경고(흩어짐·이상치) 없음 = timecode 의 verified 조건."""
-    return fit is not None and fit.suggested_status == "verified"
+    """확정할 수 있나: '맞음' 이 3개 이상이고 맞음끼리의 흩어짐이 READ_SPREAD_OK_MS 안.
+
+    timecode 의 verified 조건(흩어짐 3초 · 이상치 없음)은 '같은 순간' 앵커용이다. 여기 앵커는 채팅을 읽은 장면이라 읽기 지연이
+    장면마다 4~14초로 퍼진다(D-32 측정 · D-35) — 그래서 흩어짐은 넓게 보고, 오프셋은 중앙값이라 혼자 어긋난 하나에 끌리지 않는다.
+    틀린 자리(분 단위로 어긋남)는 이 폭에서 걸린다."""
+    return fit is not None and fit.n >= tc.MIN_ANCHORS_VERIFIED and fit.spread_ms <= READ_SPREAD_OK_MS
 
 
 def lag_corrected(median_diff_ms: int, lag_ms: int = READ_LAG_MS) -> int:
@@ -249,7 +255,7 @@ def verified_rev_json(fit: tc.OffsetFit, cands: Sequence[Candidate], *, rev: int
     note = (f"{UI_NOTE}(D-32) · 맞음 {n[YES]} · 아님 {n[NO]} · 모름 {n[UNSURE]} · 후보 {n['candidates']} · "
             f"차이 중앙값 {fit.offset_ms}ms − 읽기 지연 {int(lag_ms)}ms · MAD={fit.mad_ms}ms 흩어짐={fit.spread_ms}ms")
     cal = tc.Calibration(offset_ms=lag_corrected(fit.offset_ms, lag_ms), anchors=anchors, rev=rev,
-                         method="single_offset", media_rev=media_rev, status=fit.suggested_status,
+                         method="single_offset", media_rev=media_rev, status="verified" if ready(fit) else "unverified",
                          residual_max_ms=fit.residual_max_ms, created_at=now_iso, created_by=by, note=note[:500])
     return tc.calibration_to_json(cal)
 

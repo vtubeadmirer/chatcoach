@@ -12,8 +12,10 @@
         닉네임은 대조에만 쓰고 화면에 찍지 않는다. 없으면 가림 닉네임 첫 글자만 보는 약한 단서)
       - 채팅 본문의 문자 bigram 이 발화에 많이 들어 있는 것 (채팅을 소리 내 읽은 장면)
     을 점수로 매겨 (발화 시각, 채팅 시각, 차이) 표를 찍는다. 한 채팅·한 발화는 한 번만 쓴다.
-    asr.json 의 시각은 wav 0초 기준이다. wav 를 영상 파일 중간부터 뽑았으면 --asr-start-ms 로
-    그 시작(영상 파일 시각, ms)을 준다. 영상 파일 자체가 VOD 일부(클립)이면 --file-start-ms.
+    asr.json 의 시각은 wav 0초 기준이다. wav 를 영상 파일 중간부터 뽑았으면 그 시작(영상 파일 시각, ms)을 더한다:
+    asr.json 이 기억하면(audio.asr_start_ms — engine asr --asr-start-ms, 08 D-34) 그 값, 없으면 --asr-start-ms(기본 0).
+    둘이 다르면 asr_start_conflict 로 멈춘다(engine.transcript_words.resolve_asr_start 와 같은 규칙).
+    영상 파일 자체가 VOD 일부(클립)이면 --file-start-ms.
     차이 = 영상 시각 − (채팅 시각 − file_start) = calibrate 가 계산할 오프셋과 같은 축.
 (b) --asr 가 없으면: '질문형이고 짧은' 채팅을 시간대별로 고르게 뽑는다. 다시보기에서 그 채팅 시각 근처를
     보며 스트리머가 읽거나 답하는지 사람이 확인할 목록이다. 영상 시각 칸은 사람이 채운다.
@@ -59,6 +61,7 @@ for _p in (ROOT, TOOLS):
 
 from app.core import timecode as tc  # noqa: E402
 from engine import features as F  # noqa: E402
+from engine.transcript_words import AsrStartConflict, recorded_asr_start, resolve_asr_start  # noqa: E402
 import chat_window as cw  # noqa: E402
 
 DISCLAIMER = ("※ 후보일 뿐이다. 확정은 사람이 한다: 다시보기에서 그 장면을 직접 듣고 "
@@ -114,10 +117,16 @@ class Cand:
 # ── 읽기 ───────────────────────────────────────────────────────────────────
 
 def load_asr(path: str) -> list[Utt]:
+    return load_asr_doc(path)[0]
+
+
+def load_asr_doc(path: str) -> tuple[list[Utt], int | None]:
+    """asr.json → (발화 목록(asr 시각 그대로), 기억한 asr_start_ms 또는 None — audio.asr_start_ms)."""
     with open(path, "r", encoding="utf-8-sig") as f:
         d = json.load(f)
     if not isinstance(d, dict) or d.get("format") != "chatcoach.asr":
         raise ValueError("chatcoach.asr 형식의 asr.json 이 아니다")
+    rec = recorded_asr_start(d)
     out = []
     for i, s in enumerate(d.get("segments") or []):
         if not isinstance(s, dict) or not isinstance(s.get("start_ms"), int):
@@ -131,7 +140,7 @@ def load_asr(path: str) -> list[Utt]:
         end = end if isinstance(end, int) and not isinstance(end, bool) and end >= s["start_ms"] else None
         out.append(Utt(int(s.get("id", i)), int(s["start_ms"]), str(s.get("text") or ""), name_ms, end))
     out.sort(key=lambda u: (u.start_ms, u.seg_id))
-    return out
+    return out, rec
 
 
 def text_chats(records: list[dict], t_from: int | None = None, t_to: int | None = None) -> list[dict]:
@@ -439,7 +448,7 @@ def print_question_table(rows: list[tuple[float, dict]], vno: dict, *, show_text
         print(line)
 
 
-def candidate_counts(project: str, *, asr: str | None = None, top: int = 20, asr_start_ms: int = 0,
+def candidate_counts(project: str, *, asr: str | None = None, top: int = 20, asr_start_ms: int | None = None,
                      file_start_ms: int = 0, lag_before_ms: int = 120_000, lag_after_ms: int = 30_000,
                      t_from: int | None = None, t_to: int | None = None, use_identities: bool = True,
                      locate: bool = False, rows: bool = False) -> dict:
@@ -447,7 +456,8 @@ def candidate_counts(project: str, *, asr: str | None = None, top: int = 20, asr
 
     {"mode": "asr"|"question", "chats": text 채팅 수, "utterances": 발화 수(asr 일 때), "candidates": 후보 수,
      "consistent": 차이 중앙값 ±3초 안 후보 수(asr 일 때), "median_diff_ms": 그 중앙값(asr 일 때, file_start_ms 축),
-     "file_start_ms": 그 축의 클립 시작, "warnings": 읽기 경고 수, "elapsed_s"}.
+     "file_start_ms": 그 축의 클립 시작, "asr_start_ms": 더한 asr 시작(asr 일 때), "warnings": 읽기 경고 수, "elapsed_s"}.
+    asr_start_ms 가 None 이면 asr.json 이 기억하는 값(없으면 0), 주었는데 기억과 다르면 AsrStartConflict(ValueError).
     locate=True(asr 필요)면 "located": Located.doc() 또는 None(자리를 못 찾음 — 후보 0), 2단계는 그 file_start_ms 로.
     rows=True 면 "rows": candidate_rows(…)(chat_id · 시각 · 근거 코드 · 점수 — D-32 화면용).
     채팅 파일이 없으면 FileNotFoundError, asr 를 읽지 못하면 ValueError·OSError, locate 인데 asr 가 없으면 ValueError."""
@@ -459,7 +469,9 @@ def candidate_counts(project: str, *, asr: str | None = None, top: int = 20, asr
     chats = text_chats(records, t_from, t_to)
     out: dict = {"mode": "asr" if asr else "question", "chats": len(chats), "warnings": len(warns)}
     if asr:
-        utts = load_asr(asr)
+        utts, rec = load_asr_doc(asr)
+        asr_start_ms = resolve_asr_start(asr_start_ms, rec)
+        out["asr_start_ms"] = asr_start_ms
         fs = file_start_ms
         if locate:
             loc = locate_clip(chats, utts, asr_start_ms=asr_start_ms)
@@ -496,7 +508,9 @@ def main(argv=None) -> int:
     ap.add_argument("--project", required=True, help="프로젝트 폴더")
     ap.add_argument("--asr", help="engine asr 결과 asr.json. 없으면 질문형 채팅 목록을 낸다")
     ap.add_argument("--top", type=int, default=20, help="후보 개수 (기본 20)")
-    ap.add_argument("--asr-start-ms", type=int, default=0, help="asr wav 0초의 영상 파일 시각(ms). wav 를 중간부터 뽑았을 때")
+    ap.add_argument("--asr-start-ms", type=int, default=None,
+                    help="asr wav 0초의 영상 파일 시각(ms). wav 를 중간부터 뽑았을 때. 주지 않으면 asr.json 의 "
+                         "audio.asr_start_ms(없으면 0), 주었는데 그 값과 다르면 멈춤(asr_start_conflict)")
     ap.add_argument("--file-start-ms", type=int, default=0, help="영상 파일 0초의 VOD 시각(ms). 클립 파일일 때")
     ap.add_argument("--lag-before", type=float, default=120.0, help="(a) 발화보다 몇 초 앞 채팅까지 볼지 (기본 120)")
     ap.add_argument("--lag-after", type=float, default=30.0, help="(a) 발화보다 몇 초 뒤 채팅까지 볼지 (기본 30)")
@@ -521,7 +535,7 @@ def main(argv=None) -> int:
 
     if a.top <= 0:
         return bad("오류: --top 은 1 이상", "top")
-    if a.asr_start_ms < 0 or a.file_start_ms < 0 or a.lag_before < 0 or a.lag_after < 0:
+    if (a.asr_start_ms or 0) < 0 or a.file_start_ms < 0 or a.lag_before < 0 or a.lag_after < 0:
         return bad("오류: 시작 시각·창은 0 이상", "negative")
     t_from = cw.parse_at(a.t_from) if a.t_from else None
     t_to = cw.parse_at(a.t_to) if a.t_to else None
@@ -540,6 +554,8 @@ def main(argv=None) -> int:
                                    use_identities=not a.no_identities, locate=a.locate, rows=a.list)
         except FileNotFoundError:
             return bad("", "messages_missing")
+        except AsrStartConflict:
+            return bad("", AsrStartConflict.code)
         except (OSError, ValueError):
             return bad("", "asr_unreadable")
         print(json.dumps(doc, ensure_ascii=False))
@@ -562,7 +578,12 @@ def main(argv=None) -> int:
 
     if a.asr:
         try:
-            utts = load_asr(a.asr)
+            utts, rec = load_asr_doc(a.asr)
+            a.asr_start_ms = resolve_asr_start(a.asr_start_ms, rec)
+        except AsrStartConflict:
+            print("오류: --asr-start-ms 가 asr.json 이 기억하는 asr 시작(audio.asr_start_ms)과 다르다 — 빼고 다시 하라",
+                  file=sys.stderr)
+            return 1
         except (OSError, ValueError) as e:
             print(f"오류: asr.json 을 읽지 못했다: {e}", file=sys.stderr)
             return 1

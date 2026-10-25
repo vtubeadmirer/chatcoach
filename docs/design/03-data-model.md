@@ -741,6 +741,7 @@ flowchart LR
 
 - `--file-start-ms N` — 클립 파일이 VOD 의 어디서 시작하나(project.json 보정과 짝). 보정이 있으면 상쇄되어 asr 시각을 옮기지 않는다.
 - `--asr-start-ms N` — asr 가 영상 파일의 어디서 잘라 낸 음성인가(`extract_audio --start-ms N`). 영상 파일 시각 = asr 시각 + N(보정 전). 판정·주제 흐름·전사 낱말·벡터가 모두 같은 값을 쓴다. 판정 v2 초안은 `calibration.asr_start_ms`, 전사 낱말·벡터는 `stats.asr_start_ms` 에 남는다(두 문서의 `calibration` 칸은 키가 고정이라 넣지 않음). 봉인하는 ai-result 1판에는 `calibration` 칸이 없어 남지 않는다.
+- (08 D-34) **asr.json 의 `audio.asr_start_ms`** — 위 `--asr-start-ms` 와 같은 뜻을 파일이 기억한다(`engine asr --asr-start-ms N` 이 적음, 0 이상 정수, 칸이 없으면 옛 파일 = 0). 읽는 쪽(엔진 link·topics·transcript-words·topic-vectors, `engine_to_ai`, `ai_seal attach-pairs --from-engine`, `find_anchors`)은 명령줄 값이 없으면 이 값을 쓰고, 다른 값이 오면 `asr_start_conflict` 로 거부한다. 앱 '새 방송' 의 `derived\asr.json` 은 늘 이 칸을 가진다(처음부터 전사해도 0). 판정 도장 `derived\engine-stamp.json` 에도 `asr_start_ms` 를 남긴다(칸이 없는 D-32 도장은 0).
 
 **해제·봉인 오류 원인 코드 (`app.seal.SEAL_ERROR_CODES`, 33개)** — `SealError` 마다 `.code` 속성에 둔다. 메시지(문장)는 사람이 읽는 그대로 화면에 보이고, 도구·요약은 코드만 적는다(`ai_seal` 오류 줄의 `code`, 해제 당일 요약의 `unseal:<코드>`). 코드에는 내용·경로·ID 가 없다. 어긋나면 `app/seal.py` 의 튜플이 맞다.
 

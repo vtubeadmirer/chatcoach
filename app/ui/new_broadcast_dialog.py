@@ -5,6 +5,9 @@
   ('<제목> [<VOD번호>] <시작>-<끝>[_N].mp4')이면 번호 칸이 비었을 때 그 번호로 채운다(app.engine_run.parse_video_file_name).
   번호 칸에 다른 번호가 이미 있으면 바꾸지 않고 한 줄로 알린다.
 - 라벨러 ID 는 앱 설정(마지막 라벨러)의 것을 쓴다. 없을 때만 칸이 하나 더 보인다.
+- '전사 범위(선택)' 칸 하나(08 D-34 '시작 옮기기'): 긴 영상에서 가운데만 전사할 때 영상 파일 시각으로 '시작-끝'(예 1:20:00-2:00:00),
+  '시작' 만 쓰면 끝까지. 비우면 지금처럼 처음부터(같은 번호로 다시 할 때는 있는 전사를 그대로). 클릭은 늘지 않는다 — 쓸 때만 칸 하나.
+  읽은 범위는 힌트 줄에 보인다(app.engine_run.parse_range_text). 시범 프로젝트는 범위가 고정이라 이 칸을 쓰지 않는다.
 - [시작] 하나. 진행·결과는 메인 창(MainWindow.run_job_modal)이 보인다. 이 화면은 파일을 쓰지 않고 네트워크도 쓰지 않는다.
 시험·리허설은 choose_file(파일 고르기 창 대신 부를 함수)을 바꿔 끼운다.
 """
@@ -58,12 +61,16 @@ class NewBroadcastDialog(QDialog):
         grid.addWidget(self.ed_video, 1, 1)
         self.btn_pick = QPushButton(tr("고르기…"))
         grid.addWidget(self.btn_pick, 1, 2)
+        grid.addWidget(QLabel(tr("전사 범위(선택)")), 2, 0)
+        self.ed_range = QLineEdit()
+        self.ed_range.setPlaceholderText(tr("비우면 처음부터 · 가운데만: 1:20:00-2:00:00 (영상 파일 시각, 시작만 쓰면 끝까지)"))
+        grid.addWidget(self.ed_range, 2, 1, 1, 2)
         self.ed_labeler = None
         if self.fixed_labeler is None:
-            grid.addWidget(QLabel(tr("라벨러 ID")), 2, 0)
+            grid.addWidget(QLabel(tr("라벨러 ID")), 3, 0)
             self.ed_labeler = QLineEdit()
             self.ed_labeler.setPlaceholderText(tr("예: L01 (이 PC 에 처음 한 번만)"))
-            grid.addWidget(self.ed_labeler, 2, 1, 1, 2)
+            grid.addWidget(self.ed_labeler, 3, 1, 1, 2)
         grid.setColumnStretch(1, 1)
         lay.addLayout(grid)
         self.hint = QLabel("")
@@ -82,6 +89,7 @@ class NewBroadcastDialog(QDialog):
         self.ed_vod.editingFinished.connect(self._normalize_vod)
         self.ed_video.textChanged.connect(self._refresh)
         self.ed_video.editingFinished.connect(lambda: self.set_video(self.ed_video.text()))
+        self.ed_range.textChanged.connect(self._refresh)
         if self.ed_labeler is not None:
             self.ed_labeler.textChanged.connect(self._refresh)
         self.btn_pick.clicked.connect(self.pick)
@@ -109,6 +117,10 @@ class NewBroadcastDialog(QDialog):
         t = (self.ed_labeler.text() if self.ed_labeler is not None else "").strip().upper()
         return t or None
 
+    def asr_range(self) -> tuple[int, int | None] | None:
+        """'전사 범위' 칸 → (시작 ms, 끝 ms 또는 None). 비었으면 None. 못 읽으면 ValueError."""
+        return engine_run.parse_range_text(self.ed_range.text())
+
     def problems(self) -> list[str]:
         out = []
         if not self.video_no():
@@ -122,13 +134,23 @@ class NewBroadcastDialog(QDialog):
                 out.append(tr("영상 경로를 받을 수 없습니다: {0}").format(tr(why)))
             elif not os.path.isfile(p):
                 out.append(tr("영상 파일이 없습니다"))
+        try:
+            self.asr_range()
+        except ValueError:
+            out.append(tr("전사 범위를 읽지 못했습니다 (예: 1:20:00-2:00:00 · 끝이 시작보다 뒤)"))
         lid = self.labeler_id()
         if self.fixed_labeler is None and (not lid or not LABELER_RE.match(lid)):
             out.append(tr("라벨러 ID 를 적으세요 (예: L01 — 영문 대문자로 시작, 2~8자)"))
         return out
 
     def values(self) -> dict:
-        return {"video_no": self.video_no(), "video_path": self.video_path(), "labeler_id": self.labeler_id()}
+        """칸 값. asr_start_ms·asr_limit_ms 는 범위 칸이 비었으면 None(engine_run.range_to_request)."""
+        try:
+            a, n = engine_run.range_to_request(self.asr_range())
+        except ValueError:
+            a, n = None, None
+        return {"video_no": self.video_no(), "video_path": self.video_path(), "labeler_id": self.labeler_id(),
+                "asr_start_ms": a, "asr_limit_ms": n}
 
     # ------------------------------------------------------------ 동작
     def _normalize_vod(self) -> None:
@@ -177,6 +199,13 @@ class NewBroadcastDialog(QDialog):
             lines.append(tr("영상 파일 이름의 번호({0})와 다릅니다 — 맞는지 확인하세요").format(fno))
         elif fno and start:
             lines.append(tr("클립: 파일 0초 = VOD {0}").format(engine_run.fmt_s(start / 1000)))
+        try:
+            rng = self.asr_range()
+        except ValueError:
+            rng = None
+            lines.append(tr("전사 범위를 읽지 못했습니다"))
+        if rng is not None:
+            lines.append(tr("전사: 영상 {0}").format(engine_run.fmt_range(*rng)))
         self.hint.setText(" · ".join(lines))
 
     def _on_start(self) -> None:

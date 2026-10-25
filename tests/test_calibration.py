@@ -170,8 +170,11 @@ def test_fit_ready_and_lag():
     assert calib.lag_corrected(f.offset_ms) == f.offset_ms - calib.READ_LAG_MS
     two = _cands(n_yes=2)
     assert not calib.ready(calib.fit_yes(two))                                   # 3개 미만
-    wide = _cands(spread=(0, 300, 5_000))
-    assert not calib.ready(calib.fit_yes(wide))                                  # 흩어짐 3초 넘음
+    lagged = _cands(spread=(0, 4_000, 9_000))                                  # 읽기 지연이 장면마다 다름(D-35)
+    f2 = calib.fit_yes(lagged)
+    assert "spread_large" in f2.warnings and calib.ready(f2)                     # timecode 3초 경고는 막지 않는다
+    wide = _cands(spread=(0, 300, 20_000))
+    assert not calib.ready(calib.fit_yes(wide))                                  # 15초 넘게 흩어짐 = 틀린 맞음이 섞임
     cs[0].verdict = calib.NO
     assert calib.counts(cs) == {"candidates": 3, "yes": 2, "no": 1, "unsure": 0, "pending": 0}
 
