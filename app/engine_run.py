@@ -9,15 +9,23 @@ VOD 번호와 영상 파일 하나로 다섯 단계를 차례로 돈다. 단계�
 | chat 채팅 받기 | app.chzzk_chat.collect (tools/fetch_chat.py 가 부르는 함수, 솔트는 프로젝트의 chat\\protected\\salt.json). 받은 건수만 | chat\\messages.jsonl 이 있으면 건너뜀 |
 | media 영상 연결 | app.media.media_ref(부분 지문·ffprobe) → project.json media.current (작업대 '영상 연결' 의 '처음 연결' 과 같은 규칙). ClipSlicer 이름의 시작이 0 이 아니면(클립) 그 시작만 합친 보정 판(미확인)을 더한다 — tools/calibrate.py --file-start-ms 와 같은 저장 | 같은 파일이면 건너뜀. 다른 파일이 연결돼 있으면 멈춤(media_other — 바꾸기는 작업대에서 사유와 함께) |
 | anchors 보정 앵커 후보 | tools/find_anchors.py --json 을 따로 프로세스로(후보 수만, 파일 안 씀, 창은 활성 보정의 클립 시작 근처). 확정은 사람 | 늘 다시 센다. 실패해도 멈추지 않는다(경고 코드) |
-| engine 엔진 | 엔진 venv(<저장소>\\.venv-engine)를 따로 프로세스로: 음성 뽑기(app.analysis.extract_audio_wav, 영상 처음부터 — 전체 또는 asr_limit_ms) → python -m engine asr → (위치를 모르면 자동 위치 추정, 아래) → tools/engine_to_ai.py --engine v0.3 --topics --words --vectors --out → 도장 | derived\\ 결과가 다 있고 도장이 지금 보정·영상·전사와 같으면 건너뜀(asr.json 만 있으면 전사를 건너뜀, 도장이 다르면 판정만 다시) |
+| engine 엔진 | 엔진 venv(<저장소>\\.venv-engine)를 따로 프로세스로: 음성 뽑기(app.analysis.extract_audio_wav, 영상 처음부터 — 전체 또는 asr_limit_ms) → python -m engine asr → (위치를 모르면 자동 위치 추정, 아래) → tools/engine_to_ai.py --engine v0.3 --topics --words --vectors --start-ms --end-ms(영상이 덮는 구간, 아래) --out → 도장 | derived\\ 결과가 다 있고 도장이 지금 보정·영상·전사와 같으면 건너뜀(asr.json 만 있으면 전사를 건너뜀, 도장이 다르면 판정만 다시) |
 
 자동 위치 추정(08 D-32). 전사 뒤·판정 전에 app.calibration.media_position 이 'unknown'(보정이 만든 그대로이고, ClipSlicer 이름에
 구간이 없고, 영상 길이가 VOD 길이와 다름)이면 tools/find_anchors.py --locate 로 영상이 VOD 의 어디인지 찾는다. 서로 맞는 후보가
 LOCATE_MIN_CONSISTENT 이상이면 '자동 위치 추정' 판(미확인, 앵커 없음, 차이 중앙값 − 읽기 지연)을 더하고 판정한다 — 끝 화면 전에
 메인 창이 확인 화면을 연다(numbers.calibration = 'auto'). 못 찾으면 판정하지 않고 code 'calibration_needed'
 (numbers.calibration = 'needed' — 멈춤이 아니다. 확인 화면에서 정하고 같은 번호로 다시 돌리면 판정한다).
-도장 derived\\engine-stamp.json: 판정을 만든 보정 판·저장 오프셋·영상 판·asr.json sha256·판정 파일 이름(숫자·이름만). 판정 파일을
-옮긴 뒤 마지막에 쓴다. 없거나 다르면 판정만 다시 한다(D-32 4 — 전사 낱말은 메인 창이 따로 다시 만들 수 있어 도장으로 쓰지 않는다).
+도장 derived\\engine-stamp.json: 판정을 만든 보정 판·저장 오프셋·영상 판·asr.json sha256·판정 범위·판정 파일 이름(숫자·이름만).
+판정 파일을 옮긴 뒤 마지막에 쓴다. 없거나 다르면 판정만 다시 한다(D-32 4 — 전사 낱말은 메인 창이 따로 다시 만들 수 있어 도장으로
+쓰지 않는다). 판정 범위가 없는 옛 도장(D-33 전, VOD 전체 판정)도 다르다고 보고 한 번 다시 판정한다.
+
+판정 범위(08 D-33). engine_to_ai 에 늘 --start-ms/--end-ms 를 준다(judge_range): 영상이 덮는 VOD 구간(timecode.media_coverage —
+활성 보정 판으로 [파일 0초, 파일 끝], 전사가 처음 N 분뿐이면 그 끝까지)에서 앞만 반응 창(rules.V0_1.time_window_ms 20초)만큼
+넓힌다 — 영상 0초 앞 20초 안 채팅도 영상 첫 발화에 반응될 수 있다. '채팅에만 있던 내용'(engine.link prior_lookback 120초)·
+'이미 그 주제'(60초)는 채팅 앞의 **발화** 를 보고(전사는 범위로 자르지 않는다), 비슷한 채팅(±20초)은 범위 밖 채팅까지 본다
+(engine.link 는 채팅 전체를 쥐고 범위는 판정할 채팅만 고른다) — 그래서 앞을 더 넓히지 않는다. 뒤는 파일 끝(그 뒤 채팅은 창 안
+발화가 없어 늘 반응 미확인). 범위 밖 채팅은 판정 파일에 줄이 없다. 영상 길이를 모르면 범위 없이(VOD 전체, D-33 전처럼).
 
 엔진 결과 자리(D-31 3). 시범이 아닌 프로젝트는 봉인 없이 그 프로젝트 derived\\ 에, **화면이 읽는 이름 그대로** 둔다:
   derived\\asr.json(전사 — app.viewer_flow.ASR_REL) · derived\\link-v0.3.json(판정 — 작업대 '분석 보기' 와 세션 화면의
@@ -32,7 +40,8 @@ LOCATE_MIN_CONSISTENT 이상이면 '자동 위치 추정' 판(미확인, 앵커 
 
 시각: 음성은 늘 영상 파일 0 초부터 뽑는다(asr_start_ms 0). 그래서 derived\\asr.json 의 시각이 영상 파일 시각과 같고, 시청자 훈련의
 전사 낱말 다시 만들기(engine transcript-words, asr 시작을 받지 않음)도 맞는다. 사용자가 고르는 범위는 '처음 N 분'(asr_limit_ms,
-숨은 설정 settings.ini [new_broadcast] asr_limit_min — 리허설에서 쓴다)뿐이고, 그때 판정·주제 범위는 그 N 분이 덮는 VOD 구간.
+숨은 설정 settings.ini [new_broadcast] asr_limit_min — 리허설에서 쓴다)뿐이고, 그때 판정·주제 범위는 그 N 분이 덮는 VOD 구간
+(위 판정 범위 — 전사 음성 길이 asr.json audio.duration_ms 로 끝을 자른다).
 중간 파일(전사 wav·쓰던 asr)은 성공·실패 모두 끝에 os.remove(휴지통 아님).
 
 네트워크: 영상 정보·채팅 API(치지직 공개 API)만. 엔진 프로세스에는 HF_HUB_OFFLINE=1 을 주고, 전사 모델이 캐시에 없으면 받지 않고
@@ -58,6 +67,7 @@ from typing import Callable, Mapping, Sequence
 from . import analysis, chzzk_chat, media, paths
 from . import calibration as calib
 from . import project as project_mod
+from .core import rules
 from .core import timecode as tc
 
 LOG = logging.getLogger("chatcoach")
@@ -78,7 +88,9 @@ STAGE_NAME = "asr-link.json"             # engine_to_ai --out (보호 구역 der
 STAGE_SIDES = {"topics": TOPICS_REL, "words": WORDS_REL, "vectors": VECTORS_REL}
 STAMP_REL = ("derived", "engine-stamp.json")   # 판정을 만든 보정·영상·전사(숫자·이름만, D-32 4)
 STAMP_FORMAT = "chatcoach.engine_stamp"
+STAMP_VERSION = 2                         # 2: 판정 범위 range 를 더함(D-33)
 LOCATE_MIN_CONSISTENT = 3                 # 자동 위치 추정 판을 더할 '서로 맞는 후보' 수(timecode.MIN_ANCHORS_VERIFIED 와 같은 값)
+JUDGE_LEAD_MS = rules.V0_1.time_window_ms  # 판정 범위 앞을 넓힐 만큼 = 채팅 뒤 반응 창(guide-config time_window_sec 20초, D-33)
 
 ENGINE_VERSION_V03 = "link-v0.3"          # engine.link.ENGINE_VERSION_V03 (글자로 둔다 — 앱은 엔진을 import 하지 않는다)
 ASR_MODEL = "large-v3-turbo"
@@ -879,15 +891,32 @@ def _step_anchors(r: _Run, st: Step) -> None:
 
 
 # ---------------------------------------------------------------------------- (e) 엔진
-def _vod_range_for_limit(r: _Run, limit_ms: int) -> tuple[int, int]:
-    """영상 처음 limit_ms 가 덮는 VOD(채팅 시각) 구간 — project.json 활성 보정으로."""
-    try:
-        cal = tc.calibration_from_json((r.proj.data or {}).get("calibration")) \
-            if (r.proj.data or {}).get("calibration") else tc.Calibration()
-    except (KeyError, TypeError, ValueError):
-        cal = tc.Calibration()
-    a, b = tc.video_to_chat_ms(0, cal), tc.video_to_chat_ms(int(limit_ms), cal)
-    return max(0, min(a, b)), max(0, max(a, b))
+def judge_range(data: Mapping | None, audio_ms: int | None = None) -> tuple[int, int] | None:
+    """판정·주제·낱말·벡터 범위 [start, end) (VOD ms, 08 D-33). 순수 — project.json 과 전사 음성 길이만 본다.
+
+    영상이 덮는 VOD 구간(timecode.media_coverage — 활성 보정 판으로 [파일 0초, 파일 끝]). audio_ms(전사한 음성 길이, 영상 0초부터
+    — '처음 N 분' 이면 N 분)를 주면 끝을 파일 audio_ms 로 자른다. 앞은 JUDGE_LEAD_MS(반응 창)만큼 넓힌다(모듈 설명 '판정 범위').
+    영상 길이도 음성 길이도 모르거나 덮는 곳이 없으면 None(범위 없이 VOD 전체)."""
+    d = data if isinstance(data, Mapping) else {}
+    cov = tc.media_coverage(d.get("media"), d.get("calibration"))
+    if isinstance(audio_ms, int) and not isinstance(audio_ms, bool) and audio_ms > 0 and cov != []:
+        try:
+            cal = tc.calibration_from_json(d["calibration"]) if d.get("calibration") else tc.Calibration()
+        except (KeyError, TypeError, ValueError):
+            cal = tc.Calibration()                  # media_coverage 와 같은 물러남(오프셋 0)
+        a, b = tc.video_to_chat_ms(0, cal), tc.video_to_chat_ms(audio_ms, cal)
+        lo, hi = max(0, min(a, b)), max(a, b)
+        cov = [(lo, min(hi, cov[0][1]) if cov else hi)]
+    if not cov or cov[0][1] <= cov[0][0]:
+        return None
+    lo, hi = cov[0]
+    return max(0, lo - JUDGE_LEAD_MS), hi
+
+
+def project_judge_range(project_root: str, data: Mapping | None) -> tuple[int, int] | None:
+    """그 프로젝트의 판정 범위 — project.json 과 derived\\asr.json 의 음성 길이로(판정과 도장이 같은 값을 본다)."""
+    a = asr_summary(derived_path(project_root, ASR_REL)) or {}
+    return judge_range(data, a.get("duration_ms"))
 
 
 def _remove(paths_: Sequence[str]) -> int:
@@ -966,10 +995,10 @@ def _link(r: _Run, st: Step, py: str, models: str, e5: bool) -> str:
            "--engine", "v0.3", "--topics", "--words", "--models-dir", models]
     if e5:
         cmd.append("--vectors")
-    limit = r.req.asr_limit_ms if r.req.asr_limit_ms and r.req.asr_limit_ms > 0 else None
-    if limit:
-        a, b = _vod_range_for_limit(r, limit)
-        cmd += ["--start-ms", str(a), "--end-ms", str(b)]
+    rng = project_judge_range(r.root, r.proj.data)      # 영상(전사)이 덮는 VOD 구간, 앞은 반응 창만큼(D-33)
+    if rng:
+        cmd += ["--start-ms", str(rng[0]), "--end-ms", str(rng[1])]
+        st.numbers.update(range_start_s=round(rng[0] / 1000, 1), range_s=round((rng[1] - rng[0]) / 1000, 1))
     r.say(sub="판정·주제·낱말·벡터" if e5 else "판정·주제·낱말", frac=0.8)
     t = time.monotonic()
     p = RUN_PROCESS(cmd, cancelled=r.cancelled, tick=r.tick, timeout_s=LINK_TIMEOUT_S, env=engine_env())
@@ -1024,12 +1053,14 @@ def _sha256_path(path: str) -> str | None:
 
 
 def stamp_doc(project_root: str, data: Mapping | None, link_name: str | None) -> dict:
-    """판정을 만든 보정 판·저장 오프셋·영상 판·전사 sha256·판정 파일 이름(숫자·이름만)."""
+    """판정을 만든 보정 판·저장 오프셋·영상 판·전사 sha256·판정 범위([시작, 끝] VOD ms 또는 None)·판정 파일 이름(숫자·이름만)."""
     act = calib.active_rev((data or {}).get("calibration") if isinstance(data, Mapping) else None) or {}
     m = (data or {}).get("media") if isinstance(data, Mapping) else None
-    return {"format": STAMP_FORMAT, "version": 1, "calibration_rev": act.get("rev"), "offset_ms": act.get("offset_ms"),
-            "media_rev": (m or {}).get("media_rev") if isinstance(m, Mapping) else None,
-            "asr_sha256": _sha256_path(derived_path(project_root, ASR_REL)), "link": link_name}
+    rng = project_judge_range(project_root, data)
+    return {"format": STAMP_FORMAT, "version": STAMP_VERSION, "calibration_rev": act.get("rev"),
+            "offset_ms": act.get("offset_ms"), "media_rev": (m or {}).get("media_rev") if isinstance(m, Mapping) else None,
+            "asr_sha256": _sha256_path(derived_path(project_root, ASR_REL)),
+            "range": list(rng) if rng else None, "link": link_name}
 
 
 def write_stamp(project_root: str, data: Mapping | None, link_name: str) -> None:
@@ -1052,7 +1083,8 @@ def stamp_matches(project_root: str, data: Mapping | None) -> bool:
             not os.path.isfile(os.path.join(os.path.abspath(project_root), "derived", name)):
         return False
     now = stamp_doc(project_root, data, name)
-    return all(old.get(k) == now[k] for k in ("calibration_rev", "offset_ms", "media_rev", "asr_sha256"))
+    # 판정 범위가 없는 옛 도장(D-33 전 — VOD 전체 판정)은 old.get('range') 가 None 이라 다르다 → 한 번 다시 판정
+    return all(old.get(k) == now[k] for k in ("calibration_rev", "offset_ms", "media_rev", "asr_sha256", "range"))
 
 
 # ---------------------------------------------------------------------------- 자동 위치 추정 (D-32)
@@ -1172,6 +1204,7 @@ _STEP_FN = {"project": _step_project, "chat": _step_chat, "media": _step_media, 
 
 __all__ = ["STEPS", "STEP_KO", "Request", "Result", "Step", "ProcResult", "run", "run_process", "find_projects",
            "parse_video_file_name", "title_from_file_name", "default_projects_root", "default_engine_python",
+           "judge_range", "project_judge_range", "JUDGE_LEAD_MS",
            "default_models_dir", "engine_outputs", "find_link", "asr_summary", "grade_counts", "is_pilot",
            "ASR_REL", "TOPICS_REL", "WORDS_REL", "VECTORS_REL", "LINK_GLOB", "LINK_NAME", "STAGE_NAME", "SETUP_HINT",
            "CODE_KO", "clean_code", "FETCH_INFO", "COLLECT", "MEDIA_REF", "EXTRACT", "RUN_PROCESS"]
